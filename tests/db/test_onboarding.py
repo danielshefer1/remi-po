@@ -182,7 +182,7 @@ class TestFirstMessage:
         assert person.texts() == [welcome_text("he", "Asia/Jerusalem")]
         assert person.gowa.read != []
         assert person.agent.calls == []
-        assert await _kinds(owner_conn) == ["onboarding:welcome_zone"]
+        assert await _kinds(owner_conn) == ["onboarding:reply"]
 
     @pytest.mark.parametrize(
         ("body", "language"), [("hello", "en"), (None, "en"), ("hi שלום", "he")]
@@ -311,9 +311,9 @@ class TestZoneToConnect:
         assert link_payload(resent).nonce == first_link.nonce
         assert len(await links_of(db, tenant.id)) == 1
         assert await _kinds(person.conn) == [
-            "onboarding:welcome_zone",
+            "onboarding:reply",
             "onboarding:connect",
-            "onboarding:connect_resend",
+            "onboarding:reply",
         ]
         assert len(await messages_of(db, tenant.id)) == 3
 
@@ -387,7 +387,7 @@ class TestReRuns:
         assert tenant is not None
         assert (tenant.onboarding_step, tenant.timezone) == ("connect", "Europe/Amsterdam")
         assert len(person.gowa.sent) == 2
-        assert await _kinds(person.conn) == ["onboarding:welcome_zone", "onboarding:connect"]
+        assert await _kinds(person.conn) == ["onboarding:reply", "onboarding:connect"]
         assert len(await messages_of(db, tenant.id)) == 2
 
     async def test_a_crash_on_the_first_message_still_welcomes_once(
@@ -405,7 +405,7 @@ class TestReRuns:
 
         assert await person.run(person.last) == "onboarding"
         assert len(person.gowa.sent) == 1
-        assert await _kinds(person.conn) == ["onboarding:welcome_zone"]
+        assert await _kinds(person.conn) == ["onboarding:reply"]
         tenant = await tenant_by_phone(db, NL_PHONE)
         assert tenant is not None
         assert tenant.onboarding_step == "zone"
@@ -423,7 +423,7 @@ class TestReRuns:
         assert tenant is not None
         assert (tenant.onboarding_step, tenant.timezone) == ("connect", "Europe/Amsterdam")
         assert len(person.gowa.sent) == 2
-        assert await _kinds(person.conn) == ["onboarding:welcome_zone", "onboarding:connect"]
+        assert await _kinds(person.conn) == ["onboarding:reply", "onboarding:connect"]
         assert len(await messages_of(db, tenant.id)) == 2
 
     async def test_an_overlapping_retry_records_and_advances_once(
@@ -685,7 +685,10 @@ class TestTalkedThrough:
         assert link_payload(reply).tenant_id == tenant.id
         assert (await _kinds(person.conn))[-1] == "onboarding:reply"
 
-    @pytest.mark.parametrize("written", ["Open https://evil.example/x", "  ", "x" * 5000])
+    @pytest.mark.parametrize(
+        "written",
+        ["Open https://evil.example/x", f"Tap {LINK_PLACEHOLDER} below", "  ", "x" * 5000],
+    )
     async def test_a_url_an_empty_or_an_overlong_reply_is_dropped(
         self, person: Person, written: str
     ) -> None:
@@ -719,9 +722,14 @@ class TestTalkedThrough:
         assert person.texts()[-1] == retry_text("en", "Europe/Amsterdam")
 
     async def test_a_re_run_that_decides_differently_sends_nothing_new(
-        self, person: Person, monkeypatch: pytest.MonkeyPatch
+        self, person: Person, db: Database, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        person.llm = ScriptedLLM(said("First answer."), said("Second answer."))
+        """The re-run doesn't ask the model again: what it decided would not be what was sent."""
+        person.llm = ScriptedLLM(
+            said("First answer."),
+            said("", call("set_timezone", zone="America/New_York")),
+            said("Second answer."),
+        )
         _fail_finishing_once(monkeypatch)
         with pytest.raises(ConnectionResetError):
             await person.say("what is this?")
@@ -729,3 +737,28 @@ class TestTalkedThrough:
         assert await person.run(person.last) == "onboarding"
         assert person.texts() == [f"First answer.\n\n{AMSTERDAM_CHOICE}"]
         assert await _kinds(person.conn) == ["onboarding:reply"]
+        assert len(person.llm.calls) == 1
+        tenant = await tenant_by_phone(db, NL_PHONE)
+        assert tenant is not None
+        assert (tenant.timezone, tenant.onboarding_step) == (None, "zone")
+        assert [(m.direction, m.body) for m in await messages_of(db, tenant.id)] == [
+            ("in", "what is this?")
+        ]
+
+    @pytest.mark.parametrize("before", ["hi", "Mars", "did it work?"])
+    async def test_the_agent_turned_on_between_send_and_commit_sends_nothing_new(
+        self, person: Person, monkeypatch: pytest.MonkeyPatch, before: str
+    ) -> None:
+        """Welcome, unmatched zone and connect resend: one kind with or without the model."""
+        if before != "hi":
+            await person.say("hi")
+        if before == "did it work?":
+            await person.say("1")
+        sent = len(person.texts())
+        _fail_finishing_once(monkeypatch)
+        with pytest.raises(ConnectionResetError):
+            await person.say(before)
+        assert person.last is not None
+        person.llm = NoLLM()
+        assert await person.run(person.last) == "onboarding"
+        assert len(person.texts()) == sent + 1

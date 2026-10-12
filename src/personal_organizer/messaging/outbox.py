@@ -97,6 +97,18 @@ async def _claim(
         return row.id, row.status
 
 
+async def already_sent(db: Database, inbox_id: UUID, kind: str) -> bool:
+    """Whether an earlier attempt claimed the ``kind`` reply to ``inbox_id``: it went out, or
+    may have. A caller can then skip working out a reply :func:`send_once` would not send."""
+    async with db.system_session() as session:
+        status = await session.scalar(
+            select(ChannelOutbox.status).where(
+                ChannelOutbox.inbox_id == inbox_id, ChannelOutbox.kind == kind
+            )
+        )
+    return status is not None and status != "pending"
+
+
 async def send_once(
     db: Database,
     channel: OutboundChannel,
@@ -147,4 +159,4 @@ async def send_once(
     return "accepted"
 
 
-__all__ = ["SETTLED", "send_once"]
+__all__ = ["SETTLED", "already_sent", "send_once"]

@@ -24,16 +24,17 @@ an LLM, the three branches that send a fixed, context-free text -- the welcome, 
 message in ``zone``, and any message in ``connect`` -- send the model's answer to what was
 actually said, with the zone question or the link appended by code. The model may call
 ``set_timezone``, which then takes the confirm path, and ``set_language``. Its text is
-dropped for the fixed one if it holds ``http``, is empty, or would not fit one message. All
-of these replies, and every fallback, send under the one kind :data:`REPLY`, so a re-run
-whose model decides differently still sends nothing new. The default path ("1", a button, an
-alias, an exact city, Change) never calls the model. ``llm=None`` is the fixed conversation
-exactly; so is a model that refuses, or is down on the job's last attempt (D3).
+dropped for the fixed one if it holds ``http`` or :data:`LINK_PLACEHOLDER`, is empty, or would
+not fit one message. These three branches send under the one kind :data:`REPLY`, with the
+model or without it, and a re-run that finds that reply sent asks the model nothing: what it
+decided now need not be what went out. The default path ("1", a button, an alias, an exact
+city, Change) never calls the model. ``llm=None`` is the fixed conversation exactly; so is a
+model that refuses, or is down on the job's last attempt (D3).
 
-*shortcut: a crash between the send and the commit can lose a ``set_timezone`` the model
-decided. The next message asks again, and a link already sent keeps working, because
-connecting depends on status, not step. Store the decision with the send if that ever shows
-up in the logs.*
+*shortcut: a crash between the send and the commit loses what the model decided with that
+reply, a ``set_timezone`` say, and the reply is not recorded for the history either. The next
+message asks again, and a link already sent keeps working, because connecting depends on
+status, not step. Store the decision with the send if that ever shows up in the logs.*
 """
 
 from __future__ import annotations
@@ -55,7 +56,7 @@ from personal_organizer.messaging.inbox import InboxRow
 from personal_organizer.messaging.language import ENGLISH, HEBREW
 from personal_organizer.messaging.onboarding_prompt import onboarding_prompt
 from personal_organizer.messaging.onboarding_text import t
-from personal_organizer.messaging.outbox import send_once
+from personal_organizer.messaging.outbox import already_sent, send_once
 from personal_organizer.messaging.tenancy import TenantState, phone_of
 from personal_organizer.messaging.text import WHATSAPP_TEXT_LIMIT
 from personal_organizer.messaging.timezones import guess_zone, match_zone
@@ -64,12 +65,10 @@ from personal_organizer.settings import Settings
 
 log = structlog.get_logger(__name__)
 
-WELCOME_ZONE: Final = "onboarding:welcome_zone"
 ZONE_ASK_CITY: Final = "onboarding:zone_ask_city"
-ZONE_RETRY: Final = "onboarding:zone_retry"
 CONNECT: Final = "onboarding:connect"
-CONNECT_RESEND: Final = "onboarding:connect_resend"
-#: Every model-written reply, and its fallback, whichever branch it answers.
+#: The welcome, an unmatched zone message and the connect resend, model-written or fixed: one
+#: kind, so turning the model on or off between a send and its commit cannot send twice.
 REPLY: Final = "onboarding:reply"
 
 ZONE_CORRECT: Final = "zone:correct"
@@ -239,7 +238,8 @@ async def next_reply(
             advance = Advance(language=switched)
         said = said.strip()
         text = f"{said}\n\n{suffix}"
-        if not said or "http" in said.lower() or len(text) > WHATSAPP_TEXT_LIMIT:
+        echoed = "http" in said.lower() or LINK_PLACEHOLDER in said
+        if not said or echoed or len(text) > WHATSAPP_TEXT_LIMIT:
             log.info("onboarding.reply_dropped", inbox_id=str(row.id))
             text = suffix if zone is not None else fixed(lang)
         return Reply(REPLY, text, advance)
@@ -250,11 +250,11 @@ async def next_reply(
             url = await link()
             if llm is not None:
                 return await talk(llm, url, lambda lang: t("connect_link", lang, url=url))
-            return Reply(CONNECT_RESEND, t("connect_link", language, url=url), Advance())
+            return Reply(REPLY, t("connect_link", language, url=url), Advance())
         if tenant.first_message:
             if llm is not None:
                 return await talk(llm, None, lambda lang: welcome_text(lang, guess))
-            return Reply(WELCOME_ZONE, welcome_text(language, guess), Advance())
+            return Reply(REPLY, welcome_text(language, guess), Advance())
         if guess is not None:
             picked = resolve(zone_choice(guess, language), reply_id=row.reply_id, text=row.body)
             if picked is not None and picked.id == ZONE_CORRECT:
@@ -267,7 +267,7 @@ async def next_reply(
         log.info("onboarding.zone_unmatched", inbox_id=str(row.id), tenant_id=str(tenant.id))
         if llm is not None:
             return await talk(llm, None, lambda lang: retry_text(lang, guess))
-        return Reply(ZONE_RETRY, retry_text(language, guess), Advance())
+        return Reply(REPLY, retry_text(language, guess), Advance())
 
     reply = await decide()
     if llm is None:
@@ -302,6 +302,13 @@ async def onboarding_step(
         # BSUID as ``to`` is unconfirmed, so there is no reply, exactly as for strangers.
         log.info("onboarding.unaddressable", inbox_id=str(row.id), tenant_id=str(tenant.id))
         return Advance()
+    if await already_sent(db, row.id, REPLY):
+        # A re-run takes the branch the first run took, so this is one of the three: the
+        # model asked again could decide other than what was sent.
+        # shortcut: the sent text then isn't in the history, and what the first run decided
+        # is lost (the next message asks again); store both with the send if that bites.
+        log.info("onboarding.reply_already_sent", inbox_id=str(row.id))
+        return Advance()
     reply = await next_reply(
         db,
         row,
@@ -327,16 +334,13 @@ async def onboarding_step(
 
 __all__ = [
     "CONNECT",
-    "CONNECT_RESEND",
     "CONNECT_STEP",
     "LINK_PLACEHOLDER",
     "REPLY",
     "TOOLS",
-    "WELCOME_ZONE",
     "ZONE_ASK_CITY",
     "ZONE_CHANGE",
     "ZONE_CORRECT",
-    "ZONE_RETRY",
     "ZONE_STEP",
     "Advance",
     "Reply",
