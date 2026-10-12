@@ -279,7 +279,14 @@ class TestParsing:
             start=DINNER.start,
             end=DINNER.end,
             location="Port Said",
+            link="https://www.google.com/calendar/event?eid=abc",
         )
+
+    @pytest.mark.parametrize("link", ["javascript:alert(1)", 42, None])
+    async def test_a_link_that_is_not_a_page_is_dropped(self, link: object) -> None:
+        item = {**CREATED["response_data"], "htmlLink": link}
+        created = await connector(create_api(item)).create_event(ACCOUNT, TENANT, DINNER)
+        assert created.link is None
 
     @pytest.mark.parametrize(
         "item",

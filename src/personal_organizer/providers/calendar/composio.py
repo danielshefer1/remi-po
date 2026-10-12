@@ -127,6 +127,7 @@ def _event(item: Any, zone: tzinfo | None) -> CalendarEvent:
     title, location = item.get("summary", ""), item.get("location")
     if not isinstance(title, str) or not isinstance(location, str | None):
         raise TypeError
+    link = item.get("htmlLink")
     return CalendarEvent(
         external_id=str(item["id"]),
         title=title,
@@ -134,6 +135,8 @@ def _event(item: Any, zone: tzinfo | None) -> CalendarEvent:
         end=end,
         all_day=all_day,
         location=location or None,
+        # It goes into a reply, so only a page, never a scheme of someone's choosing.
+        link=link if isinstance(link, str) and link.startswith("https://") else None,
     )
 
 

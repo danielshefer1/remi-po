@@ -9,6 +9,7 @@ callers.
 
 ``CalendarEvent`` carries the title, the times and the location, and nothing else. Anyone can
 send an invite into your calendar, so its description and attendees never reach a prompt.
+``link`` is the provider's page for the event, for the confirmation of one just created.
 """
 
 from __future__ import annotations
@@ -34,6 +35,7 @@ class CalendarEvent:
     end: datetime
     all_day: bool = False
     location: str | None = None
+    link: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
