@@ -1,9 +1,9 @@
 """One pending write per tenant, waiting for the person's confirm (Iteration 04, D5).
 
 ``tenants.pending_action`` holds ``{id, kind, payload, expires_at}``, or ``NULL`` when
-nothing waits. A column, not a table: there is at most one, and ``tenants``' RLS policy
-already covers it. Claiming it is one ``UPDATE`` that nulls it
-(``personal_organizer.db.repositories.pending.claim``), so a retry or a double "1" runs the
+nothing waits, or ``{claimed_by}`` once it is claimed. A column, not a table: there is at most
+one, and ``tenants``' RLS policy already covers it. Claiming it is one ``UPDATE`` that clears
+it (``personal_organizer.db.repositories.pending.claim``), so a retry or a double "1" runs the
 write at most once (ADR 0003).
 
 Hand-written to match ``personal_organizer.db.models.tenant``;

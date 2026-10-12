@@ -1,10 +1,11 @@
 """The one write a tenant has been asked to confirm, on ``tenants.pending_action`` (D5).
 
 :func:`propose` stores it, replacing any earlier one. :func:`claim` takes it in one
-statement that nulls the column, so of two claims -- a retry, a double "1" -- exactly one
+statement that clears the column, so of two claims -- a retry, a double "1" -- exactly one
 gets it back. The caller commits the claim *before* it runs the write: a crash in between
-loses the write rather than doing it twice (ADR 0003). Run everything here in
-``Database.tenant_session(tenant_id)``.
+loses the write rather than doing it twice (ADR 0003). The claim leaves only the inbox row
+that took it, for :func:`claimed_by`: a re-run of that message then knows the write was its
+own, and runs nothing. Run everything here in ``Database.tenant_session(tenant_id)``.
 """
 
 from __future__ import annotations
@@ -81,12 +82,12 @@ async def current(session: AsyncSession, tenant_id: UUID, *, now: datetime) -> P
 
 
 async def claim(
-    session: AsyncSession, tenant_id: UUID, action_id: str, *, now: datetime
+    session: AsyncSession, tenant_id: UUID, action_id: str, *, now: datetime, by: UUID
 ) -> PendingAction | None:
-    """Take action ``action_id``, clearing it; ``None`` if it was already claimed, replaced,
-    dropped or has expired.
+    """Take action ``action_id`` for inbox row ``by``, clearing it; ``None`` if it was already
+    claimed, replaced, dropped or has expired.
 
-    ``RETURNING`` sees the row after the update (``NULL``), so the old value comes from a
+    ``RETURNING`` sees the row after the update, so the old value comes from a
     ``FOR UPDATE`` subquery. A concurrent claim waits on that lock, then re-checks the
     subquery's conditions against the cleared row, matches nothing, and gets ``None``.
     """
@@ -99,10 +100,18 @@ async def claim(
     value: dict[str, Any] | None = await session.scalar(
         scoped(update(Tenant), Tenant, tenant_id)
         .where(Tenant.id == old.c.id)
-        .values(pending_action=null(), updated_at=func.now())
+        .values(pending_action={"claimed_by": str(by)}, updated_at=func.now())
         .returning(old.c.pending_action)
     )
     return PendingAction._from_json(value) if value is not None else None
+
+
+async def claimed_by(session: AsyncSession, tenant_id: UUID) -> UUID | None:
+    """The inbox row of the last claim, until the next :func:`propose` or :func:`drop`."""
+    value: str | None = await session.scalar(
+        scoped(select(Tenant.pending_action["claimed_by"].astext), Tenant, tenant_id)
+    )
+    return UUID(value) if value is not None else None
 
 
 async def drop(session: AsyncSession, tenant_id: UUID) -> None:
@@ -114,4 +123,4 @@ async def drop(session: AsyncSession, tenant_id: UUID) -> None:
     )
 
 
-__all__ = ["TTL", "PendingAction", "claim", "current", "drop", "propose"]
+__all__ = ["TTL", "PendingAction", "claim", "claimed_by", "current", "drop", "propose"]

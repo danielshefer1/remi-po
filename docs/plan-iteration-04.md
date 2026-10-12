@@ -151,6 +151,9 @@ Store them if the evals show it misses context.*
 - A claim (`UPDATE tenants SET pending_action = NULL WHERE id = :t AND pending_action->>'id' =
   :id RETURNING …`) commits first, then `create_event` runs. So a retry or a double "1" can't
   create the event twice; this is at most once, as in ADR 0003.
+- The claim leaves `{claimed_by: <inbox id>}` in place of the action (PR 3). A re-run of that
+  message then sends nothing, rather than asking the model what a bare "1" means, which could
+  propose the same event again.
 - Any other message drops the proposal, and the model sees it in history if the person is
   amending it. A proposal expires after an hour.
 

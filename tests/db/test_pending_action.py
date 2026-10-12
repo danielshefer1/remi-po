@@ -23,6 +23,7 @@ from personal_organizer.db.repositories import pending, tenants
 pytestmark = [pytest.mark.db, pytest.mark.usefixtures("clean_tenant_tables")]
 
 NOW = datetime(2026, 10, 8, 9, 0, tzinfo=UTC)
+INBOX = UUID(int=7)
 PAYLOAD = {"title": "Dinner with Noa", "start": "2026-10-08T20:00", "end": "2026-10-08T21:00"}
 
 
@@ -48,7 +49,7 @@ async def _claim(
     database: Database, tenant_id: UUID, action_id: str, *, now: datetime = NOW
 ) -> pending.PendingAction | None:
     async with database.tenant_session(TenantId(tenant_id)) as session:
-        return await pending.claim(session, tenant_id, action_id, now=now)
+        return await pending.claim(session, tenant_id, action_id, now=now, by=INBOX)
 
 
 async def _current(
@@ -86,16 +87,37 @@ async def test_a_new_proposal_replaces_the_old_one(database: Database) -> None:
     assert await _claim(database, tenant_id, new.id) == new
 
 
+async def _claimed_by(database: Database, tenant_id: UUID) -> UUID | None:
+    async with database.tenant_session(TenantId(tenant_id)) as session:
+        return await pending.claimed_by(session, tenant_id)
+
+
 async def test_a_claim_returns_the_action_once(database: Database) -> None:
-    """The returned value is the row *before* the update -- the update itself nulls it."""
+    """The returned value is the row *before* the update -- the update itself clears it."""
     tenant_id = await _create(database)
     action = await _propose(database, tenant_id)
+    assert await _claimed_by(database, tenant_id) is None
     claimed = await _claim(database, tenant_id, action.id)
     assert claimed == action
     assert claimed is not None
     assert claimed.payload == PAYLOAD
-    assert await _is_sql_null(database, tenant_id)
+    assert await _current(database, tenant_id) is None
+    assert await _claimed_by(database, tenant_id) == INBOX
     assert await _claim(database, tenant_id, action.id) is None
+
+
+@pytest.mark.parametrize("then", ["propose", "drop"])
+async def test_the_claim_marker_lasts_until_the_next_propose_or_drop(
+    database: Database, then: str
+) -> None:
+    tenant_id = await _create(database)
+    await _claim(database, tenant_id, (await _propose(database, tenant_id)).id)
+    if then == "propose":
+        await _propose(database, tenant_id)
+    else:
+        async with database.tenant_session(TenantId(tenant_id)) as session:
+            await pending.drop(session, tenant_id)
+    assert await _claimed_by(database, tenant_id) is None
 
 
 async def test_a_claim_waiting_on_another_gets_nothing(database: Database) -> None:
@@ -103,7 +125,7 @@ async def test_a_claim_waiting_on_another_gets_nothing(database: Database) -> No
     tenant_id = await _create(database)
     action = await _propose(database, tenant_id)
     async with database.tenant_session(TenantId(tenant_id)) as first:
-        won = await pending.claim(first, tenant_id, action.id, now=NOW)
+        won = await pending.claim(first, tenant_id, action.id, now=NOW, by=INBOX)
         second = asyncio.create_task(_claim(database, tenant_id, action.id))
         await asyncio.sleep(0.3)
         assert not second.done(), "the second claim should be waiting on the row lock"
@@ -148,7 +170,7 @@ async def test_another_tenant_can_neither_read_nor_claim_it(
         monkeypatch.setattr(pending, "scoped", lambda stmt, model, tenant_id: stmt)
     async with database.tenant_session(TenantId(a)) as session:
         assert await pending.current(session, b, now=NOW) is None
-        assert await pending.claim(session, b, b_action.id, now=NOW) is None
+        assert await pending.claim(session, b, b_action.id, now=NOW, by=INBOX) is None
         await pending.drop(session, b)
         await pending.propose(session, b, kind="create_event", payload={}, now=NOW)
     monkeypatch.undo()
