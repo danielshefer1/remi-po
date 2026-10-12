@@ -18,10 +18,11 @@ Composio's ``user_id`` for a tenant is ``str(tenant.id)``, never a phone number,
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Final
+from typing import Any, Final
 from uuid import UUID
 
 from sqlalchemy import CheckConstraint, ForeignKey, Index, Text, UniqueConstraint, func, text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from personal_organizer.db.base import Base, TenantMixin, TenantRoot, check_in
@@ -54,6 +55,9 @@ class Tenant(Base, TenantRoot):
     #: IANA name. ``NULL`` until the user confirms one: a guess from the country code is
     #: shown, never stored (D10).
     timezone: Mapped[str | None] = mapped_column(Text)
+    #: The one write waiting for a confirm, ``{id, kind, payload, expires_at}``. Read and
+    #: written only through ``repositories.pending`` (Iteration 04, D5).
+    pending_action: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
