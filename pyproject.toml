@@ -18,7 +18,6 @@ dependencies = [
     "itsdangerous>=2.2.0",
     "jinja2>=3.1.6",
     "langfuse>=4.15.6",
-    "litellm==1.102.1",
     "openai>=2.54.0",
     "openpyxl>=3.1.5",
     "pgvector>=0.5.0",
@@ -45,6 +44,7 @@ po-worker = "personal_organizer.worker.main:main"
 po-whatsapp = "personal_organizer.providers.channel.whatsapp.cli:main"
 po-gowa = "personal_organizer.providers.channel.gowa.cli:main"
 po-admin = "personal_organizer.admin.cli:main"
+po-chat = "personal_organizer.admin.chat:main"
 
 [build-system]
 requires = ["uv_build>=0.12.17,<0.13.0"]
@@ -136,6 +136,7 @@ markers = [
     "rls: row-level-security isolation suite (Iteration 03)",
     "integration: exercises more than one service",
     "slow: takes more than a second",
+    "eval: calls the real model (tests/evals); runs only with -m eval and AGENT__API_KEY",
 ]
 
 [tool.coverage.run]
