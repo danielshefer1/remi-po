@@ -40,20 +40,21 @@ The pieces are already in place. Nothing calls them yet:
 - `send_once` (at most once per `inbox_id` + `kind`), `split_text`, `choices.py` (numbered
   replies on every channel), `tenants.timezone` and `tenants.language`.
 - `ModelSettings`: `MODELS__CHAT_MODEL=gpt-5-mini`, `MODELS__FALLBACK_MODEL=claude-haiku-4-5`
-  (that model retires about 2026-10-15), `request_timeout_s`, `max_retries`.
+  (still Active per Anthropic's model list on 2026-10-06; v7's Oct 15 was a no-earlier-than
+  date), `request_timeout_s`, `max_retries`.
 - Composio SDK 0.24.0: `composio.tools.execute(slug, arguments, *, connected_account_id,
   user_id, version)`, plus `toolkit_versions` on the client to pin the Google Calendar toolkit.
 
 ## Decisions
 
 **D1. One provider, called through its own SDK. Recommended: Claude via `anthropic`.**
-`MODELS__CHAT_MODEL` names the model. Pick it with the eval run, not from a table. The fallback
+`MODELS__CHAT_MODEL` names the model. Pick it with the eval run, not from a table: run the
+evals on `claude-haiku-5-5` and `claude-sonnet-5-5`, and ship the cheaper one that passes. The fallback
 model is not wired: we add a fallback once an outage actually bites. LiteLLM goes from
 `pyproject.toml`, because one provider doesn't need a router. If you'd rather keep
 `gpt-5-mini`, the plan is the same with an `openai` adapter; only the adapter file and the
-key's name change. The earlier plan had GPT first and Claude as fallback. That fallback model
-is the one retiring, and keeping both means a tool-format normaliser for each, so the plan
-picks one. *Confirm before PR 1.*
+key's name change. The earlier plan had GPT first and Claude as fallback. Keeping both means a
+tool-format mapping for each and twice the evals, so the plan picks one. *Confirm before PR 1.*
 
 **D2. The model sees our tools, not Composio's.** We write two small schemas,
 `list_events(start, end)` and (PR 2) `propose_event(title, start, end, location?)`. The
@@ -174,8 +175,7 @@ events.
   api doesn't need it. Set a monthly spend limit in the provider console.
 - Staging has `COMPOSIO__ENABLED=true` and your own calendar connected. That's done if the
   Iteration 03 runbook's day-1 check passed.
-- Update `MODELS__CHAT_MODEL` on staging and production, and drop
-  `MODELS__FALLBACK_MODEL=claude-haiku-4-5` from the docs before 2026-10-15.
+- Update `MODELS__CHAT_MODEL` on staging and production after the evals pick a model.
 
 ## Out of scope
 
