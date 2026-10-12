@@ -212,7 +212,7 @@ async def next_reply(
         try:
             said = await converse(
                 history,
-                row.body or f"[{row.message_type}]",
+                (row.body or "").strip() or f"[{row.message_type}]",
                 system=onboarding_prompt(language, connect=url is not None, guess=guess),
                 tools=TOOLS,
                 run_tool=run_tool,

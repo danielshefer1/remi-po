@@ -616,6 +616,15 @@ class TestTalkedThrough:
             Message("assistant", f"Welcome!\n\n{AMSTERDAM_CHOICE}"),
         ]
 
+    async def test_no_blank_turn_reaches_the_model(self, person: Person) -> None:
+        """The API refuses a turn with no text in it, now or in the history."""
+        person.llm = ScriptedLLM(said("Welcome!"), said("Which city?"), said("Which city?"))
+        await person.say("hi")
+        await person.say(" \n ")
+        await person.say("Mars")
+        assert person.llm.calls[1][-1] == Message("user", "[text]")
+        assert all(m.content.strip() for m in person.llm.calls[2])
+
     async def test_set_timezone_takes_the_confirm_path(self, person: Person, db: Database) -> None:
         person.llm = ScriptedLLM(
             said("Welcome!"),
