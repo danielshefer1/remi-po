@@ -114,6 +114,12 @@ class CalendarProviderRejectedError(CalendarProviderError):
         self.status_code = status_code
 
 
+class CalendarNotConnectedError(CalendarProviderRejectedError):
+    """The account no longer works (expired, revoked, inactive, or Google says 401): reconnect."""
+
+    code = "calendar_not_connected"
+
+
 class LLMError(AppError):
     """The LLM provider refused or failed a request.
 
@@ -144,6 +150,7 @@ __all__ = [
     "AmbiguousDeliveryError",
     "AppError",
     "BootstrapError",
+    "CalendarNotConnectedError",
     "CalendarProviderError",
     "CalendarProviderRejectedError",
     "CalendarProviderUnavailableError",
