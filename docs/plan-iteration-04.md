@@ -74,17 +74,26 @@ The pieces are already in place. Nothing calls them yet:
 
 ## Decisions
 
-**D1. One provider, called through its own SDK. Recommended: Claude via `anthropic`.**
-- `MODELS__CHAT_MODEL` names the model. Pick it with the eval run, not from a table: run the
-  evals on `claude-haiku-5-5` and `claude-sonnet-5-5`, and ship the cheaper one that passes.
+**D1. One provider, called through its own SDK: Claude Haiku 5.5 (`claude-haiku-5-5`) via
+`anthropic`.** Decided 2026-10-12.
+- `MODELS__CHAT_MODEL=claude-haiku-5-5`. It costs $0.10 / $0.50 per MTok for prompts of 100K
+  tokens or less (ours are about 6K), so roughly $15 a month even with 50 people writing 10
+  messages a day.
+- **Step-up rule:** if the evals fail on Haiku after prompt fixes, run them on
+  `claude-sonnet-5-5`. Switch `MODELS__CHAT_MODEL` only if Sonnet passes where Haiku didn't.
+  It's a config change, not code.
+- Haiku 5.5 details the adapter must handle:
+  - Thinking is adaptive and on by default. Leave `thinking` out and set
+    `output_config.effort="low"` for chat (the default is `medium`); raise it only if the evals
+    need it.
+  - Sampling parameters (`temperature`) and assistant prefill return a 400. Don't send them.
+  - `stop_reason == "refusal"` has no server-side fallback on Haiku. Treat it as
+    `LLMRejectedError`, so the turn takes the fixed fallback text of D3 and doesn't retry.
+  - The tokenizer counts about 30% more tokens than Haiku 4.5's. That's irrelevant at our size.
 - The fallback model is not wired: we add a fallback once an outage actually bites.
+  `MODELS__FALLBACK_MODEL` stays in settings, unused.
 - LiteLLM goes from `pyproject.toml`, because one provider doesn't need a router.
-- If you'd rather keep `gpt-5-mini`, the plan is the same with an `openai` adapter; only the
-  adapter file and the key's name change.
-- The earlier plan had GPT first and Claude as fallback. Keeping both means a tool-format
-  mapping for each and twice the evals, so the plan picks one.
-
-*Confirm before PR 1.*
+- `openai` stays installed: embeddings and transcription will use it in later iterations.
 
 **D2. The model sees our tools, not Composio's.**
 - We write the tool schemas ourselves: `set_timezone` and `set_language` for onboarding,
@@ -234,7 +243,8 @@ There is no calendar-less mode (see open questions).
 
 ## PR 1 — the LLM, and onboarding through it
 
-1. **Model check.** Confirm the current model ids and prices, and set D1.
+1. **Model check.** Confirm `claude-haiku-5-5` answers with tools on the staging key (one
+   `po-chat` turn).
 2. **`interfaces/llm.py`.** Add `ToolCall(id, name, arguments)`, then
    `Message.tool_calls: tuple[ToolCall, ...] = ()` and `Message.tool_call_id: str | None`, and
    `Completion.tool_calls`. Tools are neutral `{"name", "description", "input_schema"}` dicts.
@@ -313,13 +323,14 @@ There is no calendar-less mode (see open questions).
 
 ## Prerequisites (outside the code)
 
-- An Anthropic (or OpenAI, per D1) API key on the staging **worker** as `AGENT__API_KEY`. The
+- An Anthropic API key on the staging **worker** as `AGENT__API_KEY`. The
   api doesn't need it. Set a monthly spend limit in the provider console.
 - Staging has `COMPOSIO__ENABLED=true` and your own calendar connected. That's done if the
   Iteration 03 runbook's day-1 check passed.
 - To try PR 1 end to end, have a second number ready to invite, or reset your own tenant to
   `onboarding`.
-- Update `MODELS__CHAT_MODEL` on staging and production after the evals pick a model.
+- Set `MODELS__CHAT_MODEL=claude-haiku-5-5` on the staging worker (and in `.env.example`
+  and the runbook, in PR 1).
 
 ## Out of scope
 
