@@ -185,3 +185,20 @@ async def test_the_invites_downgrade_round_trips(owner_conn: Any) -> None:
         assert await owner_conn.fetchval(_INVITES_SQL) == "invites"
     finally:
         command.upgrade(config, "head")
+
+
+_PENDING_ACTION_SQL = (
+    "SELECT data_type FROM information_schema.columns "
+    "WHERE table_name = 'tenants' AND column_name = 'pending_action'"
+)
+
+
+async def test_the_pending_action_downgrade_round_trips(owner_conn: Any) -> None:
+    config = _config()
+    try:
+        command.downgrade(config, "0005_invites")
+        assert await owner_conn.fetchval(_PENDING_ACTION_SQL) is None
+        command.upgrade(config, "head")
+        assert await owner_conn.fetchval(_PENDING_ACTION_SQL) == "jsonb"
+    finally:
+        command.upgrade(config, "head")
