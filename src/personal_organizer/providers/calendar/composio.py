@@ -1,4 +1,5 @@
-"""Composio as the :class:`~personal_organizer.interfaces.calendar.ConnectLinker`.
+"""Composio as the :class:`~personal_organizer.interfaces.calendar.ConnectLinker` and the
+:class:`~personal_organizer.interfaces.calendar.CalendarProvider`.
 
 Composio's Python SDK is synchronous, so every call runs on a worker thread under one deadline,
 ``COMPOSIO__REQUEST_TIMEOUT_S``, which also covers the SDK's own retry. Three SDK defaults are
@@ -20,13 +21,21 @@ changed here:
 
 The SDK's account record carries the OAuth tokens (``data``, ``params``, ``state``).
 :meth:`ComposioConnector.get_account` copies four fields out and lets the record go.
+
+Calendar calls go through ``tools.execute`` with two slugs and nothing else: no tool router, no
+``tools.get()`` schemas. Each call names the caller's ``connected_account_id`` and ``user_id``
+and the pinned toolkit version, and its arguments are built here from typed parameters. So
+nothing a model writes can choose the account, the user, the calendar or the toolkit (plan
+D2). Events are cut down to title, times and location as they are parsed (D6).
 """
 
 from __future__ import annotations
 
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from datetime import date, datetime, time, tzinfo
 from typing import Any, Final
+from zoneinfo import ZoneInfo
 
 import anyio
 import anyio.to_thread
@@ -39,12 +48,13 @@ from composio.sdk import SDKConfig
 from composio.utils.logging import LogLevel
 
 from personal_organizer.core.errors import (
+    CalendarNotConnectedError,
     CalendarProviderError,
     CalendarProviderRejectedError,
     CalendarProviderUnavailableError,
     ConfigError,
 )
-from personal_organizer.interfaces.calendar import ConnectedAccount
+from personal_organizer.interfaces.calendar import CalendarEvent, ConnectedAccount
 from personal_organizer.settings import ComposioSettings
 
 #: Statuses worth another attempt later. Any 5xx is too.
@@ -57,6 +67,13 @@ _SDK_MAX_RETRIES: Final = 1
 #: call past its deadline is abandoned, and that call keeps its thread until the SDK gives up.
 SDK_LIMITER: Final = anyio.CapacityLimiter(4)
 
+#: The Google Calendar toolkit version every call runs, so a Composio release can't change the
+#: arguments or the response shape under us. Upgrading means re-checking the test fixtures.
+TOOLKIT: Final = "googlecalendar"
+TOOLKIT_VERSION: Final = "20261010_00"
+LIST_EVENTS: Final = "GOOGLECALENDAR_EVENTS_LIST"
+CREATE_EVENT: Final = "GOOGLECALENDAR_CREATE_EVENT"
+
 
 def _untracked[T](fn: Callable[[], T]) -> T:
     """Run ``fn`` with Composio's telemetry off, in this thread's context only."""
@@ -67,15 +84,57 @@ def _untracked[T](fn: Callable[[], T]) -> T:
         allow_tracking.reset(token)
 
 
+def _from_status(status: int | None) -> CalendarProviderError:
+    if status is None:
+        return CalendarProviderRejectedError(None)
+    if status >= 500 or status in _TRANSIENT_STATUSES:
+        return CalendarProviderUnavailableError(f"Calendar provider answered {status}")
+    if status == 422:  # Composio: "invalid state of the connected account"
+        return CalendarNotConnectedError(status)
+    return CalendarProviderRejectedError(status)
+
+
 def _translate(exc: Exception) -> CalendarProviderError:
     if isinstance(exc, composio_client.APIConnectionError):  # APITimeoutError is one too
         return CalendarProviderUnavailableError("Calendar provider unreachable")
     if isinstance(exc, composio_client.APIStatusError):
-        status = exc.status_code
-        if status >= 500 or status in _TRANSIENT_STATUSES:
-            return CalendarProviderUnavailableError(f"Calendar provider answered {status}")
-        return CalendarProviderRejectedError(status)
+        return _from_status(exc.status_code)
     return CalendarProviderRejectedError(None)
+
+
+def _rfc3339(moment: datetime) -> str:
+    if moment.utcoffset() is None:
+        msg = "calendar times must be timezone-aware"
+        raise ValueError(msg)
+    return moment.isoformat(timespec="seconds")
+
+
+def _when(field: Any, zone: tzinfo | None) -> tuple[datetime, bool]:
+    """Google's ``{"dateTime": ...}`` or, for an all-day event, ``{"date": ...}``."""
+    if "dateTime" in field:
+        moment = datetime.fromisoformat(field["dateTime"])
+        if moment.utcoffset() is None:
+            raise ValueError
+        return moment, False
+    # A date has no zone; midnight in the caller's zone keeps it on the same day for them.
+    return datetime.combine(date.fromisoformat(field["date"]), time(), zone), True
+
+
+def _event(item: Any, zone: tzinfo | None) -> CalendarEvent:
+    """Title, times and location only: descriptions and attendees are anyone's to write."""
+    start, all_day = _when(item["start"], zone)
+    end, _ = _when(item["end"], zone)
+    title, location = item.get("summary", ""), item.get("location")
+    if not isinstance(title, str) or not isinstance(location, str | None):
+        raise TypeError
+    return CalendarEvent(
+        external_id=str(item["id"]),
+        title=title,
+        start=start,
+        end=end,
+        all_day=all_day,
+        location=location or None,
+    )
 
 
 class ComposioConnector:
@@ -97,6 +156,7 @@ class ComposioConnector:
             "timeout": math.ceil(settings.request_timeout_s),
             "max_retries": _SDK_MAX_RETRIES,
             "logging_level": LogLevel.WARNING,
+            "toolkit_versions": {TOOLKIT: TOOLKIT_VERSION},
         }
         if http_client is not None:
             config["http_client"] = http_client
@@ -141,6 +201,75 @@ class ComposioConnector:
                 status=str(record.status),
             )
         except AttributeError, TypeError:
+            raise CalendarProviderRejectedError(None) from None
+
+    async def _execute(
+        self, slug: str, arguments: dict[str, object], account_id: str, user_id: str
+    ) -> Any:
+        """Run one tool on the caller's account; return its payload or raise ours."""
+        result = await self._call(
+            lambda: self._sdk.tools.execute(
+                slug,
+                arguments,
+                connected_account_id=account_id,
+                user_id=user_id,
+                version=TOOLKIT_VERSION,
+            )
+        )
+        data = result.get("data") if isinstance(result, dict) else None
+        if not isinstance(data, dict):
+            raise CalendarProviderRejectedError(None)
+        if result.get("successful") is not True:
+            # Google's own error comes back as a 200 with its status in the data.
+            status = data.get("status_code")
+            if status == 401:
+                raise CalendarNotConnectedError(status)
+            raise _from_status(status if isinstance(status, int) else None)
+        # CREATE_EVENT's docs put the event under response_data; accept either.
+        return data.get("response_data", data)
+
+    async def list_events(
+        self, account_id: str, user_id: str, *, start: datetime, end: datetime
+    ) -> Sequence[CalendarEvent]:
+        arguments: dict[str, object] = {
+            "calendarId": "primary",
+            "timeMin": _rfc3339(start),
+            "timeMax": _rfc3339(end),
+            "singleEvents": True,  # recurring events as their instances
+            "orderBy": "startTime",
+        }
+        # shortcut: one page (Google's default 250 events), nextPageToken ignored; plenty for a
+        # day or a week. Follow the token if someone asks for a month of a busy calendar.
+        payload = await self._execute(LIST_EVENTS, arguments, account_id, user_id)
+        try:
+            return [_event(item, start.tzinfo) for item in payload["items"]]
+        except KeyError, TypeError, ValueError:
+            raise CalendarProviderRejectedError(None) from None
+
+    async def create_event(
+        self, account_id: str, user_id: str, event: CalendarEvent
+    ) -> CalendarEvent:
+        start, end = _rfc3339(event.start), _rfc3339(event.end)
+        arguments: dict[str, object] = {
+            "calendar_id": "primary",
+            "summary": event.title,
+            "create_meeting_room": False,  # its default adds a Google Meet link to every event
+        }
+        if event.all_day:
+            arguments["start_date"] = event.start.date().isoformat()
+            arguments["end_date"] = event.end.date().isoformat()  # exclusive, as Google's is
+        else:
+            arguments["start_datetime"] = start
+            arguments["end_datetime"] = end
+        if isinstance(event.start.tzinfo, ZoneInfo):
+            # The offsets fix the instant; the zone is what Google shows when it is edited.
+            arguments["timezone"] = event.start.tzinfo.key
+        if event.location:
+            arguments["location"] = event.location
+        payload = await self._execute(CREATE_EVENT, arguments, account_id, user_id)
+        try:
+            return _event(payload, event.start.tzinfo)
+        except KeyError, TypeError, ValueError:
             raise CalendarProviderRejectedError(None) from None
 
 
