@@ -1,10 +1,15 @@
-"""``po-chat --tenant <uuid>`` -- talk to the onboarding conversation from a terminal.
+"""``po-chat --tenant <uuid>`` -- talk to the onboarding conversation or the agent from a terminal.
 
-The same decision code the worker runs (:func:`~personal_organizer.messaging.onboarding.
-next_reply`), with the real model, starting from the tenant's stored step and language. The
-history lives in memory and replies are printed, not sent. Nothing about the tenant is
-written: a step the conversation would take is applied in memory only. The one write is a
-connect link, issued or reused exactly as the worker would, so the printed link works.
+The same decision code the worker runs, with the real model, starting from the tenant's stored
+state: :func:`~personal_organizer.messaging.onboarding.next_reply` for an ``onboarding`` tenant,
+:func:`~personal_organizer.messaging.agent.respond` for an ``active`` one. The history lives in
+memory and replies are printed, not sent. Nothing about the tenant is written: a step the
+conversation would take is applied in memory only. The one write is a connect link, issued or
+reused exactly as the worker would, so the printed link works.
+
+An active tenant's calendar is read through Composio with their bound connection, as the
+worker does. ``--fake-calendar`` reads a few made-up events held in memory instead, so the
+agent can be tried without a connected Google account or a Composio key.
 
 For the model check of docs/plan-iteration-04.md: on Railway, ``railway ssh --service worker
 --environment staging``, then ``po-chat --tenant <uuid>``. It needs ``AGENT__API_KEY``.
@@ -17,22 +22,33 @@ import asyncio
 import sys
 from collections.abc import Callable
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time, timedelta
 from typing import Final
 from uuid import UUID, uuid4
+from zoneinfo import ZoneInfo
 
 from personal_organizer.core.errors import ConfigError
+from personal_organizer.core.types import TenantId
 from personal_organizer.db.engine import Database
+from personal_organizer.db.models.tenant import CalendarConnection
+from personal_organizer.db.repositories.connections import active_connection
+from personal_organizer.interfaces.calendar import CalendarEvent, CalendarProvider
 from personal_organizer.interfaces.llm import LLMProvider, Message
+from personal_organizer.messaging.agent import AGENT_REPLY, respond
 from personal_organizer.messaging.inbox import InboxRow
 from personal_organizer.messaging.onboarding import next_reply
 from personal_organizer.messaging.tenancy import TenantState, load_state, phone_of
 from personal_organizer.observability.logging import configure_logging
+from personal_organizer.providers.calendar.composio import ComposioConnector
+from personal_organizer.providers.calendar.memory import InMemoryCalendar
 from personal_organizer.providers.llm.anthropic import AnthropicLLM
 from personal_organizer.settings import Settings, get_settings
 
 OK: Final = 0
 REFUSED: Final = 1
+
+#: Printed for an agent turn with nothing to send, where the worker sends its fixed line.
+NO_ANSWER: Final = "(no usable answer: the worker sends its fallback)"
 
 #: The channel name the in-memory rows carry. No channel by that name exists to send on.
 CHAT_CHANNEL: Final = "po-chat"
@@ -101,15 +117,90 @@ async def chat(
         )
 
 
+async def agent_chat(
+    tenant: TenantState,
+    *,
+    llm: LLMProvider,
+    calendar: CalendarProvider,
+    account: CalendarConnection | None,
+    read: Callable[[str], str] = input,
+    write: Callable[[str], None] = _out,
+) -> int:
+    """An active tenant's turns until end of input. Touches no database."""
+    history: list[Message] = []
+    while True:
+        try:
+            line = await asyncio.to_thread(read, "you> ")
+        except EOFError:
+            return OK
+        if not line.strip():
+            continue
+        text = await respond(
+            history,
+            line,
+            tenant,
+            llm=llm,
+            calendar=calendar,
+            account=account,
+            now=datetime.now(UTC),
+        )
+        write(f"bot [{AGENT_REPLY}]> {text or NO_ANSWER}")
+        history += [Message("user", line), Message("assistant", text)]
+
+
+def sample_events(now: datetime, zone: ZoneInfo) -> list[CalendarEvent]:
+    """What ``--fake-calendar`` holds: a few events from today on, in the tenant's zone."""
+    today = datetime.combine(now.astimezone(zone).date(), time(), zone)
+
+    def at(days: int, hour: int) -> datetime:
+        return today + timedelta(days=days, hours=hour)
+
+    return [
+        CalendarEvent("fake-1", "Team meeting", at(0, 15), at(0, 16)),
+        CalendarEvent("fake-2", "Dentist", at(1, 9), at(1, 9) + timedelta(minutes=30)),
+        CalendarEvent("fake-3", "Dinner with Noa", at(3, 20), at(3, 22), location="Tel Aviv"),
+        CalendarEvent("fake-4", "Grandma's birthday", at(5, 0), at(6, 0), all_day=True),
+    ]
+
+
+async def _agent(
+    db: Database, settings: Settings, tenant: TenantState, *, llm: LLMProvider, fake: bool
+) -> int:
+    async with db.tenant_session(TenantId(tenant.id)) as session:
+        account = await active_connection(session, tenant.id)
+    calendar: CalendarProvider
+    if fake:
+        zone = ZoneInfo(tenant.timezone or "UTC")
+        calendar = InMemoryCalendar(sample_events(datetime.now(UTC), zone))
+        # The in-memory calendar ignores the ids; any connection will do.
+        account = account or CalendarConnection(
+            connected_account_id="fake", composio_user_id=str(tenant.id)
+        )
+        _out("(fake calendar: a few made-up events from today on)")
+    else:
+        try:
+            calendar = ComposioConnector.from_settings(settings.composio)
+        except ConfigError:
+            _out("COMPOSIO__API_KEY is not set; try --fake-calendar")
+            return REFUSED
+    return await agent_chat(tenant, llm=llm, calendar=calendar, account=account)
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="po-chat", description="talk to the onboarding conversation; prints, never sends"
+        prog="po-chat",
+        description="talk to the onboarding conversation or the agent; prints, never sends",
     )
     parser.add_argument("--tenant", type=UUID, required=True, help="the tenant's uuid")
+    parser.add_argument(
+        "--fake-calendar",
+        action="store_true",
+        help="an active tenant reads made-up events held in memory, not Google",
+    )
     return parser
 
 
-async def _run(tenant_id: UUID, settings: Settings) -> int:
+async def _run(tenant_id: UUID, settings: Settings, *, fake_calendar: bool = False) -> int:
     try:
         llm = AnthropicLLM.from_settings(settings)
     except ConfigError:
@@ -118,8 +209,10 @@ async def _run(tenant_id: UUID, settings: Settings) -> int:
     db = Database(settings)
     try:
         tenant = await load_state(db, tenant_id)
+        if tenant is not None and tenant.status == "active":
+            return await _agent(db, settings, tenant, llm=llm, fake=fake_calendar)
         if tenant is None or tenant.status != "onboarding":
-            _out("no onboarding tenant with that id; po-chat covers onboarding only")
+            _out("no onboarding or active tenant with that id")
             return REFUSED
         phone = await phone_of(db, tenant_id)
         if phone is None:
@@ -134,7 +227,7 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     settings = get_settings()
     configure_logging(settings)
-    return asyncio.run(_run(args.tenant, settings))
+    return asyncio.run(_run(args.tenant, settings, fake_calendar=args.fake_calendar))
 
 
 if __name__ == "__main__":  # pragma: no cover
