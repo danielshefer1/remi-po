@@ -1,16 +1,22 @@
 from __future__ import annotations
 
 import procrastinate
+import pytest
 
 from personal_organizer.core.errors import (
     AmbiguousDeliveryError,
+    LLMUnavailableError,
     RejectedChannelError,
     TransientChannelError,
 )
 from personal_organizer.settings import Settings
 from personal_organizer.worker.app import build_procrastinate_app
 from personal_organizer.worker.queues import Queue
-from personal_organizer.worker.tasks.channel import HANDLE_INBOUND_TASK, INBOUND_RETRY
+from personal_organizer.worker.tasks.channel import (
+    HANDLE_INBOUND_TASK,
+    INBOUND_RETRY,
+    is_last_attempt,
+)
 from personal_organizer.worker.tasks.onboarding import ONBOARDING_CONNECTED_TASK
 from personal_organizer.worker.tasks.system import PING_TASK, RETRY_STALLED_TASK
 
@@ -102,3 +108,22 @@ class TestOnboardingTasks:
         """Only definitely-unsent failures: an ambiguous send is never repeated (ADR 0003)."""
         task = build_procrastinate_app(settings).tasks[ONBOARDING_CONNECTED_TASK]
         assert task.retry_strategy is INBOUND_RETRY
+
+
+class TestLastAttempt:
+    def test_an_llm_outage_is_retried(self) -> None:
+        assert LLMUnavailableError in (INBOUND_RETRY.retry_exceptions or set())
+
+    @pytest.mark.parametrize("attempts", range(9))
+    def test_it_is_the_run_procrastinate_will_not_retry(self, attempts: int) -> None:
+        """Pinned against the installed source: the fallback must come on the run whose
+        failure is final, not one earlier (a wasted retry) or never (silence)."""
+        job = procrastinate.jobs.Job(
+            queue="webhooks",
+            lock=None,
+            queueing_lock=None,
+            task_name=HANDLE_INBOUND_TASK,
+            attempts=attempts,
+        )
+        decision = INBOUND_RETRY.get_retry_decision(exception=LLMUnavailableError(), job=job)
+        assert is_last_attempt(attempts) == (decision is None)

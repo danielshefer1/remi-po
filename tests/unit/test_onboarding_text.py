@@ -6,6 +6,7 @@ import pytest
 
 from personal_organizer.db.models.tenant import LANGUAGES
 from personal_organizer.messaging.language import detect_language
+from personal_organizer.messaging.onboarding_prompt import ONBOARDING_PROMPT, onboarding_prompt
 from personal_organizer.messaging.onboarding_text import ONBOARDING_TEXT, t
 
 URL = "https://po.example.test/connect/abc.def"
@@ -57,3 +58,22 @@ class TestT:
     def test_a_missing_value_raises(self) -> None:
         with pytest.raises(KeyError):
             t("connect_link", "en")
+
+
+class TestPrompt:
+    """The onboarding prompt's table, held to the same checks as the texts."""
+
+    def test_both_languages_have_the_same_keys_and_values(self) -> None:
+        assert set(ONBOARDING_PROMPT) == set(LANGUAGES)
+        for key, english in ONBOARDING_PROMPT["en"].items():
+            assert _fields(ONBOARDING_PROMPT["he"][key]) == _fields(english), key
+
+    @pytest.mark.parametrize("language", LANGUAGES)
+    def test_each_step_is_described(self, language: str) -> None:
+        guessed = onboarding_prompt(language, connect=False, guess="Europe/London")
+        asked = onboarding_prompt(language, connect=False, guess=None)
+        connect = onboarding_prompt(language, connect=True, guess=None)
+        assert "Europe/London" in guessed
+        assert len({guessed, asked, connect}) == 3
+        assert detect_language(connect) == language
+        assert "{" not in guessed + asked + connect

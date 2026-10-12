@@ -35,7 +35,7 @@ from personal_organizer.core.types import TenantId
 from personal_organizer.db.engine import Database
 from personal_organizer.db.models.tenant import NETWORK_WHATSAPP
 from personal_organizer.db.repositories.invites import mark_used
-from personal_organizer.db.repositories.messages import latest_inbound_channel
+from personal_organizer.db.repositories.messages import latest_inbound_channel, recent_messages
 from personal_organizer.db.repositories.tenants import (
     add_identity,
     create_tenant,
@@ -43,9 +43,13 @@ from personal_organizer.db.repositories.tenants import (
     primary_phone,
     resolve_tenant,
 )
+from personal_organizer.interfaces.llm import Message
 from personal_organizer.messaging.inbox import InboxRow
 
 log = structlog.get_logger(__name__)
+
+#: How many recorded messages, both directions, an LLM turn sees (D4).
+HISTORY_LIMIT: Final = 20
 
 #: Channel name -> identity network. A future Telegram channel maps to ``"telegram"``.
 _NETWORKS: Final = MappingProxyType({"whatsapp": NETWORK_WHATSAPP, "gowa": NETWORK_WHATSAPP})
@@ -176,15 +180,26 @@ async def load_state(db: Database, tenant_id: UUID) -> TenantState | None:
     )
 
 
+async def load_history(db: Database, tenant_id: UUID) -> tuple[Message, ...]:
+    """The last :data:`HISTORY_LIMIT` messages as the model reads them: ours as its own."""
+    async with db.tenant_session(TenantId(tenant_id)) as session:
+        rows = await recent_messages(session, tenant_id, limit=HISTORY_LIMIT)
+    return tuple(
+        Message("assistant" if row.direction == "out" else "user", row.body or "") for row in rows
+    )
+
+
 async def phone_of(db: Database, tenant_id: UUID) -> str | None:
     async with db.tenant_session(TenantId(tenant_id)) as session:
         return await primary_phone(session, tenant_id)
 
 
 __all__ = [
+    "HISTORY_LIMIT",
     "TenantState",
     "enrol",
     "identity_keys",
+    "load_history",
     "load_state",
     "network_for",
     "phone_of",

@@ -65,6 +65,11 @@ async def set_timezone(session: AsyncSession, tenant_id: UUID, timezone: str) ->
     await _update(session, tenant_id, timezone=timezone)
 
 
+async def set_language(session: AsyncSession, tenant_id: UUID, language: str) -> None:
+    """The person asked for the other language (D10). ``enrol``'s detection is the default."""
+    await _update(session, tenant_id, language=language)
+
+
 async def set_onboarding_step(session: AsyncSession, tenant_id: UUID, step: str | None) -> None:
     await _update(session, tenant_id, onboarding_step=step)
 
@@ -117,6 +122,7 @@ __all__ = [
     "get_tenant",
     "primary_phone",
     "resolve_tenant",
+    "set_language",
     "set_onboarding_step",
     "set_status",
     "set_timezone",

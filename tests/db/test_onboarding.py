@@ -18,7 +18,11 @@ from uuid import UUID
 
 import pytest
 
-from personal_organizer.core.errors import TransientChannelError
+from personal_organizer.core.errors import (
+    LLMRejectedError,
+    LLMUnavailableError,
+    TransientChannelError,
+)
 from personal_organizer.core.types import TenantId
 from personal_organizer.db.engine import Database
 from personal_organizer.db.models.tenant import NETWORK_WHATSAPP
@@ -26,15 +30,24 @@ from personal_organizer.db.repositories.links import consume_link
 from personal_organizer.db.repositories.messages import record_inbound
 from personal_organizer.db.repositories.tenants import resolve_tenant
 from personal_organizer.interfaces.channel import OutboundChannel, OutboundMessage
+from personal_organizer.interfaces.llm import Message
 from personal_organizer.messaging import inbound
 from personal_organizer.messaging.inbound import InboxRow, acknowledge, handle_inbound
 from personal_organizer.messaging.inbox import load_row
-from personal_organizer.messaging.onboarding import Advance, welcome_text
+from personal_organizer.messaging.onboarding import (
+    LINK_PLACEHOLDER,
+    Advance,
+    connect_text,
+    retry_text,
+    welcome_text,
+    zone_ask,
+)
 from personal_organizer.messaging.onboarding_text import t
 from personal_organizer.messaging.replies import ACK_TEXT, INVITE_ONLY_TEXT
 from personal_organizer.observability.logging import configure_logging
 from personal_organizer.settings import ComposioSettings, Settings
 from tests.fixtures.channels import FakeOutbound, Spy, insert_inbox
+from tests.fixtures.llm import NoLLM, ScriptedLLM, call, said
 from tests.fixtures.tenants import (
     BASE_URL,
     IL_PHONE,
@@ -80,6 +93,8 @@ class Person:
     meta: FakeOutbound = field(default_factory=lambda: FakeOutbound(name="whatsapp"))
     agent: Spy = field(default_factory=Spy)
     last: UUID | None = None
+    llm: Any = None
+    last_attempt: bool = False
 
     async def say(
         self,
@@ -111,6 +126,8 @@ class Person:
             allowlist=INVITED,
             on_allowed=self.agent,
             settings=self.settings,
+            llm=self.llm,
+            last_attempt=self.last_attempt,
             now=now or (lambda: datetime.now(UTC)),
         )
 
@@ -526,3 +543,189 @@ class TestLogs:
         token = person.texts()[-1].rsplit("/", 1)[-1]
         for leaked in (NL_PHONE, "31612345678", "Oncology appointment", "Mars", BASE_URL, token):
             assert leaked not in captured
+
+
+AMSTERDAM_CHOICE = zone_ask("en", "Europe/Amsterdam")
+
+
+class TestTalkedThrough:
+    """D10: with a model, the three fixed-text branches answer what was said, and code still
+    appends the zone question or the link and owns every state change."""
+
+    async def test_an_off_script_first_message_gets_an_answer_and_the_choice(
+        self, person: Person, db: Database
+    ) -> None:
+        person.llm = ScriptedLLM(said("I can, once we're set up: two quick steps."))
+        assert await person.say("can you add my dentist tomorrow?") == "onboarding"
+        assert person.texts() == [
+            f"I can, once we're set up: two quick steps.\n\n{AMSTERDAM_CHOICE}"
+        ]
+        assert await _kinds(person.conn) == ["onboarding:reply"]
+        [messages] = person.llm.calls
+        assert "Europe/Amsterdam" in messages[0].content  # the step and the guess
+        assert messages[-1] == Message("user", "can you add my dentist tomorrow?")
+        tenant = await tenant_by_phone(db, NL_PHONE)
+        assert tenant is not None
+        assert [(m.direction, m.body) for m in await messages_of(db, tenant.id)] == [
+            ("in", "can you add my dentist tomorrow?"),
+            ("out", person.texts()[0]),
+        ]
+
+    @pytest.mark.parametrize(
+        ("body", "reply_id"), [("1", None), ("yes", None), ("Correct", "zone:correct")]
+    )
+    async def test_the_default_path_never_calls_the_model(
+        self, person: Person, db: Database, body: str, reply_id: str | None
+    ) -> None:
+        person.llm = ScriptedLLM(said("Welcome!"))
+        await person.say("hi")
+        person.llm = NoLLM()
+        await person.say(body, reply_id=reply_id)
+        tenant = await tenant_by_phone(db, NL_PHONE)
+        assert tenant is not None
+        assert (tenant.timezone, tenant.onboarding_step) == ("Europe/Amsterdam", "connect")
+        assert await _kinds(person.conn) == ["onboarding:reply", "onboarding:connect"]
+        # Recorded for the model's next turn, without the link itself.
+        out = [m.body for m in await messages_of(db, tenant.id) if m.direction == "out"]
+        assert out[-1] == connect_text("en", "Europe/Amsterdam", LINK_PLACEHOLDER)
+
+    async def test_change_then_an_exact_city_never_calls_the_model(
+        self, person: Person, db: Database
+    ) -> None:
+        person.llm = ScriptedLLM(said("Welcome!"))
+        await person.say("hi")
+        person.llm = NoLLM()
+        await person.say("2")
+        await person.say("London")
+        tenant = await tenant_by_phone(db, NL_PHONE)
+        assert tenant is not None
+        assert (tenant.timezone, tenant.onboarding_step) == ("Europe/London", "connect")
+
+    async def test_an_unmatched_zone_message_is_answered_above_the_choice(
+        self, person: Person
+    ) -> None:
+        person.llm = ScriptedLLM(said("Welcome!"), said("A personal organizer for your circle."))
+        await person.say("hi")
+        await person.say("what is this?")
+        assert person.texts()[-1] == (
+            f"A personal organizer for your circle.\n\n{AMSTERDAM_CHOICE}"
+        )
+        # The second turn read the first from history: the message, then our reply.
+        assert person.llm.calls[1][1:3] == [
+            Message("user", "hi"),
+            Message("assistant", f"Welcome!\n\n{AMSTERDAM_CHOICE}"),
+        ]
+
+    async def test_set_timezone_takes_the_confirm_path(self, person: Person, db: Database) -> None:
+        person.llm = ScriptedLLM(
+            said("Welcome!"),
+            said("", call("set_timezone", zone="America/New_York")),
+            said("I've used New York, where you are this month."),
+        )
+        await person.say("hi")
+        await person.say("I live in Tel Aviv but I'm in New York this month")
+        tenant = await tenant_by_phone(db, NL_PHONE)
+        assert tenant is not None
+        assert (tenant.timezone, tenant.onboarding_step) == ("America/New_York", "connect")
+        reply = person.texts()[-1]
+        url = reply.rsplit("\n", 1)[-1]
+        assert reply == (
+            "I've used New York, where you are this month.\n\n"
+            + connect_text("en", "America/New_York", url)
+        )
+        assert link_payload(reply).tenant_id == tenant.id
+        recorded = [m.body for m in await messages_of(db, tenant.id)][-1]
+        assert recorded is not None
+        assert url not in recorded
+        assert LINK_PLACEHOLDER in recorded
+
+    async def test_a_zone_that_is_not_one_changes_nothing(
+        self, person: Person, db: Database
+    ) -> None:
+        person.llm = ScriptedLLM(
+            said("Welcome!"),
+            said("", call("set_timezone", zone="Mars/Olympus_Mons")),
+            said("Which city are you in?"),
+        )
+        await person.say("hi")
+        await person.say("Mars")
+        assert person.llm.calls[2][-1].content.startswith("error:")
+        tenant = await tenant_by_phone(db, NL_PHONE)
+        assert tenant is not None
+        assert (tenant.timezone, tenant.onboarding_step) == (None, "zone")
+
+    async def test_set_language_switches_the_reply_and_the_tenant(
+        self, person: Person, db: Database
+    ) -> None:
+        person.llm = ScriptedLLM(
+            said("Welcome!"), said("", call("set_language", language="he")), said("בשמחה.")
+        )
+        await person.say("hi")
+        await person.say("please speak Hebrew")
+        assert person.texts()[-1] == f"בשמחה.\n\n{zone_ask('he', 'Europe/Amsterdam')}"
+        tenant = await tenant_by_phone(db, NL_PHONE)
+        assert tenant is not None
+        assert tenant.language == "he"
+
+    async def test_any_connect_step_message_gets_an_answer_and_the_link(
+        self, person: Person, db: Database
+    ) -> None:
+        await person.say("hi")
+        await person.say("1")
+        person.llm = ScriptedLLM(said("Yes: Google shows a warning because the app is private."))
+        await person.say("is this safe?")
+        reply = person.texts()[-1]
+        url = reply.rsplit("\n", 1)[-1]
+        assert reply == (
+            "Yes: Google shows a warning because the app is private.\n\n"
+            + t("connect_link", "en", url=url)
+        )
+        tenant = await tenant_by_phone(db, NL_PHONE)
+        assert tenant is not None
+        assert link_payload(reply).tenant_id == tenant.id
+        assert (await _kinds(person.conn))[-1] == "onboarding:reply"
+
+    @pytest.mark.parametrize("written", ["Open https://evil.example/x", "  ", "x" * 5000])
+    async def test_a_url_an_empty_or_an_overlong_reply_is_dropped(
+        self, person: Person, written: str
+    ) -> None:
+        await person.say("hi")
+        await person.say("1")
+        person.llm = ScriptedLLM(said(written))
+        await person.say("the link doesn't work")
+        reply = person.texts()[-1]
+        assert reply == t("connect_link", "en", url=reply.rsplit("\n", 1)[-1])
+
+    async def test_a_model_that_is_down_is_retried_then_falls_back(
+        self, person: Person, db: Database
+    ) -> None:
+        """D3: raise for the job's retry; on the last attempt, today's text, never silence."""
+        person.llm = ScriptedLLM(LLMUnavailableError("down"), LLMUnavailableError("down"))
+        with pytest.raises(LLMUnavailableError):
+            await person.say("hi")
+        assert person.gowa.attempts == []
+        assert (await _inbox(person.conn, person.last))["processed_at"] is None
+        assert person.last is not None
+
+        person.last_attempt = True
+        assert await person.run(person.last) == "onboarding"
+        assert person.texts() == [welcome_text("en", "Europe/Amsterdam")]
+        assert await _kinds(person.conn) == ["onboarding:reply"]
+
+    async def test_a_refusal_falls_back_at_once(self, person: Person) -> None:
+        await person.say("hi")
+        person.llm = ScriptedLLM(LLMRejectedError(None))
+        await person.say("Mars")
+        assert person.texts()[-1] == retry_text("en", "Europe/Amsterdam")
+
+    async def test_a_re_run_that_decides_differently_sends_nothing_new(
+        self, person: Person, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        person.llm = ScriptedLLM(said("First answer."), said("Second answer."))
+        _fail_finishing_once(monkeypatch)
+        with pytest.raises(ConnectionResetError):
+            await person.say("what is this?")
+        assert person.last is not None
+        assert await person.run(person.last) == "onboarding"
+        assert person.texts() == [f"First answer.\n\n{AMSTERDAM_CHOICE}"]
+        assert await _kinds(person.conn) == ["onboarding:reply"]

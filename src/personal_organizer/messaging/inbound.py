@@ -59,9 +59,14 @@ from personal_organizer.core.errors import ChannelError
 from personal_organizer.core.types import TenantId
 from personal_organizer.db.engine import Database
 from personal_organizer.db.models.channel import ChannelInbox, ChannelOutbox
-from personal_organizer.db.repositories.messages import record_inbound
-from personal_organizer.db.repositories.tenants import set_onboarding_step, set_timezone
+from personal_organizer.db.repositories.messages import record_inbound, record_outbound
+from personal_organizer.db.repositories.tenants import (
+    set_language,
+    set_onboarding_step,
+    set_timezone,
+)
 from personal_organizer.interfaces.channel import OutboundChannel
+from personal_organizer.interfaces.llm import LLMProvider
 from personal_organizer.messaging.inbox import InboxRow, load_row
 from personal_organizer.messaging.invites import is_invited
 from personal_organizer.messaging.language import detect_language
@@ -74,7 +79,7 @@ from personal_organizer.messaging.replies import (
     SERVICE_WINDOW,
     SERVICE_WINDOW_MARGIN,
 )
-from personal_organizer.messaging.tenancy import enrol, load_state, resolve_sender
+from personal_organizer.messaging.tenancy import enrol, load_history, load_state, resolve_sender
 from personal_organizer.settings import Settings
 
 log = structlog.get_logger(__name__)
@@ -140,7 +145,7 @@ async def _finish_known(
     advance: Advance | None = None,
 ) -> None:
     """D7: copy the content under RLS and null it here, in the transaction that finishes the
-    row, together with the state the onboarding step decided."""
+    row, together with the state the onboarding step decided and the reply it sent."""
     change = advance or Advance()
     async with db.tenant_session(TenantId(tenant_id)) as session:
         # Claim the row first. ``messages.inbox_id`` is not unique, so an overlapping retry that
@@ -158,6 +163,8 @@ async def _finish_known(
             await set_timezone(session, tenant_id, change.timezone)
         if change.next_step is not None:
             await set_onboarding_step(session, tenant_id, change.next_step)
+        if change.language is not None:
+            await set_language(session, tenant_id, change.language)
         await record_inbound(
             session,
             tenant_id,
@@ -167,6 +174,10 @@ async def _finish_known(
             body=row.body,
             sent_at=row.sent_at,
         )
+        if change.reply is not None:
+            await record_outbound(
+                session, tenant_id, inbox_id=row.id, channel=row.channel, body=change.reply
+            )
 
 
 async def acknowledge(row: InboxRow, channel: OutboundChannel, *, db: Database) -> None:
@@ -252,6 +263,8 @@ async def _tenant_gate(
     allowlist: frozenset[str],
     on_allowed: OnAllowed,
     settings: Settings,
+    llm: LLMProvider | None,
+    last_attempt: bool,
 ) -> str:
     """D2: serve, onboard, enrol or turn away. See the module docstring's table."""
     stale = _is_stale(row, current)
@@ -274,7 +287,18 @@ async def _tenant_gate(
         await on_allowed(row, channel)
         await _finish_known(db, row, tenant.id, "allowed")
         return "allowed"
-    advance = await onboarding_step(db, channel, row, tenant, settings=settings, now=current)
+    history = await load_history(db, tenant.id) if llm is not None else ()
+    advance = await onboarding_step(
+        db,
+        channel,
+        row,
+        tenant,
+        settings=settings,
+        now=current,
+        llm=llm,
+        history=history,
+        last_attempt=last_attempt,
+    )
     await _finish_known(db, row, tenant.id, "onboarding", advance)
     return "onboarding"
 
@@ -287,12 +311,15 @@ async def handle_inbound(
     allowlist: frozenset[str],
     on_allowed: OnAllowed,
     settings: Settings | None = None,
+    llm: LLMProvider | None = None,
+    last_attempt: bool = False,
     now: Callable[[], datetime] = _utcnow,
 ) -> str | None:
     """Process one inbox row. Returns its disposition, or ``None`` if the row is gone.
 
     ``settings`` with ``composio.enabled`` selects the tenant gate. ``None``, or Composio
-    off, is Iteration 02's allowlist gate exactly.
+    off, is Iteration 02's allowlist gate exactly. ``llm`` talks onboarding through (D10);
+    ``last_attempt`` is the job's last, when an unavailable model falls back instead (D3).
     """
     row = await load_row(db, inbox_id)
     if row is None:
@@ -314,6 +341,8 @@ async def handle_inbound(
             allowlist=allowlist,
             on_allowed=on_allowed,
             settings=settings,
+            llm=llm,
+            last_attempt=last_attempt,
         )
     else:
         disposition = await _allowlist_gate(

@@ -18,23 +18,46 @@ guess, the Correct/Change choice is open, rebuilt from the guess on every messag
 no separate "waiting for a city" state either. A city is accepted whenever it is sent, so
 "Change" only has to ask for one. One consequence: "1" after "Change" still means Correct.
 That is harmless, because the user is shown the zone they are keeping.
+
+**The model writes the words, code keeps the rails (D10 of docs/plan-iteration-04.md).** With
+an LLM, the three branches that send a fixed, context-free text -- the welcome, an unmatched
+message in ``zone``, and any message in ``connect`` -- send the model's answer to what was
+actually said, with the zone question or the link appended by code. The model may call
+``set_timezone``, which then takes the confirm path, and ``set_language``. Its text is
+dropped for the fixed one if it holds ``http``, is empty, or would not fit one message. All
+of these replies, and every fallback, send under the one kind :data:`REPLY`, so a re-run
+whose model decides differently still sends nothing new. The default path ("1", a button, an
+alias, an exact city, Change) never calls the model. ``llm=None`` is the fixed conversation
+exactly; so is a model that refuses, or is down on the job's last attempt (D3).
+
+*shortcut: a crash between the send and the commit can lose a ``set_timezone`` the model
+decided. The next message asks again, and a link already sent keeps working, because
+connecting depends on status, not step. Store the decision with the send if that ever shows
+up in the logs.*
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, replace
 from datetime import datetime
-from typing import Final
+from typing import Any, Final
 
 import structlog
 
+from personal_organizer.core.errors import LLMRejectedError, LLMUnavailableError
 from personal_organizer.db.engine import Database
 from personal_organizer.interfaces.channel import OutboundChannel
+from personal_organizer.interfaces.llm import LLMProvider, Message
 from personal_organizer.messaging.choices import Choice, Option, render_text, resolve
+from personal_organizer.messaging.conversation import converse
 from personal_organizer.messaging.inbox import InboxRow
+from personal_organizer.messaging.language import ENGLISH, HEBREW
+from personal_organizer.messaging.onboarding_prompt import onboarding_prompt
 from personal_organizer.messaging.onboarding_text import t
 from personal_organizer.messaging.outbox import send_once
 from personal_organizer.messaging.tenancy import TenantState, phone_of
+from personal_organizer.messaging.text import WHATSAPP_TEXT_LIMIT
 from personal_organizer.messaging.timezones import guess_zone, match_zone
 from personal_organizer.onboarding.links import issue_or_reuse_link
 from personal_organizer.settings import Settings
@@ -46,6 +69,8 @@ ZONE_ASK_CITY: Final = "onboarding:zone_ask_city"
 ZONE_RETRY: Final = "onboarding:zone_retry"
 CONNECT: Final = "onboarding:connect"
 CONNECT_RESEND: Final = "onboarding:connect_resend"
+#: Every model-written reply, and its fallback, whichever branch it answers.
+REPLY: Final = "onboarding:reply"
 
 ZONE_CORRECT: Final = "zone:correct"
 ZONE_CHANGE: Final = "zone:change"
@@ -53,18 +78,58 @@ ZONE_CHANGE: Final = "zone:change"
 ZONE_STEP: Final = "zone"
 CONNECT_STEP: Final = "connect"
 
+#: Stands in for the connect link in a recorded reply: the link is a bearer credential, and a
+#: model shown a URL in its history may write one.
+LINK_PLACEHOLDER: Final = "[link]"
+
 #: Both languages, whatever the tenant's: people answer in the language they think in.
 _CORRECT_ALIASES: Final = ("yes", "y", "ok", "correct", "right", "כן", "נכון", "👍")
 _CHANGE_ALIASES: Final = ("no", "n", "change", "wrong", "לא", "לשנות", "שנה")
+
+#: The model's onboarding tools. No calendar tools: there is no calendar yet.
+TOOLS: Final[tuple[Mapping[str, Any], ...]] = (
+    {
+        "name": "set_timezone",
+        "description": (
+            "Save the person's time zone once they have said where they are. Use the IANA "
+            "name, for example Asia/Jerusalem or America/New_York."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"zone": {"type": "string", "description": "An IANA time zone."}},
+            "required": ["zone"],
+        },
+    },
+    {
+        "name": "set_language",
+        "description": "Switch every further message to this language, when they ask for it.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"language": {"type": "string", "enum": [HEBREW, ENGLISH]}},
+            "required": ["language"],
+        },
+    },
+)
 
 
 @dataclass(frozen=True, slots=True)
 class Advance:
     """The state change a step decided, for the gate to commit with the finished row.
-    ``None`` leaves a field as it is."""
+    ``None`` leaves a field as it is. ``reply`` is the text sent, to record (D4)."""
 
     timezone: str | None = None
     next_step: str | None = None
+    language: str | None = None
+    reply: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class Reply:
+    """What a step sends, under which ``send_once`` kind, and the change it decided."""
+
+    kind: str
+    text: str
+    advance: Advance
 
 
 def zone_choice(zone: str, language: str) -> Choice:
@@ -78,13 +143,15 @@ def zone_choice(zone: str, language: str) -> Choice:
     )
 
 
+def zone_ask(language: str, guess: str | None) -> str:
+    """The zone step's question: the choice built from the guess, or the city prompt."""
+    if guess:
+        return render_text(zone_choice(guess, language), language)
+    return t("zone_ask_city", language)
+
+
 def welcome_text(language: str, guess: str | None) -> str:
-    ask = (
-        render_text(zone_choice(guess, language), language)
-        if guess
-        else t("zone_ask_city", language)
-    )
-    return f"{t('welcome', language)}\n\n{ask}"
+    return f"{t('welcome', language)}\n\n{zone_ask(language, guess)}"
 
 
 def retry_text(language: str, guess: str | None) -> str:
@@ -96,6 +163,122 @@ def connect_text(language: str, zone: str, url: str) -> str:
     return f"{t('zone_set', language, zone=zone)}\n\n{t('connect_link', language, url=url)}"
 
 
+async def next_reply(
+    db: Database,
+    row: InboxRow,
+    tenant: TenantState,
+    *,
+    to: str,
+    settings: Settings,
+    now: datetime,
+    llm: LLMProvider | None = None,
+    history: Sequence[Message] = (),
+    last_attempt: bool = False,
+) -> Reply:
+    """Decide the answer to ``row`` from an onboarding ``tenant`` writing from ``to``.
+
+    Sends nothing and writes no tenant state, though it may issue a connect link. ``po-chat``
+    calls it directly.
+    """
+    language = tenant.language
+    guess = guess_zone(to)
+    links: list[str] = []
+
+    async def link() -> str:
+        url = await issue_or_reuse_link(db, tenant.id, settings=settings, now=now)
+        links.append(url)
+        return url
+
+    async def confirm(zone: str) -> Reply:
+        text = connect_text(language, zone, await link())
+        return Reply(CONNECT, text, Advance(timezone=zone, next_step=CONNECT_STEP))
+
+    async def talk(model: LLMProvider, url: str | None, fixed: Callable[[str], str]) -> Reply:
+        """The model's answer over the suffix: the link when ``url`` is given, else the zone
+        question. ``fixed`` is today's text for this branch, in a given language."""
+        decided: dict[str, str] = {}
+
+        async def run_tool(name: str, arguments: Mapping[str, Any]) -> str:
+            if name == "set_timezone":
+                zone = match_zone(str(arguments.get("zone", "")))
+                if zone is None:
+                    return "error: not a time zone; ask which city they are in"
+                decided["timezone"] = zone
+                return f"ok: time zone set to {zone}"
+            if name == "set_language" and arguments.get("language") in (HEBREW, ENGLISH):
+                decided["language"] = str(arguments["language"])
+                return f"ok: language set to {decided['language']}"
+            return "error: unknown tool or argument"
+
+        try:
+            said = await converse(
+                history,
+                row.body or f"[{row.message_type}]",
+                system=onboarding_prompt(language, connect=url is not None, guess=guess),
+                tools=TOOLS,
+                run_tool=run_tool,
+                llm=model,
+            )
+        except LLMUnavailableError:
+            if not last_attempt:
+                raise
+            log.warning("onboarding.llm_fallback", inbox_id=str(row.id), reason="unavailable")
+            return Reply(REPLY, fixed(language), Advance())
+        except LLMRejectedError:
+            log.warning("onboarding.llm_fallback", inbox_id=str(row.id), reason="rejected")
+            return Reply(REPLY, fixed(language), Advance())
+
+        switched = decided.get("language")
+        lang = switched or language
+        zone = decided.get("timezone")
+        if zone is not None:
+            suffix = connect_text(lang, zone, url or await link())
+            advance = Advance(timezone=zone, next_step=CONNECT_STEP, language=switched)
+        else:
+            suffix = t("connect_link", lang, url=url) if url else zone_ask(lang, guess)
+            advance = Advance(language=switched)
+        said = said.strip()
+        text = f"{said}\n\n{suffix}"
+        if not said or "http" in said.lower() or len(text) > WHATSAPP_TEXT_LIMIT:
+            log.info("onboarding.reply_dropped", inbox_id=str(row.id))
+            text = suffix if zone is not None else fixed(lang)
+        return Reply(REPLY, text, advance)
+
+    async def decide() -> Reply:
+        if tenant.step != ZONE_STEP:
+            # ``connect``, and defensively anything else: connecting is the only way out.
+            url = await link()
+            if llm is not None:
+                return await talk(llm, url, lambda lang: t("connect_link", lang, url=url))
+            return Reply(CONNECT_RESEND, t("connect_link", language, url=url), Advance())
+        if tenant.first_message:
+            if llm is not None:
+                return await talk(llm, None, lambda lang: welcome_text(lang, guess))
+            return Reply(WELCOME_ZONE, welcome_text(language, guess), Advance())
+        if guess is not None:
+            picked = resolve(zone_choice(guess, language), reply_id=row.reply_id, text=row.body)
+            if picked is not None and picked.id == ZONE_CORRECT:
+                return await confirm(guess)
+            if picked is not None:
+                return Reply(ZONE_ASK_CITY, t("zone_ask_city", language), Advance())
+        zone = match_zone(row.body) if row.body else None
+        if zone is not None:
+            return await confirm(zone)
+        log.info("onboarding.zone_unmatched", inbox_id=str(row.id), tenant_id=str(tenant.id))
+        if llm is not None:
+            return await talk(llm, None, lambda lang: retry_text(lang, guess))
+        return Reply(ZONE_RETRY, retry_text(language, guess), Advance())
+
+    reply = await decide()
+    if llm is None:
+        # Nothing reads the history without a model, and the fixed conversation stays exact.
+        return reply
+    recorded = reply.text
+    for url in links:
+        recorded = recorded.replace(url, LINK_PLACEHOLDER)
+    return replace(reply, advance=replace(reply.advance, reply=recorded))
+
+
 async def onboarding_step(
     db: Database,
     channel: OutboundChannel,
@@ -104,61 +287,51 @@ async def onboarding_step(
     *,
     settings: Settings,
     now: datetime,
+    llm: LLMProvider | None = None,
+    history: Sequence[Message] = (),
+    last_attempt: bool = False,
 ) -> Advance:
-    """Answer ``row`` for an onboarding ``tenant``. Sends; writes no tenant state."""
+    """Answer ``row`` for an onboarding ``tenant``. Sends; writes no tenant state.
+
+    ``history`` is the recorded conversation before ``row`` (D4), which only the model reads.
+    On the job's ``last_attempt`` an unavailable model falls back instead of raising.
+    """
     address = row.sender_phone or await phone_of(db, tenant.id)
     if address is None:
         # A BSUID-only sender whose tenant has no number on file. Whether Graph accepts a
         # BSUID as ``to`` is unconfirmed, so there is no reply, exactly as for strangers.
         log.info("onboarding.unaddressable", inbox_id=str(row.id), tenant_id=str(tenant.id))
         return Advance()
-    to: str = address
-    language = tenant.language
-    guess = guess_zone(to)
-
-    async def send(kind: str, text: str) -> None:
-        await send_once(
-            db,
-            channel,
-            inbox_id=row.id,
-            kind=kind,
-            recipient_key=row.sender_key,
-            to=to,
-            text=text,
-        )
-
-    async def confirm(zone: str) -> Advance:
-        url = await issue_or_reuse_link(db, tenant.id, settings=settings, now=now)
-        await send(CONNECT, connect_text(language, zone, url))
-        return Advance(timezone=zone, next_step=CONNECT_STEP)
-
-    if tenant.step != ZONE_STEP:
-        # ``connect``, and defensively anything else: connecting is the only way out.
-        url = await issue_or_reuse_link(db, tenant.id, settings=settings, now=now)
-        await send(CONNECT_RESEND, t("connect_link", language, url=url))
-        return Advance()
-    if tenant.first_message:
-        await send(WELCOME_ZONE, welcome_text(language, guess))
-        return Advance()
-    if guess is not None:
-        picked = resolve(zone_choice(guess, language), reply_id=row.reply_id, text=row.body)
-        if picked is not None and picked.id == ZONE_CORRECT:
-            return await confirm(guess)
-        if picked is not None:
-            await send(ZONE_ASK_CITY, t("zone_ask_city", language))
-            return Advance()
-    zone = match_zone(row.body) if row.body else None
-    if zone is not None:
-        return await confirm(zone)
-    log.info("onboarding.zone_unmatched", inbox_id=str(row.id), tenant_id=str(tenant.id))
-    await send(ZONE_RETRY, retry_text(language, guess))
-    return Advance()
+    reply = await next_reply(
+        db,
+        row,
+        tenant,
+        to=address,
+        settings=settings,
+        now=now,
+        llm=llm,
+        history=history,
+        last_attempt=last_attempt,
+    )
+    await send_once(
+        db,
+        channel,
+        inbox_id=row.id,
+        kind=reply.kind,
+        recipient_key=row.sender_key,
+        to=address,
+        text=reply.text,
+    )
+    return reply.advance
 
 
 __all__ = [
     "CONNECT",
     "CONNECT_RESEND",
     "CONNECT_STEP",
+    "LINK_PLACEHOLDER",
+    "REPLY",
+    "TOOLS",
     "WELCOME_ZONE",
     "ZONE_ASK_CITY",
     "ZONE_CHANGE",
@@ -166,9 +339,12 @@ __all__ = [
     "ZONE_RETRY",
     "ZONE_STEP",
     "Advance",
+    "Reply",
     "connect_text",
+    "next_reply",
     "onboarding_step",
     "retry_text",
     "welcome_text",
+    "zone_ask",
     "zone_choice",
 ]

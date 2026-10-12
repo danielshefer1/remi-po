@@ -1,11 +1,16 @@
-"""Conversation content under RLS (D7), and which channel a tenant last wrote from."""
+"""Conversation content under RLS (D7), and which channel a tenant last wrote from.
+
+Replies are recorded too (``direction="out"``), in the transaction that records the message
+they answer. Both rows then share ``now()``, so the history orders by
+``(created_at, direction = 'out')``: the message before its reply.
+"""
 
 from __future__ import annotations
 
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import insert, select
+from sqlalchemy import func, insert, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from personal_organizer.db.models.tenant import Message
@@ -43,6 +48,36 @@ async def record_inbound(
     return message_id
 
 
+async def record_outbound(
+    session: AsyncSession, tenant_id: UUID, *, inbox_id: UUID, channel: str, body: str
+) -> None:
+    """Record the reply to ``inbox_id``, so the next turn's history has it (D4)."""
+    await session.execute(
+        insert(Message).values(
+            tenant_id=tenant_id,
+            direction="out",
+            channel=channel,
+            inbox_id=inbox_id,
+            message_type="text",
+            body=body,
+            sent_at=func.now(),
+        )
+    )
+
+
+async def recent_messages(session: AsyncSession, tenant_id: UUID, *, limit: int) -> list[Message]:
+    """The tenant's last ``limit`` messages with text, both directions, oldest first."""
+    newest_first = (
+        await session.scalars(
+            scoped(select(Message), Message, tenant_id)
+            .where(Message.body.is_not(None))
+            .order_by(Message.created_at.desc(), (Message.direction == "out").desc())
+            .limit(limit)
+        )
+    ).all()
+    return list(reversed(newest_first))
+
+
 async def latest_inbound_channel(session: AsyncSession, tenant_id: UUID) -> str | None:
     """The channel name of the tenant's most recent inbound message: where a send that
     answers nothing goes (ADR 0004's "proactive sends need a channel choice")."""
@@ -55,4 +90,4 @@ async def latest_inbound_channel(session: AsyncSession, tenant_id: UUID) -> str 
     return channel
 
 
-__all__ = ["latest_inbound_channel", "record_inbound"]
+__all__ = ["latest_inbound_channel", "recent_messages", "record_inbound", "record_outbound"]
