@@ -2,8 +2,13 @@
 
 Two seams. ``ConnectLinker`` takes a user through connecting their Google Calendar: Composio
 today, under our own Google OAuth app (a Composio custom auth config). ``CalendarProvider``
-reads and writes events once connected, from the calendar-read iteration. Both stay
-dependency-free, so swapping an adapter never reaches the callers.
+reads and writes events once connected. Its caller holds the tenant's ``calendar_connections``
+row and passes that row's account and user ids, so nothing a model writes can pick whose
+calendar a call reaches. Both stay dependency-free, so swapping an adapter never reaches the
+callers.
+
+``CalendarEvent`` carries the title, the times and the location, and nothing else. Anyone can
+send an invite into your calendar, so its description and attendees never reach a prompt.
 """
 
 from __future__ import annotations
@@ -12,8 +17,6 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Final, Protocol, runtime_checkable
-
-from personal_organizer.core.types import TenantId
 
 #: The one connected-account status that means "tokens held, calls will work".
 ACCOUNT_ACTIVE: Final = "ACTIVE"
@@ -30,6 +33,7 @@ class CalendarEvent:
     start: datetime
     end: datetime
     all_day: bool = False
+    location: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,10 +62,16 @@ class ConnectLinker(Protocol):
 @runtime_checkable
 class CalendarProvider(Protocol):
     async def list_events(
-        self, tenant_id: TenantId, *, start: datetime, end: datetime
-    ) -> Sequence[CalendarEvent]: ...
+        self, account_id: str, user_id: str, *, start: datetime, end: datetime
+    ) -> Sequence[CalendarEvent]:
+        """Events overlapping ``[start, end)``, both timezone-aware, from the primary calendar."""
+        ...
 
-    async def create_event(self, tenant_id: TenantId, event: CalendarEvent) -> CalendarEvent: ...
+    async def create_event(
+        self, account_id: str, user_id: str, event: CalendarEvent
+    ) -> CalendarEvent:
+        """Add ``event`` (its ``external_id`` is ignored); return it as the provider stored it."""
+        ...
 
 
 __all__ = [
