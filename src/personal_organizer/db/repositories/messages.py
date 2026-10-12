@@ -70,7 +70,8 @@ async def recent_messages(session: AsyncSession, tenant_id: UUID, *, limit: int)
     newest_first = (
         await session.scalars(
             scoped(select(Message), Message, tenant_id)
-            .where(Message.body.is_not(None))
+            # Some text, not just none: the model's API refuses a blank turn.
+            .where(Message.body.regexp_match(r"\S"))
             .order_by(Message.created_at.desc(), (Message.direction == "out").desc())
             .limit(limit)
         )

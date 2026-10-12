@@ -27,11 +27,9 @@ import json
 from collections.abc import Mapping, Sequence
 from datetime import date, datetime, timedelta
 from typing import Any, Final
-from uuid import UUID
 from zoneinfo import ZoneInfo
 
 import structlog
-from sqlalchemy import exists, select
 
 from personal_organizer.core.errors import (
     CalendarNotConnectedError,
@@ -42,7 +40,6 @@ from personal_organizer.core.errors import (
 )
 from personal_organizer.core.types import TenantId
 from personal_organizer.db.engine import Database
-from personal_organizer.db.models.channel import ChannelOutbox
 from personal_organizer.db.models.tenant import CalendarConnection
 from personal_organizer.db.repositories.connections import active_connection
 from personal_organizer.interfaces.calendar import CalendarEvent, CalendarProvider
@@ -53,7 +50,7 @@ from personal_organizer.messaging.inbox import InboxRow
 from personal_organizer.messaging.language import ENGLISH, HEBREW
 from personal_organizer.messaging.onboarding import LINK_PLACEHOLDER, Advance
 from personal_organizer.messaging.onboarding_text import t
-from personal_organizer.messaging.outbox import send_once
+from personal_organizer.messaging.outbox import already_sent, send_once
 from personal_organizer.messaging.tenancy import TenantState, load_history, phone_of
 from personal_organizer.messaging.text import WHATSAPP_TEXT_LIMIT, split_text
 
@@ -249,21 +246,6 @@ async def respond(
     return said
 
 
-async def _already_sent(db: Database, inbox_id: UUID) -> bool:
-    """Whether a previous run claimed this row's reply: anything but a send put back."""
-    async with db.system_session() as session:
-        claimed = await session.scalar(
-            select(
-                exists().where(
-                    ChannelOutbox.inbox_id == inbox_id,
-                    ChannelOutbox.kind == AGENT_REPLY,
-                    ChannelOutbox.status != "pending",
-                )
-            )
-        )
-    return bool(claimed)
-
-
 def _fit(text: str) -> str:
     if len(text) <= WHATSAPP_TEXT_LIMIT:
         return text
@@ -290,7 +272,7 @@ async def agent_turn(
         # As in onboarding: a BSUID-only sender with no number on file cannot be addressed.
         log.info("agent.unaddressable", inbox_id=str(row.id), tenant_id=str(tenant.id))
         return Advance()
-    if await _already_sent(db, row.id):
+    if await already_sent(db, row.id, AGENT_REPLY):
         # A re-run after the send: a new answer would be recorded but never delivered.
         log.info("agent.already_sent", inbox_id=str(row.id))
         return Advance()

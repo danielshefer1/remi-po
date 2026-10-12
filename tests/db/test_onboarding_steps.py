@@ -15,12 +15,10 @@ from personal_organizer.messaging.choices import render_text
 from personal_organizer.messaging.inbox import load_row
 from personal_organizer.messaging.onboarding import (
     CONNECT,
-    CONNECT_RESEND,
-    WELCOME_ZONE,
+    REPLY,
     ZONE_ASK_CITY,
     ZONE_CHANGE,
     ZONE_CORRECT,
-    ZONE_RETRY,
     Advance,
     connect_text,
     onboarding_step,
@@ -133,7 +131,7 @@ class TestZoneStep:
         # Even "1": a first message is never read as an answer to a question not yet asked.
         assert advance == Advance()
         assert [m.body for m in channel.sent] == [welcome_text("en", AMSTERDAM)]
-        assert await _kinds(owner_conn) == [WELCOME_ZONE]
+        assert await _kinds(owner_conn) == [REPLY]
 
     async def test_no_guess_welcome_asks_for_a_city(
         self, db: Database, owner_conn: Any, onboarding_settings: Settings
@@ -247,7 +245,7 @@ class TestZoneStep:
         )
         assert advance == Advance()
         assert [m.body for m in channel.sent] == [retry_text("en", AMSTERDAM)]
-        assert await _kinds(owner_conn) == [ZONE_RETRY]
+        assert await _kinds(owner_conn) == [REPLY]
 
     async def test_a_message_without_text_gets_the_retry_prompt(
         self, db: Database, owner_conn: Any, onboarding_settings: Settings
@@ -294,7 +292,7 @@ class TestConnectStep:
         url = message.body.rsplit("\n", 1)[-1]
         assert message.body == t("connect_link", "en", url=url)
         assert link_payload(message.body).tenant_id == tenant_id
-        assert await _kinds(owner_conn) == [CONNECT_RESEND]
+        assert await _kinds(owner_conn) == [REPLY]
 
 
 class TestAddressing:

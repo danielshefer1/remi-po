@@ -73,6 +73,9 @@ def _wire(messages: Sequence[Message]) -> tuple[list[dict[str, Any]], list[dict[
     # The API's first turn is the person's. History cut at its limit can start with ours.
     while wire and wire[0]["role"] != "user":
         wire.pop(0)
+    # And the last: a trailing turn of ours is a prefill, which Haiku 5.5 refuses with a 400.
+    while wire and wire[-1]["role"] != "user":
+        wire.pop()
     if not system:
         return [], wire
     block = {"type": "text", "text": "\n\n".join(system), "cache_control": {"type": "ephemeral"}}
@@ -105,8 +108,9 @@ class AnthropicLLM:
             raise ConfigError(msg)
         client = anthropic.AsyncAnthropic(
             api_key=settings.agent.api_key.get_secret_value(),
-            timeout=settings.models.request_timeout_s,
-            max_retries=settings.models.max_retries,
+            timeout=settings.agent.request_timeout_s,
+            # The job retries (INBOUND_RETRY); the SDK's own would stack under each attempt.
+            max_retries=0,
             http_client=http_client,
         )
         return cls(client, model=settings.models.chat_model)

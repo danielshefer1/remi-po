@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import replace
 from typing import Any
 
 import pytest
 
 from personal_organizer.core.errors import LLMUnavailableError
-from personal_organizer.interfaces.llm import Message
+from personal_organizer.interfaces.llm import Completion, Message
 from personal_organizer.messaging.conversation import MAX_TOOL_ROUNDS, converse
 from tests.fixtures.llm import ScriptedLLM, call, said
 
@@ -53,6 +54,16 @@ async def test_tool_rounds_are_bounded() -> None:
     assert await run(llm, tools) == f"round {MAX_TOOL_ROUNDS}"
     assert len(tools.ran) == MAX_TOOL_ROUNDS
     assert len(llm.calls) == MAX_TOOL_ROUNDS + 1
+
+
+@pytest.mark.parametrize(
+    "cut", [said("Two quick steps: first"), said("", call("set_timezone", zone="Asia/Jer"))]
+)
+async def test_a_reply_cut_off_at_max_tokens_is_empty(cut: Completion) -> None:
+    """Half a sentence, or half a tool call: either way the caller's fallback answers."""
+    tools = Tools()
+    assert await run(ScriptedLLM(replace(cut, finish_reason="max_tokens")), tools) == ""
+    assert tools.ran == []
 
 
 async def test_provider_errors_pass_through() -> None:

@@ -18,6 +18,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 import sentry_sdk
+from sentry_sdk.integrations.anthropic import AnthropicIntegration
 from sentry_sdk.integrations.logging import LoggingIntegration
 from sentry_sdk.types import Event, Hint
 
@@ -104,6 +105,9 @@ def init_sentry(settings: Settings) -> None:
         # Breadcrumbs from stdlib logging only; events come from explicit captures, so a
         # log line never becomes a second, unredacted copy of an error.
         integrations=[LoggingIntegration(level=None, event_level=None)],
+        # Auto-enabled because ``anthropic`` is installed, it captures the SDK's own exceptions,
+        # response bodies included, before the adapter translates them without chaining (D8).
+        disabled_integrations=[AnthropicIntegration()],
         before_send=scrub_event,
         before_send_transaction=scrub_event,
         before_breadcrumb=scrub_breadcrumb,
