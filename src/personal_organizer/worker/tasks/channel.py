@@ -9,9 +9,11 @@ Retries are Procrastinate's, and only for failures that are definitely-not-sent,
 database connection, or an LLM that is down (D3 of docs/plan-iteration-04.md). One retry layer
 keeps every attempt visible in ``procrastinate_jobs``; an in-task retry loop would hide them
 and hold a worker slot while it slept. The price is ordering: a job waiting to retry keeps its
-lock, so the same sender's next message waits too -- up to about two minutes across the whole
-backoff. On the last attempt an LLM that is still down is answered with the fixed texts
-instead, so the person never gets silence.
+lock, so the same sender's next message waits too. The backoff's waits add up to about two
+minutes, and the seven attempts' own time comes on top: with the model timing out, 20 s each
+(``AGENT__REQUEST_TIMEOUT_S``, no SDK retries), about four and a half minutes in all. On the last
+attempt an LLM that is still down is answered with the fixed texts instead, so the person never
+gets silence.
 """
 
 from __future__ import annotations
@@ -37,7 +39,7 @@ log = structlog.get_logger(__name__)
 HANDLE_INBOUND_TASK: Final = "channel:handle_inbound"
 
 #: Waits of 2, 4, 8, 16, 32 and 64 seconds: Procrastinate retries while the previous attempts
-#: number fewer than ``max_attempts``.
+#: number fewer than ``max_attempts``, so a job runs at most seven times.
 INBOUND_RETRY: Final = procrastinate.RetryStrategy(
     max_attempts=6,
     exponential_wait=2,

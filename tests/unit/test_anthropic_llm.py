@@ -84,9 +84,7 @@ def agent_settings(settings: Settings) -> Settings:
     return settings.model_copy(
         update={
             "agent": AgentSettings(enabled=True, api_key=SecretStr("sk-ant-test")),
-            "models": settings.models.model_copy(
-                update={"chat_model": "claude-haiku-5-5", "max_retries": 0}
-            ),
+            "models": settings.models.model_copy(update={"chat_model": "claude-haiku-5-5"}),
         }
     )
 
@@ -101,6 +99,12 @@ SYSTEM = Message("system", "You are the onboarding assistant.")
 
 def test_it_is_an_llm_provider(agent_settings: Settings) -> None:
     assert isinstance(llm(agent_settings, Api()), LLMProvider)
+
+
+def test_one_bounded_attempt_per_call(agent_settings: Settings) -> None:
+    """The job's retries are the only ones: the SDK's would multiply each attempt's time."""
+    client = AnthropicLLM.from_settings(agent_settings)._client
+    assert (client.timeout, client.max_retries) == (20.0, 0)
 
 
 def test_it_needs_a_key(settings: Settings) -> None:
@@ -142,11 +146,13 @@ class TestRequest:
                 Message("user", "Haifa"),
                 Message("assistant", "Set."),
                 Message("user", "thanks"),
+                Message("assistant", "You're welcome."),
             ],
             max_tokens=1024,
         )
         messages = api.bodies[0]["messages"]
         assert [m["role"] for m in messages] == ["user", "assistant", "user"]
+        assert messages[-1] == {"role": "user", "content": "thanks"}
         assert "tools" not in api.bodies[0]
 
     async def test_a_tool_round_sends_the_thinking_back(self, agent_settings: Settings) -> None:

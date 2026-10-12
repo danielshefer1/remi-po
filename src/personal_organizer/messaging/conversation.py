@@ -7,7 +7,8 @@ the model can say so or ask again; only the caller decides what a tool *did*.
 
 Bounds: at most :data:`MAX_TOOL_ROUNDS` rounds of tool calls and :data:`MAX_TOKENS` per
 completion. A model still calling tools after the last round has its text taken as the reply,
-which may be empty; the caller has a fallback for that.
+which may be empty, and a completion cut off at ``max_tokens`` is an empty reply; the caller
+has a fallback for that.
 
 Provider errors pass through unchanged: :class:`~personal_organizer.core.errors.
 LLMUnavailableError` is the job's to retry, and the caller falls back on the last attempt.
@@ -47,6 +48,10 @@ async def converse(
         rounds = 0
         while True:
             completion = await llm.complete(messages, tools=tools, max_tokens=MAX_TOKENS)
+            if completion.finish_reason == "max_tokens":
+                # Half a sentence or half a tool call's arguments: neither is worth using.
+                log.info("conversation.truncated", rounds=rounds)
+                return ""
             if not completion.tool_calls or rounds == MAX_TOOL_ROUNDS:
                 return completion.content
             rounds += 1
