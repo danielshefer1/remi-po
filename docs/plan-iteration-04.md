@@ -126,8 +126,9 @@ onboarding and active tenants.
 - It needs no new task or queue, and the sender lock already orders a person's messages.
 - A transient LLM or Composio error (`LLMUnavailableError`, `CalendarProviderUnavailableError`)
   joins `INBOUND_RETRY`. A re-run is safe because `send_once` keeps it to one reply.
-- On the last attempt (`pass_context=True`, `attempts == max_attempts - 1`) the turn falls back
-  instead of raising, so the person never gets silence.
+- On the last attempt (`pass_context=True`, `attempts >= max_attempts`: Procrastinate 3.10 runs
+  a job `max_attempts + 1` times, 7 with our 6) the turn falls back instead of raising, so the
+  person never gets silence.
   - During onboarding it falls back to today's fixed texts.
   - For an active tenant it sends a fixed "I couldn't answer just now, try again".
 
@@ -164,7 +165,9 @@ Store them if the evals show it misses context.*
 - `TenantState` gains `timezone`; the column already exists.
 
 **D7. Bounds per turn:**
-- At most 4 tool rounds, `max_tokens` 1024, and `request_timeout_s` from `ModelSettings`.
+- At most 4 tool rounds, `max_tokens` 1024, and a 20 s `AGENT__REQUEST_TIMEOUT_S` per call with
+  the SDK's own retries off, so `INBOUND_RETRY` is the one retry layer. A reply cut off at
+  `max_tokens` takes the fallback.
 - A long reply goes through `split_text`.
 - There is no per-tenant daily cap for a circle; a Sentry alert and a monthly bill check cover
   it.
@@ -226,16 +229,19 @@ no calendar tools, because there is no calendar yet.
 - In the `connect` step, the link from `issue_or_reuse_link`.
 
 The model never writes a URL or a numbered option. Its prompt says the suffix is added, and a
-check drops any reply text that contains `http`. So the link and the choice are always present,
+check drops any reply text that contains `http` or the `[link]` placeholder recorded in
+history. So the link and the choice are always present,
 correct and the same on every channel, and "1" keeps meaning Correct (D9 of Iteration 03).
 
-*Re-runs.* Every model-written onboarding reply, and its last-attempt fallback, sends under one
-kind, `onboarding:reply`. A re-run whose model decides differently therefore still sends
-nothing new.
+*Re-runs.* The three branches send under one kind, `onboarding:reply`, with the model or
+without it (so toggling the agent between a send and its commit can't send twice). A re-run
+that finds that reply already sent returns no change without calling the model, because what
+it decided now need not be what went out.
 
-*shortcut: a crash between the send and the commit can lose a `set_timezone` the model decided.
-The next message asks again, and a link already sent keeps working, because connecting depends
-on status, not step. Store the decision with the send if that ever shows up in the logs.*
+*shortcut: a crash between the send and the commit loses what the model decided with that reply
+(a `set_timezone`, say), and the sent text isn't recorded in the history. The next message asks
+again, and a link already sent keeps working, because connecting depends on status, not step.
+Store the decision with the send if that ever shows up in the logs.*
 
 *Off the map entirely* (Outlook, no Google account, "I don't want to connect"): the model says
 honestly that Google Calendar is the only option for now, and the person stays in `connect`.
