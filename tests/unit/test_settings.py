@@ -385,6 +385,33 @@ class TestComposio:
             assert secret not in rendered
 
 
+class TestAgent:
+    """Off by default. On, it needs its key and Composio, named together like Composio's."""
+
+    def test_disabled_by_default_with_nothing_required(self, settings: Settings) -> None:
+        assert settings.agent.enabled is False
+        assert settings.agent.api_key is None
+
+    def test_enabled_with_nothing_names_every_missing_setting_at_once(
+        self, settings_factory: Any
+    ) -> None:
+        with pytest.raises(ValidationError) as excinfo:
+            settings_factory(AGENT__ENABLED="true")
+        message = str(excinfo.value)
+        assert "COMPOSIO__ENABLED" in message
+        assert "AGENT__API_KEY" in message
+
+    def test_enabled_with_everything_boots(self, settings_factory: Any) -> None:
+        cfg = settings_factory(
+            AGENT__ENABLED="true",
+            AGENT__API_KEY="sk-ant-test",
+            COMPOSIO__ENABLED="true",
+            **_COMPOSIO,
+        )
+        assert cfg.agent.enabled
+        assert "sk-ant-test" not in repr(cfg) + cfg.model_dump_json()
+
+
 class TestPublicBaseUrl:
     def test_unset_by_default(self, settings: Settings) -> None:
         assert settings.app.public_base_url is None
