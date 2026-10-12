@@ -85,9 +85,9 @@ silently reverting it with a force-push.
 Inspect or change them:
 
 ```sh
-gh api repos/danielshefer1/personal-organizer/rulesets --jq '.[] | "\(.id) \(.name)"'
-gh api repos/danielshefer1/personal-organizer/rulesets/<id>
-gh api -X DELETE repos/danielshefer1/personal-organizer/rulesets/<id>
+gh api repos/danielshefer1/remi-po/rulesets --jq '.[] | "\(.id) \(.name)"'
+gh api repos/danielshefer1/remi-po/rulesets/<id>
+gh api -X DELETE repos/danielshefer1/remi-po/rulesets/<id>
 ```
 
 Neither ruleset has bypass actors, not even for the owner. The escape hatch is deleting the
