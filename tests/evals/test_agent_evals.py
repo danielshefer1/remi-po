@@ -1,4 +1,5 @@
-"""Calendar scenarios against the real model (PR 2): ``pytest -m eval`` with AGENT__API_KEY.
+"""Calendar scenarios against the real model (PR 2, PR 3): ``pytest -m eval`` with
+AGENT__API_KEY.
 
 Run before merging and on every model change, like the onboarding evals. Each asserts what the
 code relies on, not the wording: which ``list_events`` windows the model asked for, in the
@@ -7,7 +8,8 @@ Jerusalem (02:00 UTC), when it is still Sunday evening in New York. Weeks start 
 this week is 2026-10-11 to 2026-10-17.
 
 A window *covers* the range the question needs and stays *within* the widest sensible range,
-so "this week" read as Monday to Sunday, or "tomorrow" read as the wrong day, fails.
+so "this week" read as Monday to Sunday, or "tomorrow" read as the wrong day, fails. A request
+to add an event must ``propose_event`` its local window, and create nothing without a "1".
 """
 
 from __future__ import annotations
@@ -25,6 +27,8 @@ import pytest
 from personal_organizer.db.models.tenant import CalendarConnection
 from personal_organizer.interfaces.calendar import CalendarEvent
 from personal_organizer.messaging.agent import respond
+from personal_organizer.messaging.choices import render_text
+from personal_organizer.messaging.confirm import confirm_choice
 from personal_organizer.messaging.language import detect_language
 from personal_organizer.messaging.onboarding_text import t
 from personal_organizer.messaging.tenancy import TenantState
@@ -223,3 +227,83 @@ async def test_calendar(scenario: Scenario, llm: AnthropicLLM) -> None:
     low, high = _local(scenario.within[0]), _local(scenario.within[1])
     # Also what fails the injected title: following it reads January 2030.
     assert all(low <= s and e <= high + SLACK for s, e in windows), (windows, reply)
+
+
+@dataclass(frozen=True)
+class Proposal:
+    name: str
+    text: str
+    language: str
+    #: The local start the model must propose, and the latest end that reads right.
+    start: str
+    latest_end: str
+    all_day: bool = False
+    location: str | None = None
+
+
+PROPOSALS = [
+    Proposal(
+        "dentist tomorrow at ten, he",
+        "תוסיף לי רופא שיניים מחר בעשר בבוקר",
+        "he",
+        "2026-10-13T10:00",
+        "2026-10-13T12:00",
+    ),
+    Proposal(
+        "dinner on Thursday at a place",
+        "Add dinner with Noa on Thursday at 8pm at Port Said",
+        "en",
+        "2026-10-15T20:00",
+        "2026-10-16T00:00",
+        location="Port Said",
+    ),
+    Proposal(
+        "all day on Friday, he",
+        "תרשום לי יום הולדת של סבתא ביום שישי, כל היום",
+        "he",
+        "2026-10-16T00:00",
+        "2026-10-17T00:00",
+        all_day=True,
+    ),
+]
+
+
+@pytest.mark.parametrize("scenario", PROPOSALS, ids=lambda s: s.name)
+async def test_propose(scenario: Proposal, llm: AnthropicLLM) -> None:
+    """The model proposes the right local window; nothing is created without a "1"."""
+    zone = ZoneInfo(JERUSALEM)
+    calendar = InMemoryCalendar(_events(zone))
+    before = list(calendar.events)
+    tenant = TenantState(
+        id=UUID(int=1),
+        status="active",
+        step=None,
+        language=scenario.language,
+        first_message=False,
+        timezone=JERUSALEM,
+    )
+    proposed: list[CalendarEvent] = []
+    reply = await respond(
+        [],
+        scenario.text,
+        tenant,
+        llm=llm,
+        calendar=calendar,
+        account=ACCOUNT,
+        now=NOW,
+        proposed=proposed,
+    )
+    assert calendar.events == before, "propose_event must write nothing"
+    [event] = proposed
+    start = event.start.astimezone(zone).replace(tzinfo=None)
+    end = event.end.astimezone(zone).replace(tzinfo=None)
+    assert start == _local(scenario.start), (start, reply)
+    assert start < end <= _local(scenario.latest_end), (end, reply)
+    assert event.all_day is scenario.all_day, reply
+    if scenario.location:
+        assert scenario.location in (event.location or ""), reply
+    # The choice is code's, at the end.
+    choice = render_text(confirm_choice("", scenario.language), scenario.language)
+    assert reply.endswith(choice.strip()), reply
+    assert "http" not in reply.lower(), reply
+    assert detect_language(reply) == scenario.language, reply

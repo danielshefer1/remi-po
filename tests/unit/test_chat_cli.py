@@ -10,12 +10,21 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from personal_organizer.admin.chat import NO_ANSWER, OK, _parser, agent_chat, chat, sample_events
+from personal_organizer.admin.chat import (
+    NO_ANSWER,
+    NOT_ADDED,
+    OK,
+    _parser,
+    agent_chat,
+    chat,
+    sample_events,
+)
 from personal_organizer.db.engine import Database
 from personal_organizer.db.models.tenant import CalendarConnection
 from personal_organizer.interfaces.llm import Message
 from personal_organizer.messaging.agent import AGENT_REPLY
 from personal_organizer.messaging.onboarding import REPLY, zone_ask
+from personal_organizer.messaging.onboarding_text import t
 from personal_organizer.messaging.tenancy import TenantState
 from personal_organizer.providers.calendar.memory import InMemoryCalendar
 from personal_organizer.settings import Settings
@@ -125,3 +134,45 @@ class TestActiveTenants:
             Message("assistant", "Nothing tomorrow."),
             Message("user", "and then?"),
         ]
+
+    @pytest.mark.parametrize("fake", [True, False])
+    async def test_a_proposal_waits_for_the_next_line(self, fake: bool) -> None:
+        tenant = TenantState(
+            id=UUID(int=1),
+            status="active",
+            step=None,
+            language="en",
+            first_message=False,
+            timezone="Asia/Jerusalem",
+        )
+        memory = InMemoryCalendar()
+        # Anything but the in-memory calendar stands for Google, which po-chat never writes.
+        calendar = memory if fake else cast(Any, object())
+        account = CalendarConnection(connected_account_id="fake", composio_user_id="t")
+        dentist = call(
+            "propose_event", title="Dentist", start="2026-10-13T09:00", end="2026-10-13T10:00"
+        )
+        llm = ScriptedLLM(
+            said("", dentist), said("Shall I?"), said("", dentist), said("Again?"), said("")
+        )
+        printed: list[str] = []
+        await agent_chat(
+            tenant,
+            llm=llm,
+            calendar=calendar,
+            account=account,
+            read=lines("add the dentist tomorrow at 9", "1", "and again", "2", "1"),
+            write=printed.append,
+        )
+        summary = "Dentist\nTuesday 2026-10-13, 09:00-10:00"
+        added = t("event_added", "en", summary=summary) if fake else NOT_ADDED
+        assert printed[1:] == [
+            f"bot [{AGENT_REPLY}]> {added}",
+            printed[2],
+            f"bot [{AGENT_REPLY}]> {t('event_cancelled', 'en')}",
+            f"bot [{AGENT_REPLY}]> {NO_ANSWER}",
+        ]
+        assert printed[0].endswith("2. Cancel\n\nReply with a number.")
+        assert len(memory.events) == (1 if fake else 0)
+        # "1" with nothing waiting is the model's, like any other line.
+        assert len(llm.calls) == 5
