@@ -1,4 +1,5 @@
-"""The agent's calendar tool and prompt (D6): zone maths, what an event shows, argument checks.
+"""The agent's calendar tools and prompt (D5, D6): zone maths, what an event shows, argument
+checks, and the confirm choice code puts under a proposal.
 
 No database: :func:`read_calendar` and :func:`respond` are called with an in-memory calendar and
 a scripted model.
@@ -9,7 +10,7 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
-from typing import Any
+from typing import Any, ClassVar
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -27,11 +28,16 @@ from personal_organizer.messaging.agent import (
     MAX_WINDOW,
     NOT_CONNECTED,
     UNAVAILABLE,
+    add_event,
     agent_prompt,
+    check_event,
+    event_summary,
     read_calendar,
     respond,
     week_of,
 )
+from personal_organizer.messaging.choices import render_text
+from personal_organizer.messaging.confirm import confirm_choice
 from personal_organizer.messaging.onboarding_text import t
 from personal_organizer.messaging.tenancy import TenantState
 from personal_organizer.providers.calendar.memory import InMemoryCalendar
@@ -301,10 +307,216 @@ class TestRespond:
         assert await self._respond(ScriptedLLM(said(text))) == ""
 
     async def test_an_unknown_tool_is_an_error_the_model_reads(self) -> None:
-        llm = ScriptedLLM(said("", call("propose_event", title="x")), said("ok"))
+        llm = ScriptedLLM(said("", call("delete_event", title="x")), said("ok"))
         assert await self._respond(llm) == "ok"
         assert llm.calls[1][-1].content == "error: unknown tool"
 
     async def test_an_unavailable_model_raises(self) -> None:
         with pytest.raises(LLMUnavailableError):
             await self._respond(ScriptedLLM(LLMUnavailableError("down")))
+
+
+DENTIST = call(
+    "propose_event", title="רופא שיניים", start="2026-10-13T09:00", end="2026-10-13T10:00"
+)
+
+
+class Creating(InMemoryCalendar):
+    def __init__(self, error: Exception | None = None, link: str | None = None) -> None:
+        super().__init__()
+        self.error, self.link = error, link
+
+    async def create_event(self, account_id: str, user_id: str, event: CalendarEvent) -> Any:
+        if self.error is not None:
+            raise self.error
+        return replace(await super().create_event(account_id, user_id, event), link=self.link)
+
+
+class TestPropose:
+    @staticmethod
+    async def _respond(
+        llm: ScriptedLLM,
+        proposed: list[CalendarEvent],
+        account: CalendarConnection | None = ACCOUNT,
+        calendar: InMemoryCalendar | None = None,
+    ) -> str:
+        return await respond(
+            [],
+            "תוסיף רופא שיניים מחר בתשע",
+            TENANT,
+            llm=llm,
+            calendar=calendar or InMemoryCalendar(),
+            account=account,
+            now=datetime(2026, 10, 12, 9, 0, tzinfo=UTC),
+            proposed=proposed,
+        )
+
+    async def test_code_puts_the_choice_under_the_model_words(self) -> None:
+        proposed: list[CalendarEvent] = []
+        calendar = InMemoryCalendar()
+        llm = ScriptedLLM(said("", DENTIST), said("להוסיף את זה?"))
+        reply = await self._respond(llm, proposed, calendar=calendar)
+        [event] = proposed
+        assert (event.start.isoformat(), event.end.isoformat()) == (
+            "2026-10-13T09:00:00+03:00",
+            "2026-10-13T10:00:00+03:00",
+        )
+        summary = "\n".join(["רופא שיניים", "יום שלישי 2026-10-13, 09:00-10:00"])
+        assert reply == f"להוסיף את זה?\n\n{render_text(confirm_choice(summary, 'he'), 'he')}"
+        assert calendar.events == []  # nothing is written before the confirm
+        assert llm.calls[1][-1].content.startswith("ok: proposed")
+
+    async def test_a_dropped_reply_keeps_the_choice(self) -> None:
+        proposed: list[CalendarEvent] = []
+        llm = ScriptedLLM(said("", DENTIST), said("see https://evil.example\n1. Add"))
+        reply = await self._respond(llm, proposed)
+        assert reply.startswith("רופא שיניים\n")
+        assert "http" not in reply
+        assert len(proposed) == 1
+
+    async def test_one_proposal_per_turn(self) -> None:
+        proposed: list[CalendarEvent] = []
+        other = call(
+            "propose_event", title="other", start="2026-10-14T09:00", end="2026-10-14T10:00"
+        )
+        llm = ScriptedLLM(said("", DENTIST), said("", other), said("ok"))
+        await self._respond(llm, proposed)
+        assert [event.title for event in proposed] == ["רופא שיניים"]
+        assert llm.calls[2][-1].content.startswith("error: one proposal")
+
+    async def test_no_connection_proposes_nothing(self) -> None:
+        proposed: list[CalendarEvent] = []
+        llm = ScriptedLLM(said("", DENTIST), said("אין חיבור ליומן."))
+        reply = await self._respond(llm, proposed, account=None)
+        assert proposed == []
+        assert llm.calls[1][-1].content == NOT_CONNECTED
+        assert reply == f"אין חיבור ליומן.\n\n{t('calendar_disconnected', 'he')}"
+
+    async def test_an_invalid_proposal_is_an_error_the_model_reads(self) -> None:
+        proposed: list[CalendarEvent] = []
+        bad = call("propose_event", title="x", start="tomorrow", end="2026-10-13T10:00")
+        llm = ScriptedLLM(said("", bad), said("מתי?"))
+        assert await self._respond(llm, proposed) == "מתי?"
+        assert proposed == []
+        assert llm.calls[1][-1].content.startswith("error: ")
+
+
+class TestCheckEvent:
+    GOOD: ClassVar[dict[str, Any]] = {
+        "title": "Dentist",
+        "start": "2026-10-13T09:00",
+        "end": "2026-10-13T10:00",
+    }
+
+    @pytest.mark.parametrize(
+        "changed",
+        [
+            {"title": None},
+            {"title": "  "},
+            {"title": "x" * 201},
+            {"location": 7},
+            {"location": "x" * 201},
+            {"all_day": "yes"},
+            {"start": "tomorrow"},
+            {"start": "2026-10-13T09:00+03:00"},  # an offset: not local
+            {"end": None},
+            {"end": "2026-10-13T09:00"},  # end == start
+            {"end": "2026-10-13T08:00"},
+            {"end": "2026-12-15T09:00"},  # 63 days
+        ],
+    )
+    def test_bad_arguments_are_errors(self, changed: dict[str, Any]) -> None:
+        result = check_event({**self.GOOD, **changed}, JERUSALEM)
+        assert isinstance(result, str)
+        assert result.startswith("error: ")
+
+    def test_a_good_one(self) -> None:
+        event = check_event({**self.GOOD, "title": " Dentist ", "location": "Haifa"}, JERUSALEM)
+        assert event == CalendarEvent(
+            "",
+            "Dentist",
+            datetime(2026, 10, 13, 9, tzinfo=JERUSALEM),
+            datetime(2026, 10, 13, 10, tzinfo=JERUSALEM),
+            location="Haifa",
+        )
+
+    def test_an_all_day_event_ends_the_midnight_after_its_last_day(self) -> None:
+        event = check_event(
+            {"title": "Sukkot", "start": "2026-10-13", "end": "2026-10-13", "all_day": True},
+            JERUSALEM,
+        )
+        assert isinstance(event, CalendarEvent)
+        assert (event.start, event.end, event.all_day) == (
+            datetime(2026, 10, 13, tzinfo=JERUSALEM),
+            datetime(2026, 10, 14, tzinfo=JERUSALEM),
+            True,
+        )
+
+
+class TestSummary:
+    def test_timed_in_the_zone_with_location(self) -> None:
+        start = datetime(2026, 10, 15, 17, 0, tzinfo=UTC)  # 20:00 in Jerusalem
+        event = _event(start, start + timedelta(hours=2), location="Port Said")
+        assert event_summary(event, JERUSALEM, "en") == (
+            "Dentist\nThursday 2026-10-15, 20:00-22:00\nPort Said"
+        )
+
+    def test_across_midnight(self) -> None:
+        start = datetime(2026, 10, 15, 23, 0, tzinfo=JERUSALEM)
+        event = _event(start, start + timedelta(hours=2))
+        assert event_summary(event, JERUSALEM, "he").splitlines()[1] == (
+            "יום חמישי 2026-10-15 23:00 - יום שישי 2026-10-16 01:00"
+        )
+
+    @pytest.mark.parametrize(
+        ("days", "when"),
+        [(1, "Saturday 2026-10-17"), (2, "Saturday 2026-10-17 - Sunday 2026-10-18")],
+    )
+    def test_all_day(self, days: int, when: str) -> None:
+        start = datetime(2026, 10, 17, tzinfo=JERUSALEM)
+        event = _event(start, start + timedelta(days=days), all_day=True)
+        assert event_summary(event, JERUSALEM, "en").splitlines()[1] == when
+
+
+class TestAddEvent:
+    EVENT = _event(
+        datetime(2026, 10, 13, 9, tzinfo=JERUSALEM), datetime(2026, 10, 13, 10, tzinfo=JERUSALEM)
+    )
+
+    async def _add(
+        self, calendar: InMemoryCalendar, account: CalendarConnection | None = ACCOUNT
+    ) -> str:
+        return await add_event(
+            self.EVENT, calendar=calendar, account=account, zone=JERUSALEM, language="en"
+        )
+
+    async def test_added_with_the_link(self) -> None:
+        calendar = Creating(link="https://www.google.com/calendar/event?eid=abc")
+        summary = event_summary(self.EVENT, JERUSALEM, "en")
+        assert await self._add(calendar) == (
+            f"{t('event_added', 'en', summary=summary)}"
+            "\nhttps://www.google.com/calendar/event?eid=abc"
+        )
+        assert len(calendar.events) == 1
+
+    async def test_added_without_a_link(self) -> None:
+        summary = event_summary(self.EVENT, JERUSALEM, "en")
+        assert await self._add(Creating()) == t("event_added", "en", summary=summary)
+
+    @pytest.mark.parametrize(
+        ("error", "key"),
+        [
+            (CalendarProviderUnavailableError("down"), "event_not_added"),
+            (CalendarProviderRejectedError(400), "event_not_added"),
+            (CalendarNotConnectedError(401), "calendar_disconnected"),
+        ],
+    )
+    async def test_a_failed_create_is_a_fixed_line_never_a_raise(
+        self, error: Exception, key: str
+    ) -> None:
+        assert await self._add(Creating(error)) == t(key, "en")
+
+    async def test_no_connection(self) -> None:
+        calendar = Creating()
+        assert await self._add(calendar, account=None) == t("calendar_disconnected", "en")
+        assert calendar.events == []

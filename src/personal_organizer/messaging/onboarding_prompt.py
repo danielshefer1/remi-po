@@ -41,7 +41,9 @@ them can help.
 
 Facts:
 - After setup they can ask about their Google Calendar in this chat (for example "what do I \
-have tomorrow?"). Adding events from the chat is not available yet; it is coming.
+have tomorrow?") and add events to it ("add the dentist tomorrow at 9"). An event is added \
+only after they confirm it in the chat, never before. Changing or deleting events is not \
+available yet.
 - Only Google Calendar is supported. Outlook, iCloud and others are not, for now.
 - Calendar access is needed to read and add their events. The Google sign-in is handled by \
 Composio, a service that keeps the access token, so this organizer never sees their password.
@@ -84,8 +86,9 @@ URL, קישור או אפשרויות ממוספרות, ולעולם לא לבק
 - לא לטעון שום דבר שאינו בעובדות שלמטה. אם אינך יודע/ת, לומר שמי שהזמין אותם יכול לעזור.
 
 עובדות:
-- אחרי ההגדרה אפשר לשאול בצ'אט הזה על יומן Google (למשל "מה יש לי מחר?"). הוספת אירועים \
-מהצ'אט עדיין לא זמינה; היא בדרך.
+- אחרי ההגדרה אפשר לשאול בצ'אט הזה על יומן Google (למשל "מה יש לי מחר?") ולהוסיף אליו \
+אירועים ("תוסיף רופא שיניים מחר בתשע"). אירוע נוסף רק אחרי שמאשרים אותו בצ'אט, אף פעם לא \
+לפני. שינוי או מחיקה של אירועים עדיין לא זמינים.
 - רק יומן Google נתמך. Outlook, iCloud ואחרים לא נתמכים, בינתיים.
 - הגישה ליומן נחוצה כדי לקרוא ולהוסיף אירועים. ההתחברות ל-Google מתבצעת דרך Composio, שירות \
 ששומר את אסימון הגישה, כך שהמארגן לעולם לא רואה את הסיסמה.
