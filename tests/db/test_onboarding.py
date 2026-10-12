@@ -29,10 +29,10 @@ from personal_organizer.db.models.tenant import NETWORK_WHATSAPP
 from personal_organizer.db.repositories.links import consume_link
 from personal_organizer.db.repositories.messages import record_inbound
 from personal_organizer.db.repositories.tenants import resolve_tenant
-from personal_organizer.interfaces.channel import OutboundChannel, OutboundMessage
+from personal_organizer.interfaces.channel import OutboundMessage
 from personal_organizer.interfaces.llm import Message
 from personal_organizer.messaging import inbound
-from personal_organizer.messaging.inbound import InboxRow, acknowledge, handle_inbound
+from personal_organizer.messaging.inbound import acknowledge, handle_inbound
 from personal_organizer.messaging.inbox import load_row
 from personal_organizer.messaging.onboarding import (
     LINK_PLACEHOLDER,
@@ -243,16 +243,12 @@ class TestComposioOff:
         off = db_settings.model_copy(update={"composio": ComposioSettings()})
         channel = FakeOutbound(name="gowa")
         inbox_id = await insert_inbox(owner_conn)
-
-        async def ack(row: InboxRow, resolved: OutboundChannel) -> None:
-            await acknowledge(row, resolved, db=db)
-
         disposition = await handle_inbound(
             inbox_id,
             db=db,
             channels={"gowa": channel}.__getitem__,
             allowlist=INVITED,
-            on_allowed=ack,
+            on_allowed=Spy(),
             settings=off,
         )
         assert disposition == "allowed"

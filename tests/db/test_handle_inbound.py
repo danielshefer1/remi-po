@@ -24,9 +24,11 @@ from personal_organizer.core.errors import (
 )
 from personal_organizer.db.engine import Database
 from personal_organizer.interfaces.channel import OutboundChannel, OutboundMessage
-from personal_organizer.messaging.inbound import InboxRow, acknowledge, handle_inbound
+from personal_organizer.messaging.inbound import InboxRow, handle_inbound
+from personal_organizer.messaging.onboarding import Advance
 from personal_organizer.messaging.outbox import send_once
 from personal_organizer.messaging.replies import ACK_TEXT, INVITE_ONLY_TEXT
+from personal_organizer.messaging.tenancy import TenantState
 from personal_organizer.observability.logging import configure_logging
 from personal_organizer.settings import Settings
 from tests.fixtures.payloads import SENDER_PHONE
@@ -70,8 +72,11 @@ class Spy:
     def __init__(self) -> None:
         self.calls: list[InboxRow] = []
 
-    async def __call__(self, row: InboxRow, channel: OutboundChannel) -> None:
+    async def __call__(
+        self, row: InboxRow, channel: OutboundChannel, tenant: TenantState, now: datetime
+    ) -> Advance | None:
         self.calls.append(row)
+        return None
 
 
 @pytest.fixture
@@ -112,17 +117,13 @@ async def _inbox(
 async def _run(
     db: Database, inbox_id: UUID, channel: FakeOutbound, on_allowed: Any = None, **kw: Any
 ) -> str | None:
-    """Run the handler the way the task does: ``acknowledge`` as the default handoff."""
-
-    async def ack(row: InboxRow, resolved: OutboundChannel) -> None:
-        await acknowledge(row, resolved, db=db)
-
+    """Run the handler the way the task does, on the allowlist gate, which acknowledges."""
     return await handle_inbound(
         inbox_id,
         db=db,
         channels={channel.name: channel}.__getitem__,
         allowlist=ALLOWLIST,
-        on_allowed=on_allowed or ack,
+        on_allowed=on_allowed or Spy(),
         **kw,
     )
 
@@ -341,15 +342,12 @@ class TestSeveralChannels:
 
     @staticmethod
     async def _handle(db: Database, inbox_id: UUID, *channels: FakeOutbound) -> str | None:
-        async def ack(row: InboxRow, resolved: OutboundChannel) -> None:
-            await acknowledge(row, resolved, db=db)
-
         return await handle_inbound(
             inbox_id,
             db=db,
             channels={channel.name: channel for channel in channels}.__getitem__,
             allowlist=ALLOWLIST,
-            on_allowed=ack,
+            on_allowed=Spy(),
         )
 
     async def test_each_reply_goes_out_on_its_own_channel(

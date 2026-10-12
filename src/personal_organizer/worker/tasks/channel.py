@@ -6,17 +6,18 @@ The job carries the inbox row id and nothing else -- the body is read back from 
 database, per docs/adr/0001.
 
 Retries are Procrastinate's, and only for failures that are definitely-not-sent, a lost
-database connection, or an LLM that is down (D3 of docs/plan-iteration-04.md). One retry layer
-keeps every attempt visible in ``procrastinate_jobs``; an in-task retry loop would hide them
-and hold a worker slot while it slept. The price is ordering: a job waiting to retry keeps its
-lock, so the same sender's next message waits too -- up to about two minutes across the whole
-backoff. On the last attempt an LLM that is still down is answered with the fixed texts
-instead, so the person never gets silence.
+database connection, or an LLM or Composio that is down (D3 of docs/plan-iteration-04.md). One
+retry layer keeps every attempt visible in ``procrastinate_jobs``; an in-task retry loop would
+hide them and hold a worker slot while it slept. The price is ordering: a job waiting to retry
+keeps its lock, so the same sender's next message waits too -- up to about two minutes across
+the whole backoff. On the last attempt an LLM or Composio that is still down is answered with
+the fixed texts instead, so the person never gets silence.
 """
 
 from __future__ import annotations
 
 import functools
+from datetime import datetime
 from typing import Final
 from uuid import UUID
 
@@ -24,10 +25,19 @@ import procrastinate
 import structlog
 from sqlalchemy.exc import InterfaceError, OperationalError
 
-from personal_organizer.core.errors import LLMUnavailableError, TransientChannelError
-from personal_organizer.db.engine import get_database
-from personal_organizer.messaging.inbound import acknowledge, handle_inbound
+from personal_organizer.core.errors import (
+    CalendarProviderUnavailableError,
+    LLMUnavailableError,
+    TransientChannelError,
+)
+from personal_organizer.db.engine import Database, get_database
+from personal_organizer.interfaces.channel import OutboundChannel
+from personal_organizer.messaging.agent import agent_turn
+from personal_organizer.messaging.inbound import InboxRow, OnAllowed, acknowledge, handle_inbound
+from personal_organizer.messaging.onboarding import Advance
 from personal_organizer.messaging.runtime import get_outbound_channel
+from personal_organizer.messaging.tenancy import TenantState
+from personal_organizer.providers.calendar.composio import ComposioConnector
 from personal_organizer.providers.llm.anthropic import AnthropicLLM
 from personal_organizer.settings import get_settings
 from personal_organizer.worker.queues import Queue
@@ -41,7 +51,13 @@ HANDLE_INBOUND_TASK: Final = "channel:handle_inbound"
 INBOUND_RETRY: Final = procrastinate.RetryStrategy(
     max_attempts=6,
     exponential_wait=2,
-    retry_exceptions={TransientChannelError, LLMUnavailableError, OperationalError, InterfaceError},
+    retry_exceptions={
+        TransientChannelError,
+        LLMUnavailableError,
+        CalendarProviderUnavailableError,
+        OperationalError,
+        InterfaceError,
+    },
 )
 
 
@@ -58,6 +74,29 @@ def _agent_llm() -> AnthropicLLM | None:
     return AnthropicLLM.from_settings(settings) if settings.agent.enabled else None
 
 
+@functools.cache
+def _agent_calendar() -> ComposioConnector:
+    """One Composio client for the process; the agent being on implies Composio is."""
+    return ComposioConnector.from_settings(get_settings().composio)
+
+
+def _on_allowed(db: Database, *, last_attempt: bool) -> OnAllowed:
+    """The agent's turn when it is enabled, else Iteration 02's acknowledgement."""
+    llm = _agent_llm()
+    if llm is not None:
+        return functools.partial(
+            agent_turn, db=db, llm=llm, calendar=_agent_calendar(), last_attempt=last_attempt
+        )
+
+    async def ack(
+        row: InboxRow, channel: OutboundChannel, _tenant: TenantState, _now: datetime
+    ) -> Advance | None:
+        await acknowledge(row, channel, db=db)
+        return None
+
+    return ack
+
+
 def register(app: procrastinate.App) -> None:
     @app.task(
         queue=Queue.WEBHOOKS.value,
@@ -68,17 +107,18 @@ def register(app: procrastinate.App) -> None:
     async def handle_inbound_task(context: procrastinate.JobContext, inbox_id: str) -> None:
         db = get_database()
         settings = get_settings()
+        last_attempt = is_last_attempt(context.job.attempts)
         await handle_inbound(
             UUID(inbox_id),
             db=db,
             channels=get_outbound_channel,
             # The invite list, whichever channel the message came in on.
             allowlist=settings.whatsapp.allowlist,
-            on_allowed=functools.partial(acknowledge, db=db),
+            on_allowed=_on_allowed(db, last_attempt=last_attempt),
             # Composio on: the tenant gate and onboarding. Off: Iteration 02's gate, exactly.
             settings=settings,
             llm=_agent_llm(),
-            last_attempt=is_last_attempt(context.job.attempts),
+            last_attempt=last_attempt,
         )
 
 

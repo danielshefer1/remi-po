@@ -1,17 +1,25 @@
 from __future__ import annotations
 
+import functools
+from datetime import UTC, datetime
+from typing import Any, cast
+
 import procrastinate
 import pytest
 
 from personal_organizer.core.errors import (
     AmbiguousDeliveryError,
+    CalendarProviderUnavailableError,
     LLMUnavailableError,
     RejectedChannelError,
     TransientChannelError,
 )
+from personal_organizer.db.engine import Database
+from personal_organizer.messaging.agent import agent_turn
 from personal_organizer.settings import Settings
 from personal_organizer.worker.app import build_procrastinate_app
 from personal_organizer.worker.queues import Queue
+from personal_organizer.worker.tasks import channel as channel_tasks
 from personal_organizer.worker.tasks.channel import (
     HANDLE_INBOUND_TASK,
     INBOUND_RETRY,
@@ -111,8 +119,9 @@ class TestOnboardingTasks:
 
 
 class TestLastAttempt:
-    def test_an_llm_outage_is_retried(self) -> None:
-        assert LLMUnavailableError in (INBOUND_RETRY.retry_exceptions or set())
+    @pytest.mark.parametrize("error", [LLMUnavailableError, CalendarProviderUnavailableError])
+    def test_an_llm_or_calendar_outage_is_retried(self, error: type[Exception]) -> None:
+        assert error in (INBOUND_RETRY.retry_exceptions or set())
 
     @pytest.mark.parametrize("attempts", range(9))
     def test_it_is_the_run_procrastinate_will_not_retry(self, attempts: int) -> None:
@@ -127,3 +136,33 @@ class TestLastAttempt:
         )
         decision = INBOUND_RETRY.get_retry_decision(exception=LLMUnavailableError(), job=job)
         assert is_last_attempt(attempts) == (decision is None)
+
+
+class TestOnAllowed:
+    def test_the_agent_when_enabled(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        llm, calendar = object(), object()
+        monkeypatch.setattr(channel_tasks, "_agent_llm", lambda: llm)
+        monkeypatch.setattr(channel_tasks, "_agent_calendar", lambda: calendar)
+        db = cast(Database, object())
+        handoff = channel_tasks._on_allowed(db, last_attempt=True)
+        assert isinstance(handoff, functools.partial)
+        assert handoff.func is agent_turn
+        assert handoff.keywords == {
+            "db": db,
+            "llm": llm,
+            "calendar": calendar,
+            "last_attempt": True,
+        }
+
+    async def test_the_acknowledgement_when_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        acked: list[Any] = []
+
+        async def acknowledge(row: Any, channel: Any, *, db: Any) -> None:
+            acked.append(row)
+
+        monkeypatch.setattr(channel_tasks, "_agent_llm", lambda: None)
+        monkeypatch.setattr(channel_tasks, "acknowledge", acknowledge)
+        handoff = channel_tasks._on_allowed(cast(Database, object()), last_attempt=False)
+        row: Any = object()
+        assert await handoff(row, cast(Any, None), cast(Any, None), datetime.now(UTC)) is None
+        assert acked == [row]

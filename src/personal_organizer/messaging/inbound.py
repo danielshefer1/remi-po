@@ -17,9 +17,9 @@ anything else, suspended included     invite-only reply and purge (``stranger[_m
 "Invited" is :func:`~personal_organizer.messaging.invites.is_invited`: on
 ``WHATSAPP__ALLOWED_PHONES``, or holding an open invite in ``invites`` (ADR 0006).
 
-What both guarantee is the part that must hold before there *is* an agent. A sender who is
-not invited never reaches ``on_allowed``, the seam Iteration 04 turns into "defer an agent
-turn", and so never spends an LLM call. Identity wins over the invite list: an onboarded
+What both guarantee: a sender who is not invited never reaches the acknowledgement or
+``on_allowed``, the agent's turn (:func:`~personal_organizer.messaging.agent.agent_turn`), and
+so never spends an LLM call. Identity wins over the invite list: an onboarded
 person stays served after their number is removed from it.
 
 **D7.** A known tenant's message is copied into ``messages``, under RLS, and nulled here.
@@ -79,7 +79,13 @@ from personal_organizer.messaging.replies import (
     SERVICE_WINDOW,
     SERVICE_WINDOW_MARGIN,
 )
-from personal_organizer.messaging.tenancy import enrol, load_history, load_state, resolve_sender
+from personal_organizer.messaging.tenancy import (
+    TenantState,
+    enrol,
+    load_history,
+    load_state,
+    resolve_sender,
+)
 from personal_organizer.settings import Settings
 
 log = structlog.get_logger(__name__)
@@ -100,8 +106,10 @@ _PURGED: Final = MappingProxyType(
 )
 
 
-#: The handoff for an allowed sender, given the channel to answer on.
-OnAllowed = Callable[[InboxRow, OutboundChannel], Awaitable[None]]
+#: The tenant gate's handoff for an active tenant: ``(row, channel, tenant, now)``, answering
+#: on ``channel``. It returns what it decided, for ``_finish_known`` to commit with the row:
+#: the agent's reply to record, or ``None`` for nothing.
+OnAllowed = Callable[[InboxRow, OutboundChannel, TenantState, datetime], Awaitable[Advance | None]]
 
 #: Looks up an outbound channel by name; raises ``ChannelNotConfiguredError`` if it is absent.
 ChannelResolver = Callable[[str], OutboundChannel]
@@ -181,7 +189,8 @@ async def _finish_known(
 
 
 async def acknowledge(row: InboxRow, channel: OutboundChannel, *, db: Database) -> None:
-    """Iteration 02's ``on_allowed``: the fixed acknowledgement. Iteration 04 replaces it."""
+    """Iteration 02's answer: the fixed acknowledgement. The allowlist gate's, and the tenant
+    gate's while the agent is off."""
     if row.sender_phone is None:
         # An active tenant who writes with a BSUID and no number reaches here (the tenant gate
         # does not need a phone). Until Iteration 04 there is no reply to such a sender.
@@ -238,7 +247,6 @@ async def _allowlist_gate(
     current: datetime,
     *,
     allowlist: frozenset[str],
-    on_allowed: OnAllowed,
 ) -> str:
     """Iteration 02's gate, kept exactly for environments without Composio."""
     allowed = await is_invited(db, row.sender_phone, allowlist)
@@ -246,7 +254,7 @@ async def _allowlist_gate(
         disposition = "stale"
     elif allowed:
         await _mark_read(channel, row)
-        await on_allowed(row, channel)
+        await acknowledge(row, channel, db=db)
         disposition = "allowed"
     else:
         disposition = await _turn_away(db, channel, row, current)
@@ -284,8 +292,8 @@ async def _tenant_gate(
         return "stale"
     await _mark_read(channel, row)
     if tenant.status == "active":
-        await on_allowed(row, channel)
-        await _finish_known(db, row, tenant.id, "allowed")
+        decided = await on_allowed(row, channel, tenant, current)
+        await _finish_known(db, row, tenant.id, "allowed", decided)
         return "allowed"
     history = await load_history(db, tenant.id) if llm is not None else ()
     advance = await onboarding_step(
@@ -345,9 +353,7 @@ async def handle_inbound(
             last_attempt=last_attempt,
         )
     else:
-        disposition = await _allowlist_gate(
-            db, channel, row, current, allowlist=allowlist, on_allowed=on_allowed
-        )
+        disposition = await _allowlist_gate(db, channel, row, current, allowlist=allowlist)
     log.info(
         "inbound.handled",
         inbox_id=str(row.id),

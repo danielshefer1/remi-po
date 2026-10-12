@@ -1,4 +1,4 @@
-"""Every line onboarding sends, in both languages (D11).
+"""Every fixed line onboarding and the agent send, in both languages (D11).
 
 One table, so a missing translation is a failing test (``test_onboarding_text.py`` checks
 that the key sets and the ``{placeholders}`` match) rather than an English line in a Hebrew
@@ -8,7 +8,8 @@ never itself parsed as a template.
 
 ``connect_link`` ends with the URL on a line of its own. WhatsApp linkifies a bare URL
 reliably, but not one with a character glued to it. ``all_set`` is sent by the
-``onboarding:connected`` task (PR 4). ``zone_retry_keep`` says "reply 1", which relies on
+``onboarding:connected`` task (PR 4). ``agent_unavailable`` and ``calendar_disconnected``
+are the agent's (``messaging.agent``). ``zone_retry_keep`` says "reply 1", which relies on
 Correct being the first option of ``messaging.onboarding.zone_choice``. A test there pins
 that order.
 """
@@ -38,6 +39,11 @@ _EN: Final = {
         "It works once and expires soon:\n{url}"
     ),
     "all_set": "You're all set! Your Google Calendar is connected.",
+    "agent_unavailable": "Sorry, I couldn't answer just now. Please try again in a minute.",
+    "calendar_disconnected": (
+        "Your Google Calendar connection has stopped working. Please ask the person who "
+        "invited you to reconnect it."
+    ),
 }
 
 _HE: Final = {
@@ -57,6 +63,10 @@ _HE: Final = {
         "הוא עובד פעם אחת ותוקפו קצר:\n{url}"
     ),
     "all_set": "הכול מוכן! יומן Google שלך מחובר.",
+    "agent_unavailable": "סליחה, לא הצלחתי לענות כרגע. כדאי לנסות שוב בעוד דקה.",
+    "calendar_disconnected": (
+        "החיבור ליומן Google שלך הפסיק לעבוד. כדאי לבקש ממי שהזמין אותך לחבר אותו מחדש."
+    ),
 }
 
 ONBOARDING_TEXT: Final[Mapping[str, Mapping[str, str]]] = MappingProxyType(

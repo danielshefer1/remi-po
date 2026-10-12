@@ -67,6 +67,8 @@ class TenantState:
     #: happens in the transaction that finishes a row (D7), so a job that died before
     #: finishing still counts as the first message when it re-runs.
     first_message: bool
+    #: Set on the ``zone`` step, so every active tenant has one.
+    timezone: str | None = None
 
 
 def network_for(channel: str) -> str:
@@ -176,6 +178,7 @@ async def load_state(db: Database, tenant_id: UUID) -> TenantState | None:
         status=tenant.status,
         step=tenant.onboarding_step,
         language=tenant.language,
+        timezone=tenant.timezone,
         first_message=first,
     )
 
