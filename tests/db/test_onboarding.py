@@ -1,7 +1,7 @@
 """Onboarding over chat, end to end against Postgres, with fake channels.
 
-Done-When (the chat half): an invited number writes, confirms its time zone with a numbered
-reply and is sent a connect link. Also pinned:
+Done-When (the chat half): an invited number writes, has its time zone set from its number,
+and is sent a connect link. Also pinned:
 - D2: who is served, onboarded, enrolled or turned away;
 - D7: a known tenant's words end up under RLS and nowhere else;
 - that no re-run of any job sends twice or advances twice.
@@ -38,9 +38,7 @@ from personal_organizer.messaging.onboarding import (
     LINK_PLACEHOLDER,
     Advance,
     connect_text,
-    retry_text,
-    welcome_text,
-    zone_ask,
+    guessed_text,
 )
 from personal_organizer.messaging.onboarding_text import t
 from personal_organizer.messaging.replies import ACK_TEXT, INVITE_ONLY_TEXT
@@ -175,11 +173,12 @@ class TestFirstMessage:
         assert tenant is not None
         assert (tenant.status, tenant.onboarding_step, tenant.language, tenant.timezone) == (
             "onboarding",
-            "zone",
+            "connect",
             "he",
-            None,
+            "Asia/Jerusalem",
         )
-        assert person.texts() == [welcome_text("he", "Asia/Jerusalem")]
+        [text] = person.texts()
+        assert text == guessed_text("he", "Asia/Jerusalem", _url(text), welcome=True)
         assert person.gowa.read != []
         assert person.agent.calls == []
         assert await _kinds(owner_conn) == ["onboarding:reply"]
@@ -222,7 +221,8 @@ class TestFirstMessage:
         """The previous run created the tenant and died: the re-run must welcome, not retry."""
         await new_tenant(db)
         await person.say("hi")
-        assert person.texts() == [welcome_text("en", "Europe/Amsterdam")]
+        [text] = person.texts()
+        assert text == guessed_text("en", AMSTERDAM, _url(text), welcome=True)
 
     async def test_a_stale_first_message_creates_no_tenant(
         self, person: Person, db: Database
@@ -292,8 +292,7 @@ class TestStrangers:
 
 class TestZoneToConnect:
     async def test_the_whole_chat(self, person: Person, db: Database) -> None:
-        await person.say("hi")
-        assert await person.say("1") == "onboarding"
+        assert await person.say("hi") == "onboarding"
 
         tenant = await tenant_by_phone(db, NL_PHONE)
         assert tenant is not None
@@ -306,19 +305,14 @@ class TestZoneToConnect:
         assert resent == t("connect_link", "en", url=resent.rsplit("\n", 1)[-1])
         assert link_payload(resent).nonce == first_link.nonce
         assert len(await links_of(db, tenant.id)) == 1
-        assert await _kinds(person.conn) == [
-            "onboarding:reply",
-            "onboarding:connect",
-            "onboarding:reply",
-        ]
-        assert len(await messages_of(db, tenant.id)) == 3
+        assert await _kinds(person.conn) == ["onboarding:reply", "onboarding:reply"]
+        assert len(await messages_of(db, tenant.id)) == 2
 
-    async def test_change_then_a_city(self, person: Person, db: Database) -> None:
+    async def test_a_city_replaces_the_guess(self, person: Person, db: Database) -> None:
         await person.say("hi")
-        await person.say("2")
         tenant = await tenant_by_phone(db, NL_PHONE)
         assert tenant is not None
-        assert (tenant.timezone, tenant.onboarding_step) == (None, "zone")
+        assert (tenant.timezone, tenant.onboarding_step) == (AMSTERDAM, "connect")
 
         await person.say("London")
         tenant = await tenant_by_phone(db, NL_PHONE)
@@ -327,7 +321,6 @@ class TestZoneToConnect:
 
     async def test_a_used_or_aging_link_is_replaced(self, person: Person, db: Database) -> None:
         await person.say("hi")
-        await person.say("1")
         tenant = await tenant_by_phone(db, NL_PHONE)
         assert tenant is not None
         first = link_payload(person.texts()[-1]).nonce
@@ -351,17 +344,17 @@ class TestReRuns:
         await person.say("hi")
         person.gowa.failures.append(TransientChannelError("429"))
         with pytest.raises(TransientChannelError):
-            await person.say("1")
+            await person.say("London")
         tenant = await tenant_by_phone(db, NL_PHONE)
         assert tenant is not None
-        assert tenant.onboarding_step == "zone"
+        assert tenant.timezone == AMSTERDAM
         assert person.last is not None
 
         assert await person.run(person.last) == "onboarding"
         tenant = await tenant_by_phone(db, NL_PHONE)
         assert tenant is not None
-        assert tenant.onboarding_step == "connect"
-        assert len(person.gowa.sent) == 2  # the welcome, then one link
+        assert tenant.timezone == "Europe/London"
+        assert len(person.gowa.sent) == 2  # the welcome, then the new zone
         assert len(await links_of(db, tenant.id)) == 1
 
     async def test_a_crash_after_the_send_neither_resends_nor_advances_twice(
@@ -371,17 +364,17 @@ class TestReRuns:
         await person.say("hi")
         _fail_finishing_once(monkeypatch)
         with pytest.raises(ConnectionResetError):
-            await person.say("1")
+            await person.say("London")
         tenant = await tenant_by_phone(db, NL_PHONE)
         assert tenant is not None
-        assert (tenant.onboarding_step, tenant.timezone) == ("zone", None)
+        assert (tenant.onboarding_step, tenant.timezone) == ("connect", AMSTERDAM)
         assert (await _inbox(person.conn, person.last))["processed_at"] is None
         assert person.last is not None
 
         assert await person.run(person.last) == "onboarding"
         tenant = await tenant_by_phone(db, NL_PHONE)
         assert tenant is not None
-        assert (tenant.onboarding_step, tenant.timezone) == ("connect", "Europe/Amsterdam")
+        assert (tenant.onboarding_step, tenant.timezone) == ("connect", "Europe/London")
         assert len(person.gowa.sent) == 2
         assert await _kinds(person.conn) == ["onboarding:reply", "onboarding:connect"]
         assert len(await messages_of(db, tenant.id)) == 2
@@ -390,7 +383,8 @@ class TestReRuns:
         self, person: Person, db: Database, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Crash after the welcome went out: the re-run is still a *first* message, because
-        nothing was recorded, and so makes the same decision. One tenant, one welcome."""
+        nothing was recorded, and so makes the same decision. One tenant, one welcome, and
+        the guessed zone still set."""
         _fail_finishing_once(monkeypatch)
         with pytest.raises(ConnectionResetError):
             await person.say("hi")
@@ -404,20 +398,20 @@ class TestReRuns:
         assert await _kinds(person.conn) == ["onboarding:reply"]
         tenant = await tenant_by_phone(db, NL_PHONE)
         assert tenant is not None
-        assert tenant.onboarding_step == "zone"
+        assert (tenant.onboarding_step, tenant.timezone) == ("connect", AMSTERDAM)
         assert len(await messages_of(db, tenant.id)) == 1
 
     async def test_the_same_job_twice_advances_and_records_once(
         self, person: Person, db: Database
     ) -> None:
         await person.say("hi")
-        await person.say("1")
+        await person.say("London")
         assert person.last is not None
         assert await person.run(person.last) == "onboarding"
         assert await person.run(person.last) == "onboarding"
         tenant = await tenant_by_phone(db, NL_PHONE)
         assert tenant is not None
-        assert (tenant.onboarding_step, tenant.timezone) == ("connect", "Europe/Amsterdam")
+        assert (tenant.onboarding_step, tenant.timezone) == ("connect", "Europe/London")
         assert len(person.gowa.sent) == 2
         assert await _kinds(person.conn) == ["onboarding:reply", "onboarding:connect"]
         assert len(await messages_of(db, tenant.id)) == 2
@@ -428,13 +422,13 @@ class TestReRuns:
         """Two jobs that both loaded the row before either finished: the second to commit
         finds ``processed_at`` set, and writes nothing."""
         await person.say("hi")
-        await person.say("1")
+        await person.say("London")
         assert person.last is not None
         tenant = await tenant_by_phone(db, NL_PHONE)
         assert tenant is not None
         row = await load_row(db, person.last)
         assert row is not None
-        # The state both overlapping jobs saw: a stale in-memory row, the step still ``zone``.
+        # The state both overlapping jobs saw: a stale in-memory row, not yet finished.
         stale = replace(row, processed_at=None, disposition=None)
         assert len(await messages_of(db, tenant.id)) == 2
 
@@ -444,7 +438,7 @@ class TestReRuns:
         assert len(await messages_of(db, tenant.id)) == 2
         after = await tenant_by_phone(db, NL_PHONE)
         assert after is not None
-        assert (after.onboarding_step, after.timezone) == ("connect", "Europe/Amsterdam")
+        assert (after.onboarding_step, after.timezone) == ("connect", "Europe/London")
 
     async def test_a_finished_row_is_a_no_op(self, person: Person) -> None:
         await person.say("hi")
@@ -493,7 +487,7 @@ class TestOnePersonTwoChannels:
         self, person: Person, db: Database
     ) -> None:
         await person.say("hi", via="gowa")
-        await person.say("1", via="whatsapp")
+        await person.say("London", via="whatsapp")
         assert len(person.gowa.sent) == 1
         assert len(person.meta.sent) == 1  # the reply follows the inbound channel
         tenant = await tenant_by_phone(db, NL_PHONE)
@@ -509,7 +503,7 @@ class TestOnePersonTwoChannels:
         hidden = Person(
             db, owner_conn, onboarding_settings, phone=None, user_id="US.1", meta=meta.meta
         )
-        assert await hidden.say("1", via="whatsapp") == "onboarding"
+        assert await hidden.say("ok", via="whatsapp") == "onboarding"
         gateway = Person(db, owner_conn, onboarding_settings, gowa=meta.gowa, meta=meta.meta)
         assert await gateway.say("hello", via="gowa") == "onboarding"
 
@@ -531,7 +525,7 @@ class TestLogs:
         configure_logging(settings, stream=stream)
         await person.say("Oncology appointment with Dr Meyer")
         await person.say("Mars")
-        await person.say("1")
+        await person.say("London")
         await person.say("again please")
 
         captured = stream.getvalue()
@@ -541,75 +535,65 @@ class TestLogs:
             assert leaked not in captured
 
 
-AMSTERDAM_CHOICE = zone_ask("en", "Europe/Amsterdam")
+AMSTERDAM = "Europe/Amsterdam"
+
+
+def _url(text: str) -> str:
+    return text.rsplit("\n", 1)[-1]
 
 
 class TestTalkedThrough:
-    """D10: with a model, the three fixed-text branches answer what was said, and code still
-    appends the zone question or the link and owns every state change."""
+    """D10: with a model, the fixed-text branches answer what was said, and code still
+    appends the zone line or the link and owns every state change."""
 
-    async def test_an_off_script_first_message_gets_an_answer_and_the_choice(
+    async def test_an_off_script_first_message_gets_an_answer_and_the_guess(
         self, person: Person, db: Database
     ) -> None:
-        person.llm = ScriptedLLM(said("I can, once we're set up: two quick steps."))
+        person.llm = ScriptedLLM(said("I can, once your calendar is connected."))
         assert await person.say("can you add my dentist tomorrow?") == "onboarding"
-        assert person.texts() == [
-            f"I can, once we're set up: two quick steps.\n\n{AMSTERDAM_CHOICE}"
-        ]
+        [text] = person.texts()
+        url = _url(text)
+        assert text == (
+            f"I can, once your calendar is connected.\n\n{guessed_text('en', AMSTERDAM, url)}"
+        )
         assert await _kinds(person.conn) == ["onboarding:reply"]
         [messages] = person.llm.calls
-        assert "Europe/Amsterdam" in messages[0].content  # the step and the guess
+        assert AMSTERDAM in messages[0].content  # the step and the guess
         assert messages[-1] == Message("user", "can you add my dentist tomorrow?")
         tenant = await tenant_by_phone(db, NL_PHONE)
         assert tenant is not None
+        assert (tenant.timezone, tenant.onboarding_step) == (AMSTERDAM, "connect")
         assert [(m.direction, m.body) for m in await messages_of(db, tenant.id)] == [
             ("in", "can you add my dentist tomorrow?"),
-            ("out", person.texts()[0]),
+            ("out", text.replace(url, LINK_PLACEHOLDER)),
         ]
 
-    @pytest.mark.parametrize(
-        ("body", "reply_id"), [("1", None), ("yes", None), ("Correct", "zone:correct")]
-    )
-    async def test_the_default_path_never_calls_the_model(
-        self, person: Person, db: Database, body: str, reply_id: str | None
-    ) -> None:
+    async def test_an_exact_city_never_calls_the_model(self, person: Person, db: Database) -> None:
         person.llm = ScriptedLLM(said("Welcome!"))
         await person.say("hi")
         person.llm = NoLLM()
-        await person.say(body, reply_id=reply_id)
-        tenant = await tenant_by_phone(db, NL_PHONE)
-        assert tenant is not None
-        assert (tenant.timezone, tenant.onboarding_step) == ("Europe/Amsterdam", "connect")
-        assert await _kinds(person.conn) == ["onboarding:reply", "onboarding:connect"]
-        # Recorded for the model's next turn, without the link itself.
-        out = [m.body for m in await messages_of(db, tenant.id) if m.direction == "out"]
-        assert out[-1] == connect_text("en", "Europe/Amsterdam", LINK_PLACEHOLDER)
-
-    async def test_change_then_an_exact_city_never_calls_the_model(
-        self, person: Person, db: Database
-    ) -> None:
-        person.llm = ScriptedLLM(said("Welcome!"))
-        await person.say("hi")
-        person.llm = NoLLM()
-        await person.say("2")
         await person.say("London")
         tenant = await tenant_by_phone(db, NL_PHONE)
         assert tenant is not None
         assert (tenant.timezone, tenant.onboarding_step) == ("Europe/London", "connect")
+        assert await _kinds(person.conn) == ["onboarding:reply", "onboarding:connect"]
+        # Recorded for the model's next turn, without the link itself.
+        out = [m.body for m in await messages_of(db, tenant.id) if m.direction == "out"]
+        assert out[-1] == connect_text("en", "Europe/London", LINK_PLACEHOLDER)
 
-    async def test_an_unmatched_zone_message_is_answered_above_the_choice(
+    async def test_an_unmatched_zone_message_is_answered_above_the_question(
         self, person: Person
     ) -> None:
+        person.phone = US_PHONE  # no guess, so the zone step asks for a city
         person.llm = ScriptedLLM(said("Welcome!"), said("A personal organizer for your circle."))
         await person.say("hi")
         await person.say("what is this?")
-        assert person.texts()[-1] == (
-            f"A personal organizer for your circle.\n\n{AMSTERDAM_CHOICE}"
-        )
+        ask = t("zone_ask_city", "en")
+        assert person.texts()[-1] == f"A personal organizer for your circle.\n\n{ask}"
         # The second turn read the first from history: the message, then our reply.
         assert person.llm.calls[1][1:3] == [
             Message("user", "hi"),
-            Message("assistant", f"Welcome!\n\n{AMSTERDAM_CHOICE}"),
+            Message("assistant", f"Welcome!\n\n{ask}"),
         ]
 
     async def test_no_blank_turn_reaches_the_model(self, person: Person) -> None:
@@ -647,6 +631,7 @@ class TestTalkedThrough:
     async def test_a_zone_that_is_not_one_changes_nothing(
         self, person: Person, db: Database
     ) -> None:
+        person.phone = US_PHONE
         person.llm = ScriptedLLM(
             said("Welcome!"),
             said("", call("set_timezone", zone="Mars/Olympus_Mons")),
@@ -655,20 +640,21 @@ class TestTalkedThrough:
         await person.say("hi")
         await person.say("Mars")
         assert person.llm.calls[2][-1].content.startswith("error:")
-        tenant = await tenant_by_phone(db, NL_PHONE)
+        tenant = await tenant_by_phone(db, US_PHONE)
         assert tenant is not None
         assert (tenant.timezone, tenant.onboarding_step) == (None, "zone")
 
     async def test_set_language_switches_the_reply_and_the_tenant(
         self, person: Person, db: Database
     ) -> None:
+        person.phone = US_PHONE
         person.llm = ScriptedLLM(
             said("Welcome!"), said("", call("set_language", language="he")), said("בשמחה.")
         )
         await person.say("hi")
         await person.say("please speak Hebrew")
-        assert person.texts()[-1] == f"בשמחה.\n\n{zone_ask('he', 'Europe/Amsterdam')}"
-        tenant = await tenant_by_phone(db, NL_PHONE)
+        assert person.texts()[-1] == f"בשמחה.\n\n{t('zone_ask_city', 'he')}"
+        tenant = await tenant_by_phone(db, US_PHONE)
         assert tenant is not None
         assert tenant.language == "he"
 
@@ -676,7 +662,6 @@ class TestTalkedThrough:
         self, person: Person, db: Database
     ) -> None:
         await person.say("hi")
-        await person.say("1")
         person.llm = ScriptedLLM(said("Yes: Google shows a warning because the app is private."))
         await person.say("is this safe?")
         reply = person.texts()[-1]
@@ -698,7 +683,6 @@ class TestTalkedThrough:
         self, person: Person, written: str
     ) -> None:
         await person.say("hi")
-        await person.say("1")
         person.llm = ScriptedLLM(said(written))
         await person.say("the link doesn't work")
         reply = person.texts()[-1]
@@ -717,19 +701,25 @@ class TestTalkedThrough:
 
         person.last_attempt = True
         assert await person.run(person.last) == "onboarding"
-        assert person.texts() == [welcome_text("en", "Europe/Amsterdam")]
+        [text] = person.texts()
+        assert text == guessed_text("en", AMSTERDAM, _url(text), welcome=True)
         assert await _kinds(person.conn) == ["onboarding:reply"]
+        tenant = await tenant_by_phone(db, NL_PHONE)
+        assert tenant is not None
+        assert (tenant.timezone, tenant.onboarding_step) == (AMSTERDAM, "connect")
 
     async def test_a_refusal_falls_back_at_once(self, person: Person) -> None:
+        person.phone = US_PHONE
         await person.say("hi")
         person.llm = ScriptedLLM(LLMRejectedError(None))
         await person.say("Mars")
-        assert person.texts()[-1] == retry_text("en", "Europe/Amsterdam")
+        assert person.texts()[-1] == t("zone_retry", "en")
 
     async def test_a_re_run_that_decides_differently_sends_nothing_new(
         self, person: Person, db: Database, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The re-run doesn't ask the model again: what it decided would not be what was sent."""
+        """The re-run doesn't ask the model again: what it decided would not be what was sent.
+        The guessed zone needs no model, so the re-run still sets it."""
         person.llm = ScriptedLLM(
             said("First answer."),
             said("", call("set_timezone", zone="America/New_York")),
@@ -740,12 +730,13 @@ class TestTalkedThrough:
             await person.say("what is this?")
         assert person.last is not None
         assert await person.run(person.last) == "onboarding"
-        assert person.texts() == [f"First answer.\n\n{AMSTERDAM_CHOICE}"]
+        [text] = person.texts()
+        assert text == f"First answer.\n\n{guessed_text('en', AMSTERDAM, _url(text))}"
         assert await _kinds(person.conn) == ["onboarding:reply"]
         assert len(person.llm.calls) == 1
         tenant = await tenant_by_phone(db, NL_PHONE)
         assert tenant is not None
-        assert (tenant.timezone, tenant.onboarding_step) == (None, "zone")
+        assert (tenant.timezone, tenant.onboarding_step) == (AMSTERDAM, "connect")
         assert [(m.direction, m.body) for m in await messages_of(db, tenant.id)] == [
             ("in", "what is this?")
         ]
@@ -755,10 +746,10 @@ class TestTalkedThrough:
         self, person: Person, monkeypatch: pytest.MonkeyPatch, before: str
     ) -> None:
         """Welcome, unmatched zone and connect resend: one kind with or without the model."""
+        if before == "Mars":
+            person.phone = US_PHONE  # no guess, so "Mars" is an unmatched zone message
         if before != "hi":
             await person.say("hi")
-        if before == "did it work?":
-            await person.say("1")
         sent = len(person.texts())
         _fail_finishing_once(monkeypatch)
         with pytest.raises(ConnectionResetError):

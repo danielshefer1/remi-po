@@ -10,8 +10,8 @@ never itself parsed as a template.
 reliably, but not one with a character glued to it. ``all_set`` is sent by the
 ``onboarding:connected`` task (PR 4). ``agent_unavailable``, ``calendar_disconnected`` and
 the confirm outcomes (``event_*``, ``proposal_closed``) are the agent's
-(``messaging.agent``). ``zone_retry_keep`` says "reply 1", which relies on Correct being the
-first option of ``messaging.onboarding.zone_choice``. A test there pins that order.
+(``messaging.agent``). ``{zone}`` is a ``timezones.zone_label`` ("Jerusalem"), never an IANA
+name. No line offers numbered options: people answer in words.
 """
 
 from __future__ import annotations
@@ -23,29 +23,32 @@ from typing import Final
 from personal_organizer.messaging.language import ENGLISH
 
 _EN: Final = {
-    "welcome": "Hi! I'm your personal organizer. Two quick steps and you're set up.",
-    "zone_confirm": "Is your time zone {zone}?",
-    "option_correct": "Correct",
-    "option_change": "Change",
-    "zone_ask_city": "Which city are you in? For example: London, or Europe/London.",
-    "zone_retry": (
-        "I couldn't match that to a time zone. Send a city, for example London, "
-        "or a zone such as Europe/London."
+    "welcome": (
+        "Hi! I'm your personal organizer. I can check your Google Calendar and add things to "
+        "it, right here in WhatsApp."
     ),
-    "zone_retry_keep": "Or reply 1 to keep {zone}.",
-    "zone_set": "Your time zone is set to {zone}.",
+    "zone_guessed": (
+        "I've set your clock to {zone} time, going by your number. If you're somewhere else, "
+        "just tell me which city."
+    ),
+    "zone_ask_city": "First, which city are you in? That way I'll get your times right.",
+    "zone_retry": "Hmm, I don't know that one. What's the nearest big city?",
+    "zone_set": "Got it, you're on {zone} time.",
     "connect_link": (
-        "Now connect your Google Calendar. Open this link and follow the steps. "
+        "Now let's connect your Google Calendar. Open this link and sign in with Google. "
         "It works once and expires soon:\n{url}"
     ),
-    "all_set": "You're all set! Your Google Calendar is connected.",
-    "agent_unavailable": "Sorry, I couldn't answer just now. Please try again in a minute.",
+    "all_set": (
+        "You're all set, your Google Calendar is connected! Ask me things like "
+        '"what do I have tomorrow?" or "add the dentist on Thursday at 9".'
+    ),
+    "agent_unavailable": "Sorry, I couldn't answer just now. Try me again in a minute.",
     "calendar_disconnected": (
         "Your Google Calendar connection has stopped working. Please ask the person who "
         "invited you to reconnect it."
     ),
-    "event_added": "Added to your calendar:\n{summary}",
-    "event_cancelled": "OK, I didn't add it.",
+    "event_added": "Done, it's in your calendar:\n{summary}",
+    "event_cancelled": "No problem, I didn't add it.",
     "proposal_closed": (
         "That suggestion is no longer open, so I didn't add anything. Tell me again what to add."
     ),
@@ -55,28 +58,31 @@ _EN: Final = {
 }
 
 _HE: Final = {
-    "welcome": "היי! אני העוזר האישי שלך. עוד שני צעדים קצרים וסיימנו.",
-    "zone_confirm": "האם אזור הזמן שלך הוא {zone}?",
-    "option_correct": "נכון",
-    "option_change": "לשנות",
-    "zone_ask_city": "באיזו עיר את/ה? לדוגמה: תל אביב, או Europe/London.",
-    "zone_retry": (
-        "לא הצלחתי להתאים את זה לאזור זמן. אפשר לשלוח שם של עיר, לדוגמה תל אביב, "
-        "או אזור כמו Europe/London."
+    "welcome": (
+        "היי! אני העוזר האישי שלך. אפשר לשאול אותי מה יש ביומן Google שלך ולבקש ממני להוסיף "
+        "אליו דברים, ישר מכאן בוואטסאפ."
     ),
-    "zone_retry_keep": "או להשיב 1 כדי להשאיר את {zone}.",
-    "zone_set": "אזור הזמן שלך נקבע ל-{zone}.",
+    "zone_guessed": (
+        "כיוונתי לך את השעון לשעון {zone}, לפי המספר שלך. אם את/ה במקום אחר, "
+        "אפשר פשוט לכתוב לי באיזו עיר."
+    ),
+    "zone_ask_city": "קודם כל, באיזו עיר את/ה? ככה אדע לתת לך את השעות הנכונות.",
+    "zone_retry": "לא הכרתי את המקום הזה. מה העיר הגדולה הכי קרובה?",
+    "zone_set": "מעולה, כיוונתי לשעון {zone}.",
     "connect_link": (
-        "עכשיו נחבר את יומן Google שלך. יש לפתוח את הקישור ולעקוב אחרי השלבים. "
+        "עכשיו נחבר את יומן Google שלך. צריך לפתוח את הקישור ולהתחבר עם Google. "
         "הוא עובד פעם אחת ותוקפו קצר:\n{url}"
     ),
-    "all_set": "הכול מוכן! יומן Google שלך מחובר.",
-    "agent_unavailable": "סליחה, לא הצלחתי לענות כרגע. כדאי לנסות שוב בעוד דקה.",
+    "all_set": (
+        'הכול מוכן, יומן Google שלך מחובר! אפשר לשאול אותי למשל "מה יש לי מחר?" '
+        'או "תוסיף רופא שיניים ביום חמישי בתשע".'
+    ),
+    "agent_unavailable": "סליחה, לא הצלחתי לענות כרגע. אפשר לנסות שוב בעוד דקה.",
     "calendar_disconnected": (
         "החיבור ליומן Google שלך הפסיק לעבוד. כדאי לבקש ממי שהזמין אותך לחבר אותו מחדש."
     ),
-    "event_added": "נוסף ליומן:\n{summary}",
-    "event_cancelled": "בסדר, לא הוספתי.",
+    "event_added": "בוצע, זה ביומן:\n{summary}",
+    "event_cancelled": "אין בעיה, לא הוספתי.",
     "proposal_closed": "ההצעה הזו כבר לא בתוקף, אז לא הוספתי כלום. אפשר לבקש שוב מה להוסיף.",
     "event_not_added": (
         "לא הצלחתי להוסיף את זה כרגע. כדאי לבדוק ביומן, ולבקש שוב אם האירוע לא שם."
