@@ -153,7 +153,13 @@ class TestActiveTenants:
             "propose_event", title="Dentist", start="2026-10-13T09:00", end="2026-10-13T10:00"
         )
         llm = ScriptedLLM(
-            said("", dentist), said("Shall I?"), said("", dentist), said("Again?"), said("")
+            said("", dentist),
+            said("Shall I?"),
+            said("ADD"),
+            said("", dentist),
+            said("Again?"),
+            said("CANCEL"),
+            said(""),
         )
         printed: list[str] = []
         await agent_chat(
@@ -161,7 +167,7 @@ class TestActiveTenants:
             llm=llm,
             calendar=calendar,
             account=account,
-            read=lines("add the dentist tomorrow at 9", "1", "and again", "2", "1"),
+            read=lines("add the dentist tomorrow at 9", "yes", "and again", "no", "yes"),
             write=printed.append,
         )
         summary = "Dentist\nTuesday 2026-10-13, 09:00-10:00"
@@ -172,7 +178,7 @@ class TestActiveTenants:
             f"bot [{AGENT_REPLY}]> {t('event_cancelled', 'en')}",
             f"bot [{AGENT_REPLY}]> {NO_ANSWER}",
         ]
-        assert printed[0].endswith("2. Cancel\n\nReply with a number.")
+        assert printed[0].endswith("Add this to your calendar?")
         assert len(memory.events) == (1 if fake else 0)
-        # "1" with nothing waiting is the model's, like any other line.
-        assert len(llm.calls) == 5
+        # "yes" with nothing waiting is the agent's, like any other line.
+        assert len(llm.calls) == 7

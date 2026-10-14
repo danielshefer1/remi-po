@@ -146,8 +146,10 @@ Store them if the evals show it misses context.*
 **D5. Writes need a confirm (PR 3).**
 - `propose_event` writes nothing to Google. It stores one `pending_action` (a jsonb column on
   `tenants`: id, kind, payload, expires_at, one at a time).
-- The reply ends with a `Choice` ("1 add / 2 cancel"). When the next message resolves to that
-  choice, it is handled without the LLM.
+- The reply ends with the event's summary and "Add this to your calendar?", written by code.
+  *Changed after PR 3:* the 1 add / 2 cancel choice is gone. The next message goes to
+  `confirm.decide`, its own model call that sees only the summary and that message and
+  answers ADD, CANCEL or OTHER. Code acts on ADD or CANCEL; OTHER goes to the agent.
 - A claim (`UPDATE tenants SET pending_action = NULL WHERE id = :t AND pending_action->>'id' =
   :id RETURNING …`) commits first, then `create_event` runs. So a retry or a double "1" can't
   create the event twice; this is at most once, as in ADR 0003.
@@ -354,7 +356,8 @@ There is no calendar-less mode (see open questions).
 ## Risks and open questions
 
 - **Prompt injection through the calendar.** D6 leaves out descriptions, and D5 means nothing
-  is written without the person's "1". The worst case left is a misleading summary.
+  is written without the person's agreement, read by a model call that sees no calendar data.
+  The worst case left is a misleading summary.
 - **The model talking past the rails in onboarding.** The suffix is code, the state changes are
   code, and replies with URLs are dropped. The worst case left is an unhelpful sentence above
   a correct choice or link. The evals cover the off-script cases.

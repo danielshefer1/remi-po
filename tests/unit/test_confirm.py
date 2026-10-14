@@ -1,23 +1,21 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from personal_organizer.db.models.tenant import LANGUAGES
-from personal_organizer.messaging.choices import render_text, resolve
 from personal_organizer.messaging.confirm import (
     CONFIRM_ADD,
     CONFIRM_CANCEL,
     CONFIRM_TEXT,
-    confirm_choice,
+    confirm_prompt,
+    decide,
 )
 from personal_organizer.messaging.language import detect_language
+from tests.fixtures.llm import ScriptedLLM, said
 
 SUMMARY = "Dinner with Noa, Thu 8 Oct 20:00-21:00"
-
-
-def _picked(language: str, *, text: str | None = None, reply_id: str | None = None) -> str | None:
-    option = resolve(confirm_choice(SUMMARY, language), reply_id=reply_id, text=text)
-    return option.id if option else None
 
 
 class TestTable:
@@ -30,38 +28,37 @@ class TestTable:
             assert detect_language(template) == "he", key
 
 
-@pytest.mark.parametrize("language", LANGUAGES)
-class TestResolve:
-    def test_numbers(self, language: str) -> None:
-        assert _picked(language, text="1") == CONFIRM_ADD
-        assert _picked(language, text="2") == CONFIRM_CANCEL
-        assert _picked(language, text="3") is None
+class TestDecide:
+    @pytest.mark.parametrize(
+        ("answer", "expected"),
+        [
+            ("ADD", CONFIRM_ADD),
+            (" add.\n", CONFIRM_ADD),
+            ("CANCEL", CONFIRM_CANCEL),
+            ("OTHER", None),
+            ("ADD or CANCEL", None),
+            ("", None),
+        ],
+    )
+    async def test_only_a_one_word_answer_counts(self, answer: str, expected: str | None) -> None:
+        assert await decide(SUMMARY, "sure", llm=ScriptedLLM(said(answer))) == expected
 
-    @pytest.mark.parametrize("text", ["Add", "yes", "OK!", "כן", "להוסיף", "👍"])
-    def test_add_by_word_in_either_language(self, language: str, text: str) -> None:
-        assert _picked(language, text=text) == CONFIRM_ADD
+    async def test_a_cut_off_answer_is_none(self) -> None:
+        cut = replace(said("ADD"), finish_reason="max_tokens")
+        assert await decide(SUMMARY, "sure", llm=ScriptedLLM(cut)) is None
 
-    @pytest.mark.parametrize("text", ["Cancel", "no", "לא", "ביטול", "בטל"])
-    def test_cancel_by_word_in_either_language(self, language: str, text: str) -> None:
-        assert _picked(language, text=text) == CONFIRM_CANCEL
-
-    def test_button_ids(self, language: str) -> None:
-        assert _picked(language, reply_id=CONFIRM_ADD, text="whatever") == CONFIRM_ADD
-        assert _picked(language, reply_id=CONFIRM_CANCEL, text="1") == CONFIRM_CANCEL
-
-    def test_free_text_resolves_to_nothing(self, language: str) -> None:
-        assert _picked(language, text="make it 9pm instead") is None
+    async def test_the_call_sees_the_summary_and_the_reply_only(self) -> None:
+        llm = ScriptedLLM(said("ADD"))
+        await decide(SUMMARY, "כן", llm=llm)
+        [[system, user]] = llm.calls
+        assert system.role == "system"
+        assert SUMMARY in system.content
+        assert (user.role, user.content) == ("user", "כן")
 
 
 def test_rendered_in_english() -> None:
-    assert render_text(confirm_choice(SUMMARY, "en"), "en") == (
-        f"{SUMMARY}\n\nAdd this to your calendar?\n\n1. Add\n2. Cancel\n\nReply with a number."
-    )
+    assert confirm_prompt(SUMMARY, "en") == f"{SUMMARY}\n\nAdd this to your calendar?"
 
 
 def test_rendered_in_hebrew() -> None:
-    assert render_text(confirm_choice(SUMMARY, "he"), "he") == (
-        "\n".join(
-            [SUMMARY, "", "להוסיף ליומן?", "", "1. להוסיף", "2. ביטול", "", "נא להשיב במספר."]
-        )
-    )
+    assert confirm_prompt(SUMMARY, "he") == "\n".join([SUMMARY, "", "להוסיף ליומן?"])
