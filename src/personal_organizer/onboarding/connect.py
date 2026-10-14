@@ -29,7 +29,7 @@ from personal_organizer.db.repositories.connections import (
     active_connection,
     bind_connection,
 )
-from personal_organizer.db.repositories.links import consume_link
+from personal_organizer.db.repositories.links import consume_link, link_spendable
 from personal_organizer.db.repositories.tenants import activate, get_tenant, primary_phone
 from personal_organizer.interfaces.calendar import ACCOUNT_ACTIVE, ACCOUNT_CONNECTING, ConnectLinker
 from personal_organizer.onboarding.tokens import (
@@ -150,12 +150,12 @@ def _link(token: str, config: ConnectConfig) -> _Link | None:
 
 
 async def open_link(
-    token: str, *, db: Database, config: ConnectConfig
+    token: str, *, db: Database, config: ConnectConfig, now: datetime
 ) -> LinkPage | AlreadyConnected | None:
     """What the button page shows, or ``None`` for a link that cannot be used. Writes nothing.
 
-    It checks the signature and the tenant, not whether the link row is spent or expired:
-    there is no read for that, and the POST is the authority either way.
+    A spent link gets ``None`` here rather than a button that can only fail: people reopen old
+    links from the chat. The POST stays the authority.
     """
     link = _link(token, config)
     if link is None:
@@ -166,6 +166,8 @@ async def open_link(
         if tenant is not None and tenant.status == _ACTIVE:
             return AlreadyConnected(tenant_id=tenant_id, language=tenant.language)
         if tenant is None or tenant.status != _LINKABLE or not link.usable:
+            return None
+        if not await link_spendable(session, tenant_id, nonce=link.payload.nonce, now=now):
             return None
         phone = await primary_phone(session, tenant_id)
     return LinkPage(
@@ -180,10 +182,12 @@ async def start_connect(
     """Spend the link and return Composio's URL, or ``None`` if the link cannot be used. An
     active tenant's link is not spent.
 
-    The link is spent *before* Composio is called, in its own transaction, so two taps racing
-    each other get one redirect between them: ``consume_link`` is one atomic UPDATE. The cost:
-    if Composio then fails, this link is gone, and the user asks the bot for a new one, which
-    the connect step issues because none is left unused.
+    The link is spent *before* Composio is called, in its own transaction. It stays spendable
+    for ``REPLAY_WINDOW`` after that first use, so a browser that re-sends the POST (or a
+    retry after a Composio failure) gets a fresh redirect instead of "expired". Each one is a
+    new Composio link; the ones left behind expire unused there, and the callback's
+    ``bind_connection`` keeps whichever finishes. Past the window the user asks the bot for a
+    new link, which the connect step issues because none is left unused.
 
     Raises :class:`~personal_organizer.core.errors.CalendarProviderError` from ``linker``.
     """

@@ -165,35 +165,37 @@ async def test_primary_phone_is_the_earliest_identity_with_one(database: Databas
 # --- links --------------------------------------------------------------------------------
 
 
-async def test_consume_link_is_single_use(database: Database) -> None:
+async def test_a_spent_link_replays_only_within_the_window(database: Database) -> None:
     tenant_id = await _create(database)
+    window = links.REPLAY_WINDOW
     async with database.tenant_session(TenantId(tenant_id)) as session:
-        await links.create_link(
-            session, tenant_id, nonce="n-1", expires_at=NOW + timedelta(minutes=30)
-        )
+        await links.create_link(session, tenant_id, nonce="n-1", expires_at=NOW + timedelta(1))
     async with database.tenant_session(TenantId(tenant_id)) as session:
         assert await links.consume_link(session, tenant_id, nonce="n-1", now=NOW) is True
     async with database.tenant_session(TenantId(tenant_id)) as session:
-        assert await links.consume_link(session, tenant_id, nonce="n-1", now=NOW) is False
+        # A browser re-sending the POST, then a late replay: the window runs from first use.
+        late = NOW + window - timedelta(seconds=1)
+        assert await links.link_spendable(session, tenant_id, nonce="n-1", now=late) is True
+        assert await links.consume_link(session, tenant_id, nonce="n-1", now=late) is True
+        assert (
+            await links.link_spendable(session, tenant_id, nonce="n-1", now=NOW + window) is False
+        )
+        assert await links.consume_link(session, tenant_id, nonce="n-1", now=NOW + window) is False
         assert await links.consume_link(session, tenant_id, nonce="n-other", now=NOW) is False
 
 
-async def test_concurrent_consumes_have_one_winner(database: Database) -> None:
-    """Two POSTs of the same connect page, e.g. a double tap."""
+async def test_concurrent_consumes_all_win(database: Database) -> None:
+    """Two POSTs of the same connect page at once: both get a redirect, neither deadlocks."""
     tenant_id = await _create(database)
     async with database.tenant_session(TenantId(tenant_id)) as session:
         await links.create_link(session, tenant_id, nonce="n-1", expires_at=NOW + timedelta(1))
 
-    async def consume() -> bool:
+    async def consume(now: datetime) -> bool:
         async with database.tenant_session(TenantId(tenant_id)) as session:
-            return await links.consume_link(session, tenant_id, nonce="n-1", now=NOW)
+            return await links.consume_link(session, tenant_id, nonce="n-1", now=now)
 
-    assert sorted(await asyncio.gather(*(consume() for _ in range(4)))) == [
-        False,
-        False,
-        False,
-        True,
-    ]
+    moments = [NOW + timedelta(milliseconds=ms) for ms in (0, 100, 200, 300)]
+    assert await asyncio.gather(*(consume(m) for m in moments)) == [True] * 4
 
 
 async def test_an_expired_link_cannot_be_consumed(database: Database) -> None:

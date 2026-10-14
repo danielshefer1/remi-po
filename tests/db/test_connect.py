@@ -13,7 +13,7 @@ from uuid import UUID
 import httpx
 import pytest
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import select
+from sqlalchemy import select, update
 from structlog.testing import capture_logs
 
 from personal_organizer.api.app import create_app
@@ -22,6 +22,7 @@ from personal_organizer.core.types import TenantId
 from personal_organizer.db.engine import Database
 from personal_organizer.db.models.tenant import CalendarConnection, OnboardingLink, Tenant
 from personal_organizer.db.repositories.connections import bind_connection
+from personal_organizer.db.repositories.links import REPLAY_WINDOW
 from personal_organizer.db.repositories.tenants import get_tenant
 from personal_organizer.messaging.onboarding_text import t
 from personal_organizer.onboarding.connected import announce_connected
@@ -203,23 +204,38 @@ class TestStart:
         # A state is not a link: the salts keep the two kinds of token apart.
         assert verify(state, secret=LINK_SECRET, salt=LINK_SALT, max_age_s=60) is None
 
-    async def test_a_link_works_once(
+    async def test_a_resent_post_still_goes_to_composio(
         self, http: AsyncClient, db: Database, linker: FakeConnectLinker
     ) -> None:
+        """Desktop Chrome re-sent the POST ~0.5s after our 303 and showed the second answer."""
         tenant_id = await seed_tenant(db)
         url = f"/connect/{await seed_link(db, tenant_id)}"
         first, second = await http.post(url), await http.post(url)
-        assert (first.status_code, second.status_code) == (303, 410)
-        assert_page(second, "link_unusable", "he", "en")
-        assert len(linker.links) == 1
+        assert (first.status_code, second.status_code) == (303, 303)
+        assert len(linker.links) == 2
 
-    async def test_two_taps_at_once_make_one_redirect(
+    async def test_two_taps_at_once_both_redirect(
         self, http: AsyncClient, db: Database, linker: FakeConnectLinker
     ) -> None:
         tenant_id = await seed_tenant(db)
         url = f"/connect/{await seed_link(db, tenant_id)}"
         responses = await asyncio.gather(http.post(url), http.post(url))
-        assert sorted(r.status_code for r in responses) == [303, 410]
+        assert [r.status_code for r in responses] == [303, 303]
+
+    async def test_a_link_used_past_the_window_is_refused(
+        self, http: AsyncClient, db: Database, linker: FakeConnectLinker
+    ) -> None:
+        """Reopened from the chat later: the page says so up front, not after the tap."""
+        tenant_id = await seed_tenant(db)
+        url = f"/connect/{await seed_link(db, tenant_id)}"
+        assert (await http.post(url)).status_code == 303
+        async with db.tenant_session(TenantId(tenant_id)) as session:
+            await session.execute(
+                update(OnboardingLink).values(used_at=datetime.now(UTC) - REPLAY_WINDOW)
+            )
+        for response in (await http.get(url), await http.post(url)):
+            assert response.status_code == 410
+            assert_page(response, "link_unusable", "he", "en")
         assert len(linker.links) == 1
 
     async def test_an_expired_link_is_refused(
@@ -230,11 +246,10 @@ class TestStart:
         assert (await http.post(f"/connect/{token}")).status_code == 410
         assert linker.links == []
 
-    async def test_a_composio_outage_spends_the_link(
+    async def test_a_composio_outage_can_be_retried_at_once(
         self, http: AsyncClient, db: Database, linker: FakeConnectLinker
     ) -> None:
-        """Spent before Composio is called, so two taps race to one redirect. The user asks
-        the bot again, and the connect step issues a fresh link because none is left unused."""
+        """Spent before Composio is called; a retry within the replay window still works."""
         tenant_id = await seed_tenant(db)
         url = f"/connect/{await seed_link(db, tenant_id)}"
         linker.failure = CalendarProviderUnavailableError("down")
@@ -243,7 +258,7 @@ class TestStart:
         assert_page(first, "unavailable_new_link", "he", "en")
         assert_hardened(first)
         linker.failure = None
-        assert (await http.post(url)).status_code == 410
+        assert (await http.post(url)).status_code == 303
 
 
 class FailingProcrastinate(FakeProcrastinate):
