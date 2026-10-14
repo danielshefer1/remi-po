@@ -2,10 +2,11 @@
 {% block body %}
 <h1>{{ text.title }}</h1>
 <p>{{ text.body }}</p>
-{% if number_hint %}
-<p>{{ number_hint }}</p>
+{% if phone_suffix %}
+<p class="who">{{ text.number_hint }} <b>{{ phone_suffix }}</b></p>
 {% endif %}
 <form method="post" action="/connect/{{ token }}">
 <button type="submit">{{ text.button }}</button>
 </form>
+<p class="note">{{ text.revoke }}</p>
 {% endblock %}

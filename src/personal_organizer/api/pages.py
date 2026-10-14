@@ -36,12 +36,28 @@ from personal_organizer.onboarding.page_text import (
 #: The whole stylesheet. It has no quotes, angle brackets or ampersands, so autoescaping leaves
 #: it byte-identical and the hash below is the hash of what the browser sees.
 PAGE_CSS: Final = (
-    "body{font-family:system-ui,sans-serif;max-width:32rem;margin:2rem auto;"
-    "padding:0 1rem;line-height:1.5;color:#1a1a1a;background:#fff}"
-    "h1{font-size:1.4rem}"
-    "button{font-size:1.1rem;padding:.8rem 1.4rem;border:0;border-radius:.5rem;"
-    "background:#1a73e8;color:#fff;width:100%}"
-    "section+section{margin-top:2rem;border-top:1px solid #ddd;padding-top:1rem}"
+    ":root{color-scheme:light dark;--paper:#eef2ef;--ink:#16302a;--muted:#4f625d;"
+    "--accent:#0b6e5f;--on-accent:#fff;--stub:#fff;--rule:#9db3ac}"
+    "@media (prefers-color-scheme:dark){:root{--paper:#0f1f1b;--ink:#e4ede9;--muted:#a3b6b0;"
+    "--accent:#46c4aa;--on-accent:#06201a;--stub:#162b26;--rule:#3d5a52}}"
+    "*{box-sizing:border-box}"
+    "body{margin:0;background:var(--paper);color:var(--ink);"
+    "font:1.0625rem/1.55 system-ui,-apple-system,sans-serif}"
+    "main{max-width:26rem;margin:0 auto;padding:3rem 1.25rem 2rem}"
+    "h1{font-size:1.75rem;line-height:1.2;letter-spacing:-.01em;margin:0 0 .75rem}"
+    "p{margin:0 0 1rem}"
+    ".who{margin:2rem 0;padding:1rem 1.25rem;background:var(--stub);"
+    "border:2px dashed var(--rule);border-radius:.75rem;color:var(--muted);font-size:.95rem}"
+    ".who b{display:block;color:var(--ink);font-size:3rem;line-height:1.1;font-weight:800;"
+    "letter-spacing:.12em;font-variant-numeric:tabular-nums}"
+    "form{margin-top:2rem}"
+    "button{display:block;width:100%;padding:1rem 1.25rem;border:0;border-radius:.75rem;"
+    "background:var(--accent);color:var(--on-accent);font:inherit;font-weight:700;"
+    "font-size:1.125rem;cursor:pointer}"
+    "button:active{filter:brightness(.9)}"
+    "button:focus-visible{outline:3px solid var(--accent);outline-offset:3px}"
+    ".note{margin-top:1rem;font-size:.9rem;color:var(--muted)}"
+    "section+section{margin-top:2.5rem;border-top:1px solid var(--rule);padding-top:2rem}"
 )
 
 
@@ -86,7 +102,6 @@ def connect_page(*, token: str, language: str, phone_suffix: str | None) -> HTML
     """The one-button page. ``phone_suffix`` names the number the link was issued to."""
     lang = page_language(language)
     text = page_text("connect", lang)
-    hint = text["number_hint"].format(last_digits=phone_suffix) if phone_suffix else None
     return _html(
         "connect.html",
         HTTP_200_OK,
@@ -95,7 +110,7 @@ def connect_page(*, token: str, language: str, phone_suffix: str | None) -> HTML
         title=text["title"],
         text=text,
         token=token,
-        number_hint=hint,
+        phone_suffix=phone_suffix,
     )
 
 

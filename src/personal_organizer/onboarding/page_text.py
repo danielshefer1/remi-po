@@ -4,7 +4,7 @@ The chat strings are in :mod:`personal_organizer.messaging.onboarding_text` and 
 WhatsApp. These are page copy, rendered into autoescaped HTML. A page shown before we know who
 is asking (a refused link, a refused callback) carries both languages, Hebrew first.
 
-``connect.number_hint`` takes ``{last_digits}``.
+``connect.number_hint`` is the label the page shows above the number's last digits.
 """
 
 from __future__ import annotations
@@ -19,17 +19,17 @@ PAGE_TEXT: Final[dict[str, dict[str, dict[str, str]]]] = {
     "connect": {
         "he": {
             "title": "חיבור יומן Google",
-            "body": "הכפתור יעביר אתכם ל-Google כדי לאשר גישה ליומן. "
-            "אפשר לבטל את הגישה בכל עת בחשבון Google.",
-            "number_hint": "עבור מספר הוואטסאפ שמסתיים ב-{last_digits}",
+            "body": "ב-Google תתבקשו לבחור חשבון ולאשר גישה ליומן.",
+            "number_hint": "עבור מספר הוואטסאפ שמסתיים בספרות",
             "button": "המשך ל-Google",
+            "revoke": "אפשר לבטל את הגישה בכל עת בחשבון Google.",
         },
         "en": {
             "title": "Connect Google Calendar",
-            "body": "This button takes you to Google to allow access to your calendar. "
-            "You can remove access at any time in your Google Account.",
-            "number_hint": "For the WhatsApp number ending in {last_digits}",
+            "body": "Google will ask which account to use and for access to your calendar.",
+            "number_hint": "For the WhatsApp number ending in",
             "button": "Continue to Google",
+            "revoke": "You can remove access at any time in your Google Account.",
         },
     },
     "connected": {
