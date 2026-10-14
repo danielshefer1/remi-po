@@ -10,8 +10,8 @@ reused exactly as the worker would, so the printed link works.
 An active tenant's calendar is read through Composio with their bound connection, as the
 worker does. ``--fake-calendar`` reads a few made-up events held in memory instead, so the
 agent can be tried without a connected Google account or a Composio key. A proposed event
-waits in memory for the next line, and "1" adds it to that fake calendar only: on Google,
-po-chat writes nothing.
+waits in memory for the next line, and a "yes" (as the model reads it, like the worker) adds
+it to that fake calendar only: on Google, po-chat writes nothing.
 
 For the model check of docs/plan-iteration-04.md: on Railway, ``railway ssh --service worker
 --environment staging``, then ``po-chat --tenant <uuid>``. It needs ``AGENT__API_KEY``.
@@ -36,9 +36,8 @@ from personal_organizer.db.models.tenant import CalendarConnection
 from personal_organizer.db.repositories.connections import active_connection
 from personal_organizer.interfaces.calendar import CalendarEvent, CalendarProvider
 from personal_organizer.interfaces.llm import LLMProvider, Message
-from personal_organizer.messaging.agent import AGENT_REPLY, add_event, respond
-from personal_organizer.messaging.choices import resolve
-from personal_organizer.messaging.confirm import CONFIRM_ADD, confirm_choice
+from personal_organizer.messaging.agent import AGENT_REPLY, add_event, event_summary, respond
+from personal_organizer.messaging.confirm import CONFIRM_ADD, decide
 from personal_organizer.messaging.inbox import InboxRow
 from personal_organizer.messaging.onboarding import next_reply
 from personal_organizer.messaging.onboarding_text import t
@@ -145,10 +144,12 @@ async def agent_chat(
             return OK
         if not line.strip():
             continue
-        picked = resolve(confirm_choice("", language), reply_id=None, text=line)
-        if waiting and picked is not None:
+        picked = None
+        if waiting:
+            picked = await decide(event_summary(waiting[0], zone, language), line, llm=llm)
+        if picked is not None:
             event = waiting.pop()
-            if picked.id != CONFIRM_ADD:
+            if picked != CONFIRM_ADD:
                 text = t("event_cancelled", language)
             elif isinstance(calendar, InMemoryCalendar):
                 text = await add_event(

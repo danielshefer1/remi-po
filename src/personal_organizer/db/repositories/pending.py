@@ -1,7 +1,7 @@
 """The one write a tenant has been asked to confirm, on ``tenants.pending_action`` (D5).
 
 :func:`propose` stores it, replacing any earlier one. :func:`claim` takes it in one
-statement that clears the column, so of two claims -- a retry, a double "1" -- exactly one
+statement that clears the column, so of two claims -- a retry, a double "yes" -- exactly one
 gets it back. The caller commits the claim *before* it runs the write: a crash in between
 loses the write rather than doing it twice (ADR 0003). The claim leaves only the inbox row
 that took it, for :func:`claimed_by`: a re-run of that message then knows the write was its

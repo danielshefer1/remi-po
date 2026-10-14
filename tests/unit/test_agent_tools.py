@@ -36,8 +36,7 @@ from personal_organizer.messaging.agent import (
     respond,
     week_of,
 )
-from personal_organizer.messaging.choices import render_text
-from personal_organizer.messaging.confirm import confirm_choice
+from personal_organizer.messaging.confirm import confirm_prompt
 from personal_organizer.messaging.onboarding_text import t
 from personal_organizer.messaging.tenancy import TenantState
 from personal_organizer.providers.calendar.memory import InMemoryCalendar
@@ -362,7 +361,7 @@ class TestPropose:
             "2026-10-13T10:00:00+03:00",
         )
         summary = "\n".join(["רופא שיניים", "יום שלישי 2026-10-13, 09:00-10:00"])
-        assert reply == f"להוסיף את זה?\n\n{render_text(confirm_choice(summary, 'he'), 'he')}"
+        assert reply == f"להוסיף את זה?\n\n{confirm_prompt(summary, 'he')}"
         assert calendar.events == []  # nothing is written before the confirm
         assert llm.calls[1][-1].content.startswith("ok: proposed")
 
