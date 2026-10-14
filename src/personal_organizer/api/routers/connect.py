@@ -195,7 +195,7 @@ def _already_connected(outcome: AlreadyConnected) -> Response:
 
 @router.get("/{token}", summary="The connect page. Reads only: link previews fetch it.")
 async def connect_page(token: str, db: DbDep, settings: SettingsDep) -> Response:
-    page = await open_link(token, db=db, config=ConnectConfig.of(settings))
+    page = await open_link(token, db=db, config=ConnectConfig.of(settings), now=datetime.now(UTC))
     if page is None:
         log.info("connect.page_refused")
         return pages.message_page("link_unusable", status_code=HTTP_410_GONE)
