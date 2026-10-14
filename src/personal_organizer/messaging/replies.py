@@ -10,10 +10,10 @@ from datetime import timedelta
 from typing import Final
 
 #: What an allowlisted sender gets until there is an agent to answer.
-ACK_TEXT: Final = "Got it — I'm not smart yet."
+ACK_TEXT: Final = "Thanks, got it! I can't answer messages yet, but I will soon."
 
 #: What everyone else gets, at most once per :data:`INVITE_ONLY_MUTE`.
-INVITE_ONLY_TEXT: Final = "Sorry — this assistant is invite-only."
+INVITE_ONLY_TEXT: Final = "Hi! Sorry, this assistant is invite-only, so I can't help here."
 
 #: WhatsApp's customer-service window: a free-form reply is only allowed within 24 hours of
 #: the user's last message. Outside it, the send is rejected (Graph error 131047).

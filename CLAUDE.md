@@ -1,3 +1,20 @@
+## Product voice
+
+The bot must feel like a real, good human assistant, everywhere: onboarding, the agent, fixed
+replies, errors. This applies to every change that touches what a person reads or does in chat.
+
+- Write every user-facing line as a warm, capable person would text it. No menus, numbered
+  options, "reply with 1/2", IDs or jargon (say "Jerusalem", not `Asia/Jerusalem`).
+- Decide instead of asking. If a sensible default exists (a zone from the phone number, an hour
+  for a meeting), apply it, say what was assumed, and let a plain-words reply change it. Ask only
+  what can't be inferred, one question at a time.
+- Understand free text. Never require an exact keyword or format; use the model or a forgiving
+  match. Confirmation stays only where an action writes somewhere real (adding an event), and
+  even then the answer is read from natural language.
+- Keep both languages equally natural; Hebrew copy is written as Hebrew, not translated English.
+- Voice lives in `messaging/onboarding_text.py`, `messaging/onboarding_prompt.py`,
+  `messaging/confirm.py` and the prompt in `messaging/agent.py`. Change it there.
+
 ## graphify
 
 This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
