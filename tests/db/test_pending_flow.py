@@ -1,8 +1,9 @@
 """Adding an event behind a confirm (PR 3, D5): ``agent_turn`` with a fake model and calendar.
 
-Done-When: a proposal goes out with its choice written by code and is stored; "1" creates the
-event exactly once, however the job re-runs or the person repeats it; "2", another message or
-an hour's wait each leave nothing to confirm. Neither "1" nor "2" calls the model.
+Done-When: a proposal goes out with its question written by code and is stored; a reply the
+confirm call reads as ADD creates the event exactly once, however the job re-runs or the person
+repeats it; CANCEL, anything else or an hour's wait each leave nothing to confirm. Only OTHER
+reaches the agent.
 """
 
 from __future__ import annotations
@@ -28,8 +29,7 @@ from personal_organizer.db.repositories.tenants import set_timezone
 from personal_organizer.interfaces.calendar import CalendarEvent
 from personal_organizer.interfaces.channel import OutboundMessage
 from personal_organizer.messaging.agent import CREATE_EVENT, agent_turn
-from personal_organizer.messaging.choices import render_text
-from personal_organizer.messaging.confirm import CONFIRM_ADD, confirm_choice
+from personal_organizer.messaging.confirm import confirm_prompt
 from personal_organizer.messaging.inbox import load_row
 from personal_organizer.messaging.onboarding import Advance
 from personal_organizer.messaging.onboarding_text import t
@@ -50,7 +50,7 @@ DENTIST = call(
     "propose_event", title="רופא שיניים", start="2026-10-13T09:00", end="2026-10-13T10:00"
 )
 SUMMARY = "\n".join(["רופא שיניים", "יום שלישי 2026-10-13, 09:00-10:00"])
-CHOICE = render_text(confirm_choice(SUMMARY, "he"), "he")
+CHOICE = confirm_prompt(SUMMARY, "he")
 ADDED = t("event_added", "he", summary=SUMMARY)
 
 
@@ -101,9 +101,8 @@ async def _turn(
     tenant: TenantState,
     llm: Any,
     calendar: InMemoryCalendar,
-    body: str | None = "1",
+    body: str | None = "כן",
     *,
-    reply_id: str | None = None,
     inbox_id: UUID | None = None,
     channel: FakeOutbound | None = None,
     now: datetime = NOW,
@@ -111,7 +110,7 @@ async def _turn(
 ) -> tuple[Advance, FakeOutbound, UUID]:
     channel = channel or Outbound(name="gowa")
     if inbox_id is None:
-        inbox_id = await insert_inbox(conn, phone=IL_PHONE, body=body, reply_id=reply_id)
+        inbox_id = await insert_inbox(conn, phone=IL_PHONE, body=body)
     row = await load_row(db, inbox_id)
     assert row is not None
     advance = await agent_turn(
@@ -173,17 +172,25 @@ class TestPropose:
         assert await _current(db, tenant) is None
 
 
+def _yes() -> ScriptedLLM:
+    """The confirm call reading the reply as ADD."""
+    return ScriptedLLM(said("ADD"))
+
+
 class TestConfirm:
-    @pytest.mark.parametrize(("body", "reply_id"), [("1", None), ("כן", None), (None, CONFIRM_ADD)])
-    async def test_add_creates_the_event_once_without_the_model(
-        self, db: Database, owner_conn: Any, body: str | None, reply_id: str | None
+    @pytest.mark.parametrize("answer", ["ADD", " add.\n"])
+    async def test_add_creates_the_event_once_without_the_agent(
+        self, db: Database, owner_conn: Any, answer: str
     ) -> None:
         tenant = await _active(db)
         calendar = InMemoryCalendar()
         await _propose(db, owner_conn, tenant, calendar)
-        advance, channel, _ = await _turn(
-            db, owner_conn, tenant, NoLLM(), calendar, body, reply_id=reply_id
-        )
+        llm = ScriptedLLM(said(answer))
+        advance, channel, _ = await _turn(db, owner_conn, tenant, llm, calendar, "יאללה, תוסיף")
+        # One call, which saw the summary and the reply and nothing else.
+        [[system, user]] = llm.calls
+        assert SUMMARY in system.content
+        assert (user.role, user.content) == ("user", "יאללה, תוסיף")
         [event] = calendar.events
         assert (event.title, event.start.isoformat(), event.end.isoformat()) == (
             "רופא שיניים",
@@ -200,7 +207,7 @@ class TestConfirm:
         tenant = await _active(db)
         calendar = InMemoryCalendar()
         await _propose(db, owner_conn, tenant, calendar)
-        _, _, inbox_id = await _turn(db, owner_conn, tenant, NoLLM(), calendar)
+        _, _, inbox_id = await _turn(db, owner_conn, tenant, _yes(), calendar)
         again, channel, _ = await _turn(
             db, owner_conn, tenant, NoLLM(), calendar, inbox_id=inbox_id
         )
@@ -212,15 +219,15 @@ class TestConfirm:
         self, db: Database, owner_conn: Any
     ) -> None:
         """The send failed after the create: the claim is spent, and nothing asks the model
-        what a bare "1" means."""
+        what a bare "yes" means."""
         tenant = await _active(db)
         calendar = InMemoryCalendar()
         await _propose(db, owner_conn, tenant, calendar)
         failing = Outbound(TransientChannelError("down"), name="gowa")
-        inbox_id = await insert_inbox(owner_conn, phone=IL_PHONE, body="1")
+        inbox_id = await insert_inbox(owner_conn, phone=IL_PHONE, body="כן")
         with pytest.raises(TransientChannelError):
             await _turn(
-                db, owner_conn, tenant, NoLLM(), calendar, inbox_id=inbox_id, channel=failing
+                db, owner_conn, tenant, _yes(), calendar, inbox_id=inbox_id, channel=failing
             )
         again, channel, _ = await _turn(
             db, owner_conn, tenant, NoLLM(), calendar, inbox_id=inbox_id
@@ -233,8 +240,8 @@ class TestConfirm:
         tenant = await _active(db)
         calendar = InMemoryCalendar()
         await _propose(db, owner_conn, tenant, calendar)
-        await _turn(db, owner_conn, tenant, NoLLM(), calendar)
-        # Nothing is open any more, so this "1" is ordinary text for the model.
+        await _turn(db, owner_conn, tenant, _yes(), calendar)
+        # Nothing is open any more, so this "yes" is ordinary text for the agent.
         llm = ScriptedLLM(said("במה עוד אפשר לעזור?"))
         _, channel, _ = await _turn(db, owner_conn, tenant, llm, calendar)
         assert [m.body for m in channel.sent] == ["במה עוד אפשר לעזור?"]
@@ -252,7 +259,7 @@ class TestConfirm:
             return None
 
         monkeypatch.setattr(pending, "claim", gone)
-        _, channel, _ = await _turn(db, owner_conn, tenant, NoLLM(), calendar)
+        _, channel, _ = await _turn(db, owner_conn, tenant, _yes(), calendar)
         assert [m.body for m in channel.sent] == [t("proposal_closed", "he")]
         assert calendar.events == []
 
@@ -262,7 +269,7 @@ class TestConfirm:
         tenant = await _active(db)
         calendar = FailingCreate(CalendarProviderUnavailableError("timeout"))
         await _propose(db, owner_conn, tenant, calendar)
-        advance, channel, inbox_id = await _turn(db, owner_conn, tenant, NoLLM(), calendar)
+        advance, channel, inbox_id = await _turn(db, owner_conn, tenant, _yes(), calendar)
         assert [m.body for m in channel.sent] == [t("event_not_added", "he")]
         assert advance == Advance(reply=t("event_not_added", "he"))
         again, _, _ = await _turn(db, owner_conn, tenant, NoLLM(), calendar, inbox_id=inbox_id)
@@ -275,7 +282,7 @@ class TestConfirm:
         tenant = await _active(db)
         calendar = FailingCreate(CalendarNotConnectedError(401))
         await _propose(db, owner_conn, tenant, calendar)
-        _, channel, _ = await _turn(db, owner_conn, tenant, NoLLM(), calendar)
+        _, channel, _ = await _turn(db, owner_conn, tenant, _yes(), calendar)
         assert [m.body for m in channel.sent] == [t("calendar_disconnected", "he")]
 
     async def test_no_connection_gets_the_d9_line(self, db: Database, owner_conn: Any) -> None:
@@ -290,20 +297,38 @@ class TestConfirm:
             }
             await pending.propose(session, tenant.id, kind=CREATE_EVENT, payload=payload, now=NOW)
         calendar = InMemoryCalendar()
-        _, channel, _ = await _turn(db, owner_conn, tenant, NoLLM(), calendar)
+        _, channel, _ = await _turn(db, owner_conn, tenant, _yes(), calendar)
         assert [m.body for m in channel.sent] == [t("calendar_disconnected", "he")]
         assert calendar.events == []
 
-
-class TestNoConfirm:
-    @pytest.mark.parametrize("body", ["2", "ביטול"])
-    async def test_cancel_drops_it_without_the_model(
-        self, db: Database, owner_conn: Any, body: str
+    async def test_an_unavailable_confirm_call_is_retried_with_the_proposal_kept(
+        self, db: Database, owner_conn: Any
     ) -> None:
         tenant = await _active(db)
         calendar = InMemoryCalendar()
         await _propose(db, owner_conn, tenant, calendar)
-        _, channel, _ = await _turn(db, owner_conn, tenant, NoLLM(), calendar, body)
+        inbox_id = await insert_inbox(owner_conn, phone=IL_PHONE, body="כן")
+        with pytest.raises(LLMUnavailableError):
+            await _turn(
+                db,
+                owner_conn,
+                tenant,
+                ScriptedLLM(LLMUnavailableError("down")),
+                calendar,
+                inbox_id=inbox_id,
+            )
+        assert await _current(db, tenant) is not None
+        await _turn(db, owner_conn, tenant, _yes(), calendar, inbox_id=inbox_id)
+        assert len(calendar.events) == 1
+
+
+class TestNoConfirm:
+    async def test_cancel_drops_it_without_the_agent(self, db: Database, owner_conn: Any) -> None:
+        tenant = await _active(db)
+        calendar = InMemoryCalendar()
+        await _propose(db, owner_conn, tenant, calendar)
+        llm = ScriptedLLM(said("CANCEL"))
+        _, channel, _ = await _turn(db, owner_conn, tenant, llm, calendar, "לא, עזוב")
         assert [m.body for m in channel.sent] == [t("event_cancelled", "he")]
         assert await _current(db, tenant) is None
         assert calendar.events == []
@@ -316,14 +341,17 @@ class TestNoConfirm:
         llm = ScriptedLLM(said("מה להוסיף?"))
         _, channel, _ = await _turn(db, owner_conn, tenant, llm, calendar, now=later)
         assert [m.body for m in channel.sent] == ["מה להוסיף?"]
-        assert llm.calls[0][-1].content == "1"
+        assert llm.calls[0][-1].content == "כן"
         assert calendar.events == []
 
-    async def test_another_message_drops_it(self, db: Database, owner_conn: Any) -> None:
+    @pytest.mark.parametrize("answer", ["OTHER", "Maybe", ""])
+    async def test_another_message_drops_it(
+        self, db: Database, owner_conn: Any, answer: str
+    ) -> None:
         tenant = await _active(db)
         calendar = InMemoryCalendar()
         await _propose(db, owner_conn, tenant, calendar)
-        llm = ScriptedLLM(said("בסדר, לא נוסיף."))
+        llm = ScriptedLLM(said(answer), said("בסדר, לא נוסיף."))
         await _turn(db, owner_conn, tenant, llm, calendar, "עזוב, אני אבדוק קודם")
         assert await _current(db, tenant) is None
         await _turn(db, owner_conn, tenant, ScriptedLLM(said("?")), calendar)
@@ -336,12 +364,12 @@ class TestNoConfirm:
         ten = call(
             "propose_event", title="רופא שיניים", start="2026-10-13T10:00", end="2026-10-13T11:00"
         )
-        llm = ScriptedLLM(said("", ten), said("בעשר, אם כך."))
+        llm = ScriptedLLM(said("OTHER"), said("", ten), said("בעשר, אם כך."))
         await _turn(db, owner_conn, tenant, llm, calendar, "בעצם בעשר")
         action = await _current(db, tenant)
         assert action is not None
         assert action.payload["start"] == "2026-10-13T10:00"
-        await _turn(db, owner_conn, tenant, NoLLM(), calendar)
+        await _turn(db, owner_conn, tenant, _yes(), calendar)
         assert [e.start.isoformat() for e in calendar.events] == ["2026-10-13T10:00:00+03:00"]
 
     async def test_a_re_run_of_the_proposing_message_cannot_confirm_it(

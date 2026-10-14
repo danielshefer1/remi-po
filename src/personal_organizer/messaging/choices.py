@@ -1,7 +1,7 @@
 """A channel-neutral choice, rendered as numbered text (D9).
 
-Linked-device WhatsApp cannot be relied on to show buttons. Later steps depend on choices,
-starting with the Confirm step for calendar writes. So a choice is a messaging concept, not a
+Linked-device WhatsApp cannot be relied on to show buttons. Onboarding's time zone step
+depends on a choice. So a choice is a messaging concept, not a
 channel feature. It goes out as plain text through ``send_once``, and ``OutboundChannel`` does
 not change. Native rendering (Meta buttons, GOWA polls) is a later ``send_choice`` on the
 channels that can do it. :func:`resolve` already accepts what those send back: the picked

@@ -9,7 +9,8 @@ this week is 2026-10-11 to 2026-10-17.
 
 A window *covers* the range the question needs and stays *within* the widest sensible range,
 so "this week" read as Monday to Sunday, or "tomorrow" read as the wrong day, fails. A request
-to add an event must ``propose_event`` its local window, and create nothing without a "1".
+to add an event must ``propose_event`` its local window, and create nothing without a "yes";
+the confirm call must read a reply to that proposal as ADD, CANCEL or neither.
 """
 
 from __future__ import annotations
@@ -27,8 +28,12 @@ import pytest
 from personal_organizer.db.models.tenant import CalendarConnection
 from personal_organizer.interfaces.calendar import CalendarEvent
 from personal_organizer.messaging.agent import respond
-from personal_organizer.messaging.choices import render_text
-from personal_organizer.messaging.confirm import confirm_choice
+from personal_organizer.messaging.confirm import (
+    CONFIRM_ADD,
+    CONFIRM_CANCEL,
+    confirm_prompt,
+    decide,
+)
 from personal_organizer.messaging.language import detect_language
 from personal_organizer.messaging.onboarding_text import t
 from personal_organizer.messaging.tenancy import TenantState
@@ -270,7 +275,7 @@ PROPOSALS = [
 
 @pytest.mark.parametrize("scenario", PROPOSALS, ids=lambda s: s.name)
 async def test_propose(scenario: Proposal, llm: AnthropicLLM) -> None:
-    """The model proposes the right local window; nothing is created without a "1"."""
+    """The model proposes the right local window; nothing is created without a "yes"."""
     zone = ZoneInfo(JERUSALEM)
     calendar = InMemoryCalendar(_events(zone))
     before = list(calendar.events)
@@ -302,8 +307,31 @@ async def test_propose(scenario: Proposal, llm: AnthropicLLM) -> None:
     assert event.all_day is scenario.all_day, reply
     if scenario.location:
         assert scenario.location in (event.location or ""), reply
-    # The choice is code's, at the end.
-    choice = render_text(confirm_choice("", scenario.language), scenario.language)
-    assert reply.endswith(choice.strip()), reply
+    # The question is code's, at the end.
+    assert reply.endswith(confirm_prompt("", scenario.language).strip()), reply
     assert "http" not in reply.lower(), reply
     assert detect_language(reply) == scenario.language, reply
+
+
+#: Replies to the dentist proposal, and what the confirm call must read them as.
+DECISIONS = [
+    ("כן", CONFIRM_ADD),
+    ("yes please", CONFIRM_ADD),
+    ("סבבה, תוסיף", CONFIRM_ADD),
+    ("👍", CONFIRM_ADD),
+    ("perfect, thanks!", CONFIRM_ADD),
+    ("לא", CONFIRM_CANCEL),
+    ("no, leave it", CONFIRM_CANCEL),
+    ("עזוב, לא צריך", CONFIRM_CANCEL),
+    ("make it 11 instead", None),
+    ("בעצם תעשה את זה בשבע", None),
+    ("what else do I have tomorrow?", None),
+    ("yes, and add one for Noa too", None),
+]
+
+
+@pytest.mark.parametrize(("text", "expected"), DECISIONS, ids=[t for t, _ in DECISIONS])
+async def test_decide(text: str, expected: str | None, llm: AnthropicLLM) -> None:
+    """Only a clear yes adds; a change, a question or something more is the agent's."""
+    summary = "Dentist\nTuesday 2026-10-13, 10:00-11:00"
+    assert await decide(summary, text, llm=llm) == expected
