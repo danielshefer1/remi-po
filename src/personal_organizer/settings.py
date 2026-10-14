@@ -383,6 +383,21 @@ class OnboardingSettings(BaseModel):
         return self
 
 
+class AgentSettings(BaseModel):
+    """The LLM (docs/plan-iteration-04.md D1): onboarding talks through it.
+
+    Off by default. On, it needs its key and Composio, because the conversation it holds is the
+    one that ends in the Google connect; ``Settings`` checks both together. Only the worker
+    calls the model, so only the worker sets these.
+    """
+
+    enabled: bool = False
+    api_key: SecretStr | None = None
+    #: Per model call, with the SDK's own retries off: ``INBOUND_RETRY`` is the one retry layer,
+    #: and a slow call holds the sender's lock.
+    request_timeout_s: float = 20.0
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -407,6 +422,7 @@ class Settings(BaseSettings):
     gowa: GowaSettings = GowaSettings()
     composio: ComposioSettings = ComposioSettings()
     onboarding: OnboardingSettings = OnboardingSettings()
+    agent: AgentSettings = AgentSettings()
     flags: dict[str, bool] = Field(default_factory=dict)
 
     @property
@@ -445,6 +461,25 @@ class Settings(BaseSettings):
             msg = (
                 f"Invalid Composio settings: {', '.join(missing)} required when "
                 "COMPOSIO__ENABLED is true"
+            )
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _agent_is_complete(self) -> Settings:
+        if not self.agent.enabled:
+            return self
+        missing = [
+            name
+            for name, ok in {
+                "COMPOSIO__ENABLED": self.composio.enabled,
+                "AGENT__API_KEY": self.agent.api_key is not None,
+            }.items()
+            if not ok
+        ]
+        if missing:
+            msg = (
+                f"Invalid agent settings: {', '.join(missing)} required when AGENT__ENABLED is true"
             )
             raise ValueError(msg)
         return self
@@ -515,6 +550,7 @@ def get_settings() -> Settings:
 
 
 __all__ = [
+    "AgentSettings",
     "AppSettings",
     "ComposioSettings",
     "DatabaseSettings",

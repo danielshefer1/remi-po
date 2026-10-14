@@ -114,16 +114,52 @@ class CalendarProviderRejectedError(CalendarProviderError):
         self.status_code = status_code
 
 
+class CalendarNotConnectedError(CalendarProviderRejectedError):
+    """The account no longer works (expired, revoked, inactive, or Google says 401): reconnect."""
+
+    code = "calendar_not_connected"
+
+
+class LLMError(AppError):
+    """The LLM provider refused or failed a request.
+
+    Messages are fixed strings. The SDK's own carry the response body, and a request it echoes
+    carries the prompt: the person's messages.
+    """
+
+    code = "llm_error"
+
+
+class LLMUnavailableError(LLMError):
+    """Timed out, unreachable, throttled or a 5xx. The same request may work later."""
+
+    code = "llm_unavailable"
+
+
+class LLMRejectedError(LLMError):
+    """Refused: a 4xx, a refusal by the model, or a response we cannot use. Retrying won't help."""
+
+    code = "llm_rejected"
+
+    def __init__(self, status_code: int | None) -> None:
+        super().__init__(f"LLM provider rejected the request (status {status_code})")
+        self.status_code = status_code
+
+
 __all__ = [
     "AmbiguousDeliveryError",
     "AppError",
     "BootstrapError",
+    "CalendarNotConnectedError",
     "CalendarProviderError",
     "CalendarProviderRejectedError",
     "CalendarProviderUnavailableError",
     "ChannelError",
     "ChannelNotConfiguredError",
     "ConfigError",
+    "LLMError",
+    "LLMRejectedError",
+    "LLMUnavailableError",
     "MessageTooLongError",
     "MissingDatabaseRoleError",
     "RejectedChannelError",

@@ -20,6 +20,7 @@ from typing import Any
 
 import pytest
 import sentry_sdk
+from sentry_sdk.integrations.anthropic import AnthropicIntegration
 
 from personal_organizer.observability import sentry as sentry_module
 from personal_organizer.observability.redaction import REDACTED_SECRET
@@ -225,6 +226,8 @@ class TestInitSentry:
         assert kwargs["max_request_body_size"] == "never"
         assert kwargs["environment"] == "production"
         assert kwargs["release"] == "abc123"
+        # Auto-enabled, it would report the SDK's raw errors (response bodies) before ours.
+        assert [type(i) for i in kwargs["disabled_integrations"]] == [AnthropicIntegration]
 
     def test_stack_frame_locals_are_not_shipped(
         self, settings_factory: Any, monkeypatch: pytest.MonkeyPatch

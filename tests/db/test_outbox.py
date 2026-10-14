@@ -4,6 +4,7 @@ answers no inbound message. The ``(inbox_id, kind)`` paths are pinned in
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import AsyncIterator
 from typing import Any
 from uuid import UUID
@@ -12,12 +13,13 @@ import pytest
 
 from personal_organizer.core.errors import (
     AmbiguousDeliveryError,
+    ChannelError,
     RejectedChannelError,
     TransientChannelError,
 )
 from personal_organizer.db.engine import Database
 from personal_organizer.interfaces.channel import OutboundMessage
-from personal_organizer.messaging.outbox import send_once
+from personal_organizer.messaging.outbox import already_sent, send_once
 from personal_organizer.settings import Settings
 from tests.fixtures.channels import FakeOutbound, insert_inbox
 from tests.fixtures.payloads import SENDER_PHONE
@@ -172,3 +174,32 @@ class TestArguments:
                 idempotency_key=KEY if both else None,
             )
         assert await _outbox(owner_conn) == []
+
+
+class TestAlreadySent:
+    @pytest.mark.parametrize(
+        ("failures", "sent"),
+        [
+            ((), True),
+            ((AmbiguousDeliveryError("timeout"),), True),
+            ((TransientChannelError("429"),), False),
+        ],
+    )
+    async def test_claimed_counts_and_pending_does_not(
+        self, db: Database, owner_conn: Any, failures: tuple[ChannelError, ...], sent: bool
+    ) -> None:
+        """A reply put back to ``pending`` was definitely not sent, so it is worked out again."""
+        inbox_id = await insert_inbox(owner_conn)
+        assert not await already_sent(db, inbox_id, KIND)
+        with contextlib.suppress(TransientChannelError):
+            await send_once(
+                db,
+                FakeOutbound(*failures),
+                inbox_id=inbox_id,
+                kind=KIND,
+                recipient_key=RECIPIENT,
+                to=SENDER_PHONE,
+                text=TEXT,
+            )
+        assert await already_sent(db, inbox_id, KIND) is sent
+        assert not await already_sent(db, inbox_id, "another:kind")

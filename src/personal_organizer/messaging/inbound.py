@@ -17,9 +17,9 @@ anything else, suspended included     invite-only reply and purge (``stranger[_m
 "Invited" is :func:`~personal_organizer.messaging.invites.is_invited`: on
 ``WHATSAPP__ALLOWED_PHONES``, or holding an open invite in ``invites`` (ADR 0006).
 
-What both guarantee is the part that must hold before there *is* an agent. A sender who is
-not invited never reaches ``on_allowed``, the seam Iteration 04 turns into "defer an agent
-turn", and so never spends an LLM call. Identity wins over the invite list: an onboarded
+What both guarantee: a sender who is not invited never reaches the acknowledgement or
+``on_allowed``, the agent's turn (:func:`~personal_organizer.messaging.agent.agent_turn`), and
+so never spends an LLM call. Identity wins over the invite list: an onboarded
 person stays served after their number is removed from it.
 
 **D7.** A known tenant's message is copied into ``messages``, under RLS, and nulled here.
@@ -59,9 +59,14 @@ from personal_organizer.core.errors import ChannelError
 from personal_organizer.core.types import TenantId
 from personal_organizer.db.engine import Database
 from personal_organizer.db.models.channel import ChannelInbox, ChannelOutbox
-from personal_organizer.db.repositories.messages import record_inbound
-from personal_organizer.db.repositories.tenants import set_onboarding_step, set_timezone
+from personal_organizer.db.repositories.messages import record_inbound, record_outbound
+from personal_organizer.db.repositories.tenants import (
+    set_language,
+    set_onboarding_step,
+    set_timezone,
+)
 from personal_organizer.interfaces.channel import OutboundChannel
+from personal_organizer.interfaces.llm import LLMProvider
 from personal_organizer.messaging.inbox import InboxRow, load_row
 from personal_organizer.messaging.invites import is_invited
 from personal_organizer.messaging.language import detect_language
@@ -74,7 +79,13 @@ from personal_organizer.messaging.replies import (
     SERVICE_WINDOW,
     SERVICE_WINDOW_MARGIN,
 )
-from personal_organizer.messaging.tenancy import enrol, load_state, resolve_sender
+from personal_organizer.messaging.tenancy import (
+    TenantState,
+    enrol,
+    load_history,
+    load_state,
+    resolve_sender,
+)
 from personal_organizer.settings import Settings
 
 log = structlog.get_logger(__name__)
@@ -95,8 +106,10 @@ _PURGED: Final = MappingProxyType(
 )
 
 
-#: The handoff for an allowed sender, given the channel to answer on.
-OnAllowed = Callable[[InboxRow, OutboundChannel], Awaitable[None]]
+#: The tenant gate's handoff for an active tenant: ``(row, channel, tenant, now)``, answering
+#: on ``channel``. It returns what it decided, for ``_finish_known`` to commit with the row:
+#: the agent's reply to record, or ``None`` for nothing.
+OnAllowed = Callable[[InboxRow, OutboundChannel, TenantState, datetime], Awaitable[Advance | None]]
 
 #: Looks up an outbound channel by name; raises ``ChannelNotConfiguredError`` if it is absent.
 ChannelResolver = Callable[[str], OutboundChannel]
@@ -140,7 +153,7 @@ async def _finish_known(
     advance: Advance | None = None,
 ) -> None:
     """D7: copy the content under RLS and null it here, in the transaction that finishes the
-    row, together with the state the onboarding step decided."""
+    row, together with the state the onboarding step decided and the reply it sent."""
     change = advance or Advance()
     async with db.tenant_session(TenantId(tenant_id)) as session:
         # Claim the row first. ``messages.inbox_id`` is not unique, so an overlapping retry that
@@ -158,6 +171,8 @@ async def _finish_known(
             await set_timezone(session, tenant_id, change.timezone)
         if change.next_step is not None:
             await set_onboarding_step(session, tenant_id, change.next_step)
+        if change.language is not None:
+            await set_language(session, tenant_id, change.language)
         await record_inbound(
             session,
             tenant_id,
@@ -167,10 +182,15 @@ async def _finish_known(
             body=row.body,
             sent_at=row.sent_at,
         )
+        if change.reply is not None:
+            await record_outbound(
+                session, tenant_id, inbox_id=row.id, channel=row.channel, body=change.reply
+            )
 
 
 async def acknowledge(row: InboxRow, channel: OutboundChannel, *, db: Database) -> None:
-    """Iteration 02's ``on_allowed``: the fixed acknowledgement. Iteration 04 replaces it."""
+    """Iteration 02's answer: the fixed acknowledgement. The allowlist gate's, and the tenant
+    gate's while the agent is off."""
     if row.sender_phone is None:
         # An active tenant who writes with a BSUID and no number reaches here (the tenant gate
         # does not need a phone). Until Iteration 04 there is no reply to such a sender.
@@ -227,7 +247,6 @@ async def _allowlist_gate(
     current: datetime,
     *,
     allowlist: frozenset[str],
-    on_allowed: OnAllowed,
 ) -> str:
     """Iteration 02's gate, kept exactly for environments without Composio."""
     allowed = await is_invited(db, row.sender_phone, allowlist)
@@ -235,7 +254,7 @@ async def _allowlist_gate(
         disposition = "stale"
     elif allowed:
         await _mark_read(channel, row)
-        await on_allowed(row, channel)
+        await acknowledge(row, channel, db=db)
         disposition = "allowed"
     else:
         disposition = await _turn_away(db, channel, row, current)
@@ -252,6 +271,8 @@ async def _tenant_gate(
     allowlist: frozenset[str],
     on_allowed: OnAllowed,
     settings: Settings,
+    llm: LLMProvider | None,
+    last_attempt: bool,
 ) -> str:
     """D2: serve, onboard, enrol or turn away. See the module docstring's table."""
     stale = _is_stale(row, current)
@@ -271,10 +292,21 @@ async def _tenant_gate(
         return "stale"
     await _mark_read(channel, row)
     if tenant.status == "active":
-        await on_allowed(row, channel)
-        await _finish_known(db, row, tenant.id, "allowed")
+        decided = await on_allowed(row, channel, tenant, current)
+        await _finish_known(db, row, tenant.id, "allowed", decided)
         return "allowed"
-    advance = await onboarding_step(db, channel, row, tenant, settings=settings, now=current)
+    history = await load_history(db, tenant.id) if llm is not None else ()
+    advance = await onboarding_step(
+        db,
+        channel,
+        row,
+        tenant,
+        settings=settings,
+        now=current,
+        llm=llm,
+        history=history,
+        last_attempt=last_attempt,
+    )
     await _finish_known(db, row, tenant.id, "onboarding", advance)
     return "onboarding"
 
@@ -287,12 +319,15 @@ async def handle_inbound(
     allowlist: frozenset[str],
     on_allowed: OnAllowed,
     settings: Settings | None = None,
+    llm: LLMProvider | None = None,
+    last_attempt: bool = False,
     now: Callable[[], datetime] = _utcnow,
 ) -> str | None:
     """Process one inbox row. Returns its disposition, or ``None`` if the row is gone.
 
     ``settings`` with ``composio.enabled`` selects the tenant gate. ``None``, or Composio
-    off, is Iteration 02's allowlist gate exactly.
+    off, is Iteration 02's allowlist gate exactly. ``llm`` talks onboarding through (D10);
+    ``last_attempt`` is the job's last, when an unavailable model falls back instead (D3).
     """
     row = await load_row(db, inbox_id)
     if row is None:
@@ -314,11 +349,11 @@ async def handle_inbound(
             allowlist=allowlist,
             on_allowed=on_allowed,
             settings=settings,
+            llm=llm,
+            last_attempt=last_attempt,
         )
     else:
-        disposition = await _allowlist_gate(
-            db, channel, row, current, allowlist=allowlist, on_allowed=on_allowed
-        )
+        disposition = await _allowlist_gate(db, channel, row, current, allowlist=allowlist)
     log.info(
         "inbound.handled",
         inbox_id=str(row.id),

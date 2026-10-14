@@ -10,6 +10,8 @@ from uuid import UUID, uuid4
 from personal_organizer.core.errors import ChannelError, TransientChannelError
 from personal_organizer.interfaces.channel import OutboundChannel, OutboundMessage
 from personal_organizer.messaging.inbox import InboxRow
+from personal_organizer.messaging.onboarding import Advance
+from personal_organizer.messaging.tenancy import TenantState
 from tests.fixtures.payloads import SENDER_PHONE
 
 
@@ -46,8 +48,11 @@ class Spy:
     def __init__(self) -> None:
         self.calls: list[InboxRow] = []
 
-    async def __call__(self, row: InboxRow, channel: OutboundChannel) -> None:
+    async def __call__(
+        self, row: InboxRow, channel: OutboundChannel, tenant: TenantState, now: datetime
+    ) -> Advance | None:
         self.calls.append(row)
+        return None
 
 
 async def insert_inbox(

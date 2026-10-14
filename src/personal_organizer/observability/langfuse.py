@@ -11,6 +11,7 @@ preference.
 
 from __future__ import annotations
 
+from contextlib import AbstractContextManager, nullcontext
 from typing import Any
 
 import structlog
@@ -51,10 +52,21 @@ def get_langfuse() -> Any | None:
     return _client
 
 
+def observation(name: str, **fields: Any) -> AbstractContextManager[Any]:
+    """A Langfuse observation as the current span, or a no-op yielding ``None`` when off.
+
+    Observations opened inside one nest under it, so one turn is one trace.
+    """
+    if _client is None:
+        return nullcontext()
+    manager: AbstractContextManager[Any] = _client.start_as_current_observation(name=name, **fields)
+    return manager
+
+
 def flush_langfuse() -> None:
     """Flush buffered spans. Safe to call when Langfuse was never initialised."""
     if _client is not None:
         _client.flush()
 
 
-__all__ = ["flush_langfuse", "get_langfuse", "init_langfuse"]
+__all__ = ["flush_langfuse", "get_langfuse", "init_langfuse", "observation"]
