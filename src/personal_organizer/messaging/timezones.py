@@ -3,8 +3,8 @@
 **The guess** comes from the country calling code, and only for codes that span exactly one
 zone: ``+972``, the UK, Ireland and the common EU codes. Multi-zone codes (``+1``, ``+7``,
 ``+34`` with the Canaries, ``+351`` with the Azores, ``+55``, ``+61``) get no guess, and the
-user is asked for a city. The guess is computed whenever the step is rendered and **never
-stored**. ``tenants.timezone`` is written only when the user confirms.
+user is asked for a city. The guess is taken without asking: onboarding stores it and moves on,
+and naming a city later replaces it.
 
 **The match** is deliberately small: no geocoding. Tried in order:
 
@@ -30,7 +30,7 @@ from collections.abc import Mapping
 from types import MappingProxyType
 from typing import Final
 
-from personal_organizer.messaging.language import strip_bidi
+from personal_organizer.messaging.language import HEBREW, strip_bidi
 
 #: Country calling code -> its single zone. Longest prefix wins (``+420`` before ``+40``).
 ZONE_GUESSES: Final[Mapping[str, str]] = MappingProxyType(
@@ -144,6 +144,19 @@ def guess_zone(phone: str | None) -> str | None:
     return None
 
 
+#: The Hebrew name a zone is shown by: the first Hebrew alias that names it ("ירושלים").
+_HEBREW_NAMES: Final[Mapping[str, str]] = MappingProxyType(
+    {zone: name for name, zone in reversed([*_ALIASES.items()]) if not name.isascii()}
+)
+
+
+def zone_label(zone: str, language: str) -> str:
+    """``zone`` as people say it: "Jerusalem", "New York", or its Hebrew name if it has one."""
+    if language == HEBREW and zone in _HEBREW_NAMES:
+        return _HEBREW_NAMES[zone]
+    return zone.rsplit("/", 1)[-1].replace("_", " ")
+
+
 def match_zone(text: str) -> str | None:
     """The IANA zone ``text`` names, or ``None`` if it names none or more than one."""
     if len(text) > _MAX_INPUT:
@@ -155,4 +168,4 @@ def match_zone(text: str) -> str | None:
     return aliases.get(key) or full.get(key) or last.get(key)
 
 
-__all__ = ["ZONE_GUESSES", "guess_zone", "match_zone"]
+__all__ = ["ZONE_GUESSES", "guess_zone", "match_zone", "zone_label"]

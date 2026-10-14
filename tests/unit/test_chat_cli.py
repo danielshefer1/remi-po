@@ -23,7 +23,7 @@ from personal_organizer.db.engine import Database
 from personal_organizer.db.models.tenant import CalendarConnection
 from personal_organizer.interfaces.llm import Message
 from personal_organizer.messaging.agent import AGENT_REPLY
-from personal_organizer.messaging.onboarding import REPLY, zone_ask
+from personal_organizer.messaging.onboarding import REPLY
 from personal_organizer.messaging.onboarding_text import t
 from personal_organizer.messaging.tenancy import TenantState
 from personal_organizer.providers.calendar.memory import InMemoryCalendar
@@ -61,19 +61,19 @@ async def test_scripted_turns_print_and_keep_history_in_memory(settings: Setting
     tenant = TenantState(
         id=UUID(int=1), status="onboarding", step="zone", language="en", first_message=True
     )
-    # Neither turn issues a link, so nothing reaches the database.
+    # A US number gives no zone guess, so neither turn issues a link or reaches the database.
     no_db = cast(Database, cast(Any, None))
     result = await chat(
         no_db,
         settings,
         tenant,
-        PHONE,
+        "+12025550123",
         llm=llm,
         read=lines("hi", "", "what is this?"),
         write=printed.append,
     )
     assert result == OK
-    choice = zone_ask("en", "Europe/Amsterdam")
+    choice = t("zone_ask_city", "en")
     assert printed == [
         f"bot [{REPLY}]> Hi! Two quick steps.\n\n{choice}",
         f"bot [{REPLY}]> A personal organizer.\n\n{choice}",

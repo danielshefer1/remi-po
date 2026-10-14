@@ -11,20 +11,15 @@ from uuid import UUID
 import pytest
 
 from personal_organizer.db.engine import Database
-from personal_organizer.messaging.choices import render_text
 from personal_organizer.messaging.inbox import load_row
 from personal_organizer.messaging.onboarding import (
     CONNECT,
     REPLY,
-    ZONE_ASK_CITY,
-    ZONE_CHANGE,
-    ZONE_CORRECT,
     Advance,
     connect_text,
+    guessed_text,
     onboarding_step,
-    retry_text,
     welcome_text,
-    zone_choice,
 )
 from personal_organizer.messaging.onboarding_text import t
 from personal_organizer.messaging.tenancy import TenantState
@@ -93,51 +88,55 @@ async def _kinds(conn: Any) -> list[str]:
 
 
 class TestTexts:
-    def test_correct_is_option_one(self) -> None:
-        """``zone_retry_keep`` says "reply 1"; that is only true while Correct comes first."""
-        assert zone_choice(AMSTERDAM, "en").options[0].id == ZONE_CORRECT
-        assert zone_choice(AMSTERDAM, "he").options[1].id == ZONE_CHANGE
-
     def test_the_welcome_with_a_guess(self) -> None:
-        assert welcome_text("en", AMSTERDAM) == (
-            "Hi! I'm your personal organizer. Two quick steps and you're set up.\n\n"
-            "Is your time zone Europe/Amsterdam?\n\n1. Correct\n2. Change\n\n"
-            "Reply with a number."
+        assert guessed_text("en", AMSTERDAM, "URL", welcome=True) == (
+            f"{t('welcome', 'en')}\n\n"
+            "I've set your clock to Amsterdam time, going by your number. If you're somewhere "
+            "else, just tell me which city.\n\n"
+            f"{t('connect_link', 'en', url='URL')}"
         )
 
     def test_the_welcome_without_a_guess(self) -> None:
-        assert welcome_text("en", None) == (f"{t('welcome', 'en')}\n\n{t('zone_ask_city', 'en')}")
+        assert welcome_text("en") == f"{t('welcome', 'en')}\n\n{t('zone_ask_city', 'en')}"
 
-    def test_the_hebrew_welcome(self) -> None:
-        text = welcome_text("he", "Asia/Jerusalem")
-        assert text.endswith(render_text(zone_choice("Asia/Jerusalem", "he"), "he"))
-        assert "1. נכון\n2. לשנות" in text
-
-    def test_retry_offers_the_guess(self) -> None:
-        assert retry_text("en", AMSTERDAM) == (
-            f"{t('zone_retry', 'en')}\nOr reply 1 to keep Europe/Amsterdam."
+    def test_the_hebrew_zone_is_named_in_hebrew(self) -> None:
+        assert "לשעון ירושלים" in guessed_text("he", "Asia/Jerusalem", "URL")
+        assert connect_text("he", "Asia/Jerusalem", "URL").startswith(
+            "מעולה, כיוונתי לשעון ירושלים."
         )
-        assert retry_text("en", None) == t("zone_retry", "en")
 
 
 class TestZoneStep:
-    async def test_the_first_message_gets_the_welcome(
-        self, db: Database, owner_conn: Any, onboarding_settings: Settings
+    @pytest.mark.parametrize("first", [True, False])
+    async def test_the_guess_is_set_without_asking(
+        self, db: Database, owner_conn: Any, onboarding_settings: Settings, first: bool
     ) -> None:
         tenant_id = await new_tenant(db)
         advance, channel = await _step(
-            db, owner_conn, onboarding_settings, _state(tenant_id, first=True), body="1"
+            db, owner_conn, onboarding_settings, _state(tenant_id, first=first), body="hi"
         )
-        # Even "1": a first message is never read as an answer to a question not yet asked.
-        assert advance == Advance()
-        assert [m.body for m in channel.sent] == [welcome_text("en", AMSTERDAM)]
+        assert advance == Advance(timezone=AMSTERDAM, next_step="connect")
+        [message] = channel.sent
+        assert message.recipient == NL_PHONE
+        url = message.body.rsplit("\n", 1)[-1]
+        assert message.body == guessed_text("en", AMSTERDAM, url, welcome=first)
+        assert link_payload(message.body).tenant_id == tenant_id
         assert await _kinds(owner_conn) == [REPLY]
+
+    async def test_a_first_message_city_is_not_read_as_an_answer(
+        self, db: Database, owner_conn: Any, onboarding_settings: Settings
+    ) -> None:
+        tenant_id = await new_tenant(db)
+        advance, _ = await _step(
+            db, owner_conn, onboarding_settings, _state(tenant_id, first=True), body="London"
+        )
+        assert advance == Advance(timezone=AMSTERDAM, next_step="connect")
 
     async def test_no_guess_welcome_asks_for_a_city(
         self, db: Database, owner_conn: Any, onboarding_settings: Settings
     ) -> None:
         tenant_id = await new_tenant(db, phone=US_PHONE)
-        _, channel = await _step(
+        advance, channel = await _step(
             db,
             owner_conn,
             onboarding_settings,
@@ -145,65 +144,13 @@ class TestZoneStep:
             body="hi",
             phone=US_PHONE,
         )
-        assert [m.body for m in channel.sent] == [welcome_text("en", None)]
-
-    @pytest.mark.parametrize(
-        ("body", "reply_id"),
-        [
-            ("1", None),
-            ("1.", None),
-            (" 1) ", None),
-            ("Correct", None),
-            ("yes!", None),
-            ("כן", None),
-            ("נכון", None),
-            ("👍", None),
-            ("1. Correct", ZONE_CORRECT),  # a GOWA selection, or a Meta button
-        ],
-    )
-    async def test_confirming_the_guess_sends_the_link(
-        self,
-        db: Database,
-        owner_conn: Any,
-        onboarding_settings: Settings,
-        body: str,
-        reply_id: str | None,
-    ) -> None:
-        tenant_id = await new_tenant(db)
-        advance, channel = await _step(
-            db, owner_conn, onboarding_settings, _state(tenant_id), body=body, reply_id=reply_id
-        )
-        assert advance == Advance(timezone=AMSTERDAM, next_step="connect")
-        [message] = channel.sent
-        assert message.recipient == NL_PHONE
-        assert message.body.startswith(t("zone_set", "en", zone=AMSTERDAM))
-        assert link_payload(message.body).tenant_id == tenant_id
-        assert await _kinds(owner_conn) == [CONNECT]
-
-    @pytest.mark.parametrize(
-        ("body", "reply_id"),
-        [("2", None), ("Change", None), ("no", None), ("לא", None), ("2. Change", ZONE_CHANGE)],
-    )
-    async def test_change_asks_for_a_city(
-        self,
-        db: Database,
-        owner_conn: Any,
-        onboarding_settings: Settings,
-        body: str,
-        reply_id: str | None,
-    ) -> None:
-        tenant_id = await new_tenant(db)
-        advance, channel = await _step(
-            db, owner_conn, onboarding_settings, _state(tenant_id), body=body, reply_id=reply_id
-        )
         assert advance == Advance()
-        assert [m.body for m in channel.sent] == [t("zone_ask_city", "en")]
-        assert await _kinds(owner_conn) == [ZONE_ASK_CITY]
+        assert [m.body for m in channel.sent] == [welcome_text("en")]
 
     @pytest.mark.parametrize(
         ("phone", "body", "zone"),
         [
-            (NL_PHONE, "London", "Europe/London"),  # a city instead of Correct/Change
+            (NL_PHONE, "London", "Europe/London"),  # a city over the guess
             (NL_PHONE, "tel aviv", "Asia/Jerusalem"),
             (US_PHONE, "new york", "America/New_York"),
             (US_PHONE, "Europe/Berlin", "Europe/Berlin"),
@@ -225,43 +172,31 @@ class TestZoneStep:
         assert advance == Advance(timezone=zone, next_step="connect")
         url = channel.sent[0].body.rsplit("\n", 1)[-1]
         assert channel.sent[0].body == connect_text("en", zone, url)
+        assert await _kinds(owner_conn) == [CONNECT]
 
-    async def test_a_digit_means_nothing_when_no_choice_is_open(
-        self, db: Database, owner_conn: Any, onboarding_settings: Settings
-    ) -> None:
-        tenant_id = await new_tenant(db, phone=US_PHONE)
-        advance, channel = await _step(
-            db, owner_conn, onboarding_settings, _state(tenant_id), body="1", phone=US_PHONE
-        )
-        assert advance == Advance()
-        assert [m.body for m in channel.sent] == [retry_text("en", None)]
-
+    @pytest.mark.parametrize(("body", "message_type"), [("Mars", "text"), (None, "audio")])
     async def test_an_unmatched_reply_gets_the_retry_prompt(
-        self, db: Database, owner_conn: Any, onboarding_settings: Settings
+        self,
+        db: Database,
+        owner_conn: Any,
+        onboarding_settings: Settings,
+        body: str | None,
+        message_type: str,
     ) -> None:
-        tenant_id = await new_tenant(db)
-        advance, channel = await _step(
-            db, owner_conn, onboarding_settings, _state(tenant_id), body="Mars"
-        )
-        assert advance == Advance()
-        assert [m.body for m in channel.sent] == [retry_text("en", AMSTERDAM)]
-        assert await _kinds(owner_conn) == [REPLY]
-
-    async def test_a_message_without_text_gets_the_retry_prompt(
-        self, db: Database, owner_conn: Any, onboarding_settings: Settings
-    ) -> None:
-        """Review Focus 5: a voice note, a sticker or an image during the zone step."""
-        tenant_id = await new_tenant(db)
+        """A voice note, a sticker or an image counts as unmatched (Review Focus 5)."""
+        tenant_id = await new_tenant(db, phone=US_PHONE)
         advance, channel = await _step(
             db,
             owner_conn,
             onboarding_settings,
             _state(tenant_id),
-            body=None,
-            message_type="audio",
+            body=body,
+            phone=US_PHONE,
+            message_type=message_type,
         )
         assert advance == Advance()
-        assert [m.body for m in channel.sent] == [retry_text("en", AMSTERDAM)]
+        assert [m.body for m in channel.sent] == [t("zone_retry", "en")]
+        assert await _kinds(owner_conn) == [REPLY]
 
     async def test_hebrew_tenant_hebrew_replies(
         self, db: Database, owner_conn: Any, onboarding_settings: Settings
@@ -271,11 +206,14 @@ class TestZoneStep:
             db,
             owner_conn,
             onboarding_settings,
-            _state(tenant_id, language="he"),
-            body="מאדים",
+            _state(tenant_id, language="he", first=True),
+            body="היי",
             phone=IL_PHONE,
         )
-        assert [m.body for m in channel.sent] == [retry_text("he", "Asia/Jerusalem")]
+        url = channel.sent[0].body.rsplit("\n", 1)[-1]
+        assert [m.body for m in channel.sent] == [
+            guessed_text("he", "Asia/Jerusalem", url, welcome=True)
+        ]
 
 
 class TestConnectStep:
@@ -293,6 +231,17 @@ class TestConnectStep:
         assert message.body == t("connect_link", "en", url=url)
         assert link_payload(message.body).tenant_id == tenant_id
         assert await _kinds(owner_conn) == [REPLY]
+
+    async def test_a_city_replaces_the_guessed_zone(
+        self, db: Database, owner_conn: Any, onboarding_settings: Settings
+    ) -> None:
+        tenant_id = await new_tenant(db, step="connect")
+        advance, channel = await _step(
+            db, owner_conn, onboarding_settings, _state(tenant_id, step="connect"), body="London"
+        )
+        assert advance == Advance(timezone="Europe/London", next_step="connect")
+        url = channel.sent[0].body.rsplit("\n", 1)[-1]
+        assert channel.sent[0].body == connect_text("en", "Europe/London", url)
 
 
 class TestAddressing:

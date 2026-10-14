@@ -39,9 +39,7 @@ class TestTable:
 
 class TestT:
     def test_formats_values(self) -> None:
-        assert t("zone_set", "en", zone="Europe/London") == (
-            "Your time zone is set to Europe/London."
-        )
+        assert t("zone_set", "en", zone="London") == "Got it, you're on London time."
 
     def test_the_link_is_on_its_own_line(self) -> None:
         # WhatsApp linkifies a URL reliably only when nothing is glued to it.
