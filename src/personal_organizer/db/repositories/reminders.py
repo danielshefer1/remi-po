@@ -26,6 +26,15 @@ from personal_organizer.db.repositories.scope import scoped
 async def add_reminder(
     session: AsyncSession, tenant_id: UUID, *, text: str, due_at: datetime
 ) -> UUID:
+    """Add a reminder, or return the identical pending one: a turn retried after its
+    ``set_reminder`` must not set it twice. The sender lock serialises a tenant's turns."""
+    same: UUID | None = await session.scalar(
+        scoped(select(Reminder.id), Reminder, tenant_id).where(
+            Reminder.status == "pending", Reminder.text == text, Reminder.due_at == due_at
+        )
+    )
+    if same is not None:
+        return same
     result = await session.execute(
         insert(Reminder)
         .values(tenant_id=tenant_id, text=text, due_at=due_at)

@@ -57,6 +57,8 @@ class InMemorySchedule:
         self.briefing_at: time | None = time(7, 30)
 
     async def add(self, text: str, due_at: datetime) -> None:
+        if any((r.status, r.text, r.due_at) == ("pending", text, due_at) for r in self.reminders):
+            return
         self.reminders.append(Reminder(id=uuid4(), text=text, due_at=due_at, status="pending"))
 
     async def upcoming(self) -> list[Reminder]:

@@ -78,7 +78,7 @@ async def test_due_reminders_returns_due_pending_reminders_of_active_tenants(
     onboarding = await _tenant(db, "+972500000002", active=False)
     due = await _add(db, active, NOW - timedelta(minutes=1))
     await _add(db, active, NOW + timedelta(minutes=1))
-    cancelled = await _add(db, active, NOW - timedelta(minutes=1))
+    cancelled = await _add(db, active, NOW - timedelta(minutes=1), "cancelled")
     async with db.tenant_session(TenantId(active)) as session:
         assert await reminders.cancel_reminder(session, active, cancelled)
     await _add(db, active, NOW - timedelta(hours=13))
@@ -143,6 +143,16 @@ async def test_add_list_cancel_finish(db: Database) -> None:
         assert reminder is not None
         assert reminder.status == "sent"
         assert await reminders.cancel_reminder(session, tenant_id, sooner) is False
+
+
+async def test_adding_the_same_pending_reminder_again_is_a_no_op(db: Database) -> None:
+    """A turn retried after its set_reminder must not set it twice."""
+    tenant_id = await _tenant(db, "+972500000001")
+    first = await _add(db, tenant_id, NOW + timedelta(hours=1), "call mom")
+    again = await _add(db, tenant_id, NOW + timedelta(hours=1), "call mom")
+    other = await _add(db, tenant_id, NOW + timedelta(hours=2), "call mom")
+    assert again == first
+    assert other != first
 
 
 async def test_record_outbound_without_an_inbox_row(db: Database) -> None:
