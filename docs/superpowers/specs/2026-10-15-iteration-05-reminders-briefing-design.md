@@ -89,10 +89,10 @@ to somewhere real.
 - **`set_briefing(time | "off")`**: takes a local `HH:MM` between 04:00 and 22:00, or `off`.
   - Outside that range, the model reads an error asking for another time.
 
-Prompt change in `_PROMPT`: add a short "Reminders and the morning message" rule. It says the four tools exist, that a
-  vague time gets a sensible default the reply states ("tonight" → 20:00, "in the morning" →
-  09:00), and that the model must never say a reminder is set unless `set_reminder` returned
-  `ok`.
+Prompt change in `_PROMPT`: add a short "Reminders and the morning message" rule. It says the
+four tools exist, that a vague time gets a sensible default the reply states ("tonight" →
+20:00, "in the morning" → 09:00), and that the model must never say a reminder is set unless
+`set_reminder` returned `ok`.
 
 ## Sending
 
