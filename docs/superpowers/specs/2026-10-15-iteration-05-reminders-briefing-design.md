@@ -5,7 +5,7 @@ calendar events. This iteration ships the rest: reminders and a morning briefing
 and memory (item 4) come after.
 
 **Decided with the user, 2026-10-15:**
-- Both features in this iteration, in two PRs.
+- Both features in this iteration. Built as one PR, because the parallel tasks cut across both.
 - The briefing is on by default, at 07:30 local time. "You're all set" says so, and plain
   words change or stop it.
 - A briefing goes out on empty days too, as one short line.
@@ -48,7 +48,7 @@ reminder.
 | `id` | uuid | |
 | `text` | text | what to remind, at most `MAX_FIELD` (200) characters |
 | `due_at` | timestamptz | UTC |
-| `status` | text | `pending`, `sent` or `cancelled` |
+| `status` | text | `pending`, `sent`, `cancelled` or `failed` (refused, or nowhere to send) |
 | `created_at` | timestamptz | |
 
 The index is on `(status, due_at)`.
@@ -102,7 +102,7 @@ All of this lives in `worker/tasks/schedule.py` and `messaging/reminders.py`.
 ticks never pile up.
 - It calls both definer functions.
 - It defers one `schedule:reminder(reminder_id, tenant_id)` or
-  `schedule:briefing(tenant_id, local_day)` job each, on `agent`.
+  `schedule:briefing(tenant_id, local_day)` job each, on `webhooks`: the queue every worker takes by default, as `onboarding:connected` does.
 - The jobs carry ids only (ADR 0001), with `queueing_lock` set to the send key so a slow
   minute never queues the same send twice.
 
@@ -118,8 +118,14 @@ ticks never pile up.
 4. In one transaction, set `status = 'sent'` and record the outbound `messages` row.
    - `record_outbound` takes `inbox_id: UUID | None`. The column is already nullable.
 
-A reminder that fires late (the worker was down) still goes out. A missed reminder is worse
-than a late one.
+A reminder that fires late (the worker was down) still goes out, up to 12 hours late: a missed
+reminder is worse than a late one. Past 12 hours, `due_reminders` stops returning it, so a
+channel that stays down never loops. Each job also holds Procrastinate's `lock` on its key,
+so two runs of one reminder or briefing never overlap.
+
+Adding a reminder identical to a pending one (same text and time) is a no-op, so an agent turn
+retried after its `set_reminder` sets it once. `po-chat` uses an in-memory schedule, because
+it touches no database.
 
 **`schedule:briefing`**
 1. Load the tenant. If it is not active or `briefed_on == local_day`, stop.
@@ -168,17 +174,11 @@ none." The Hebrew is written as Hebrew.
   בשש", "in 20 minutes"), "what reminders do I have", "cancel the one about mom", "make the
   morning message 8", "stop the morning message".
 
-## PRs
+## Delivery
 
-1. **Reminders:**
-   - Migration 0007: `reminders`, `due_reminders`, and both `tenants` columns, so there is
-     one migration.
-   - The three reminder tools and the prompt rule.
-   - The tick and `schedule:reminder`.
-2. **Briefing:**
-   - `due_briefings`, the `set_briefing` tool and `schedule:briefing` with its fallbacks.
-   - The tick's second half.
-   - The `all_set` line.
+One PR, built in six tasks (`docs/superpowers/plans/2026-10-15-iteration-05-reminders-briefing.md`):
+the foundation first, then the agent tools, reminder delivery and the briefing in parallel,
+then the worker tick.
 
 ## Out of scope
 
