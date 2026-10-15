@@ -41,6 +41,7 @@ from personal_organizer.messaging.confirm import CONFIRM_ADD, decide
 from personal_organizer.messaging.inbox import InboxRow
 from personal_organizer.messaging.onboarding import next_reply
 from personal_organizer.messaging.onboarding_text import t
+from personal_organizer.messaging.schedule import InMemorySchedule
 from personal_organizer.messaging.tenancy import TenantState, load_state, phone_of
 from personal_organizer.observability.logging import configure_logging
 from personal_organizer.providers.calendar.composio import ComposioConnector
@@ -137,6 +138,8 @@ async def agent_chat(
     history: list[Message] = []
     zone, language = ZoneInfo(tenant.timezone or "UTC"), tenant.language
     waiting: list[CalendarEvent] = []
+    # Reminders and the morning time live in memory for the session, like the history.
+    schedule = InMemorySchedule(datetime.now(UTC))
     while True:
         try:
             line = await asyncio.to_thread(read, "you> ")
@@ -168,6 +171,7 @@ async def agent_chat(
                 account=account,
                 now=datetime.now(UTC),
                 proposed=waiting,
+                schedule=schedule,
             )
         write(f"bot [{AGENT_REPLY}]> {text or NO_ANSWER}")
         history += [Message("user", line), Message("assistant", text)]

@@ -27,6 +27,11 @@ model reads, so the turn still answers. A not-connected answer also gets the fix
 to retry. On the job's last attempt, or when the model refuses, the turn sends the fixed
 ``agent_unavailable`` line instead, under the same kind, so a re-run sends nothing new.
 
+**Reminders (Iteration 05).** ``set_reminder``, ``list_reminders``, ``cancel_reminder`` and
+``set_briefing`` go through a :class:`~personal_organizer.messaging.schedule.Schedule`. The
+model sees reminders numbered by ``list_reminders``, never their ids, and cancels only by a
+number from a list made in the same turn.
+
 *shortcut: the ``calendar_disconnected`` line asks the tenant to go through whoever invited
 them, because the connect flow only links ``onboarding`` tenants (``onboarding/connect.py``).
 Append a fresh connect link, as D9 plans, once that flow lets an active tenant reconnect.*
@@ -65,6 +70,7 @@ from personal_organizer.messaging.language import ENGLISH, HEBREW
 from personal_organizer.messaging.onboarding import LINK_PLACEHOLDER, Advance
 from personal_organizer.messaging.onboarding_text import t
 from personal_organizer.messaging.outbox import already_sent, send_once
+from personal_organizer.messaging.schedule import Schedule, TenantSchedule
 from personal_organizer.messaging.tenancy import TenantState, load_history, phone_of
 from personal_organizer.messaging.text import WHATSAPP_TEXT_LIMIT, split_text
 
@@ -76,14 +82,25 @@ AGENT_REPLY: Final = "agent:reply"
 #: The widest window one ``list_events`` call reads, so a "this year" stays one page. Also the
 #: longest event ``propose_event`` takes.
 MAX_WINDOW: Final = timedelta(days=62)
-#: The longest title or location ``propose_event`` takes, so the confirm fits one message.
+#: The longest title or location ``propose_event`` takes, so the confirm fits one message, and
+#: the longest reminder text.
 MAX_FIELD: Final = 200
+
+#: The furthest ahead ``set_reminder`` sets one.
+MAX_AHEAD: Final = timedelta(days=366)
+#: The local times ``set_briefing`` takes, inclusive.
+BRIEFING_EARLIEST: Final = time(4, 0)
+BRIEFING_LATEST: Final = time(22, 0)
 
 #: The pending action's kind for a proposed event.
 CREATE_EVENT: Final = "create_event"
 
 NOT_CONNECTED: Final = "error: calendar_not_connected"
 UNAVAILABLE: Final = "error: calendar_unavailable"
+NO_SCHEDULE: Final = "error: reminders are not available here"
+_SCHEDULE_TOOLS: Final = frozenset(
+    {"set_reminder", "list_reminders", "cancel_reminder", "set_briefing"}
+)
 
 _LANGUAGE_NAMES: Final = {HEBREW: "Hebrew", ENGLISH: "English"}
 #: By index, not ``strftime``: the names must not follow the worker's locale.
@@ -140,6 +157,58 @@ TOOLS: Final[tuple[Mapping[str, Any], ...]] = (
             "required": ["title", "start", "end"],
         },
     },
+    {
+        "name": "set_reminder",
+        "description": (
+            "Set a reminder: at that time, the person gets a WhatsApp message with the text. "
+            "at is a local time in their time zone, ISO 8601 with no offset, for example "
+            "2026-10-13T18:00, later than now and at most a year ahead."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "What to remind them of, short"},
+                "at": {"type": "string", "description": "Local time, e.g. 2026-10-13T18:00"},
+            },
+            "required": ["text", "at"],
+        },
+    },
+    {
+        "name": "list_reminders",
+        "description": (
+            "The person's upcoming reminders, soonest first, each with a number n, its text and "
+            "its local time."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "cancel_reminder",
+        "description": (
+            "Cancel one upcoming reminder. In this same message, call list_reminders first and "
+            "pass its n for the one they mean."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "n": {"type": "integer", "description": "The reminder's n from list_reminders"},
+            },
+            "required": ["n"],
+        },
+    },
+    {
+        "name": "set_briefing",
+        "description": (
+            "Move or stop the short message about their day they get every morning. at is a "
+            "local HH:MM between 04:00 and 22:00, or off to stop it."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "at": {"type": "string", "description": "Local HH:MM, e.g. 08:00, or off"},
+            },
+            "required": ["at"],
+        },
+    },
 )
 
 _PROMPT: Final = """\
@@ -176,6 +245,12 @@ question asking them to confirm are put below your reply automatically, and it i
 they agree. So say in a few words what you are proposing; never say it was added, and never \
 write the summary or the question yourself.
 - You can't change or delete events yet; if asked, say so.
+- Reminders: set_reminder sets one for a local time, list_reminders shows the upcoming ones, \
+cancel_reminder cancels one from that list. A vague time gets a sensible default you state \
+("tonight" is 20:00, "in the morning" 09:00). Never say a reminder is set unless set_reminder \
+returned ok.
+- Every morning they get a short message about their day, now set for {briefing}. \
+set_briefing changes or stops it when they ask.
 - Never write a URL or a link.
 """
 
@@ -186,7 +261,7 @@ def week_of(day: date) -> tuple[date, date]:
     return start, start + timedelta(days=6)
 
 
-def agent_prompt(language: str, now: datetime) -> str:
+def agent_prompt(language: str, now: datetime, briefing_at: time | None = None) -> str:
     """The system prompt, for ``now`` already in the tenant's zone."""
     week_start, week_end = week_of(now.date())
     return _PROMPT.format_map(
@@ -199,6 +274,7 @@ def agent_prompt(language: str, now: datetime) -> str:
             "week_end": week_end.isoformat(),
             "language": _LANGUAGE_NAMES.get(language, "English"),
             "time_format": _TIME_FORMAT,
+            "briefing": "off" if briefing_at is None else f"{briefing_at:%H:%M}",
         }
     )
 
@@ -369,6 +445,62 @@ async def add_event(
     return f"{text}\n{created.link}" if created.link else text
 
 
+async def remind(
+    arguments: Mapping[str, Any], *, schedule: Schedule, zone: ZoneInfo, now: datetime
+) -> str:
+    """``set_reminder``: the tool result the model reads."""
+    text, at = arguments.get("text"), _local(arguments.get("at"), zone)
+    if not isinstance(text, str) or not text.strip() or len(text) > MAX_FIELD:
+        return f"error: text is required, at most {MAX_FIELD} characters"
+    if at is None:
+        return "error: at is a local time, ISO 8601 with no offset"
+    if at <= now:
+        return "error: that time has passed"
+    if at - now > MAX_AHEAD:
+        return "error: at most a year ahead"
+    await schedule.add(text.strip(), at)
+    return f"ok: set for {at:%Y-%m-%dT%H:%M}"
+
+
+async def list_reminders(schedule: Schedule, zone: ZoneInfo, listed: list[UUID]) -> str:
+    """``list_reminders``: numbered from 1, no ids. ``listed`` keeps the ids by number."""
+    upcoming = await schedule.upcoming()
+    listed[:] = [r.id for r in upcoming]
+    shown = [
+        {"n": n, "text": r.text, "at": f"{r.due_at.astimezone(zone):%Y-%m-%dT%H:%M}"}
+        for n, r in enumerate(upcoming, 1)
+    ]
+    return json.dumps({"reminders": shown}, ensure_ascii=False)
+
+
+async def cancel(arguments: Mapping[str, Any], schedule: Schedule, listed: list[UUID]) -> str:
+    """``cancel_reminder``: only by a number from this turn's list, never a guess."""
+    if not listed:
+        return "error: call list_reminders first"
+    n = arguments.get("n")
+    if not isinstance(n, int) or isinstance(n, bool) or not 1 <= n <= len(listed):
+        return f"error: no reminder {n} in the list"
+    if not await schedule.cancel(listed[n - 1]):
+        return "error: that one was already sent or cancelled"
+    return "ok: cancelled"
+
+
+async def move_briefing(arguments: Mapping[str, Any], schedule: Schedule) -> str:
+    """``set_briefing``: a local ``HH:MM`` in the allowed hours, or ``off``."""
+    value = arguments.get("at")
+    if value == "off":
+        await schedule.set_briefing(None)
+        return "ok: morning message off"
+    try:
+        at = time.fromisoformat(value) if isinstance(value, str) else None
+    except ValueError:
+        at = None
+    if at is None or at.tzinfo is not None or not BRIEFING_EARLIEST <= at <= BRIEFING_LATEST:
+        return "error: at is HH:MM between 04:00 and 22:00, or off"
+    await schedule.set_briefing(at)
+    return f"ok: morning message at {at:%H:%M}"
+
+
 async def respond(
     history: Sequence[Message],
     text: str,
@@ -379,21 +511,35 @@ async def respond(
     account: CalendarConnection | None,
     now: datetime,
     proposed: list[CalendarEvent] | None = None,
+    schedule: Schedule | None = None,
 ) -> str:
     """The model's answer to ``text``, or ``""`` when it has none worth sending.
 
     A reply holding a URL or the link placeholder is dropped: the prompt forbids both, and an
     event title can carry one. ``account`` ``None`` is a tenant with no active connection.
     A ``propose_event`` the model makes is appended to ``proposed``, and the reply ends with
-    its confirm question; the caller stores it, or nothing confirms it.
+    its confirm question; the caller stores it, or nothing confirms it. With ``schedule``
+    ``None``, the reminder and morning-message tools answer that they are not available.
     """
     # Every active tenant has a zone; UTC only keeps a broken row answerable.
     zone = ZoneInfo(tenant.timezone or "UTC")
     found: list[CalendarEvent] = [] if proposed is None else proposed
     disconnected = False
+    # What this turn's list_reminders showed, by n: cancel_reminder never guesses (Iteration 05).
+    listed: list[UUID] = []
 
     async def run_tool(name: str, arguments: Mapping[str, Any]) -> str:
         nonlocal disconnected
+        if name in _SCHEDULE_TOOLS:
+            if schedule is None:
+                return NO_SCHEDULE
+            if name == "set_reminder":
+                return await remind(arguments, schedule=schedule, zone=zone, now=now)
+            if name == "list_reminders":
+                return await list_reminders(schedule, zone, listed)
+            if name == "cancel_reminder":
+                return await cancel(arguments, schedule, listed)
+            return await move_briefing(arguments, schedule)
         if name == "propose_event":
             if found:
                 return "error: one proposal per message; the first one stands"
@@ -414,7 +560,7 @@ async def respond(
     said = await converse(
         history,
         text,
-        system=agent_prompt(tenant.language, now.astimezone(zone)),
+        system=agent_prompt(tenant.language, now.astimezone(zone), tenant.briefing_at),
         tools=TOOLS,
         run_tool=run_tool,
         llm=llm,
@@ -551,6 +697,7 @@ async def agent_turn(
                 account=account,
                 now=now,
                 proposed=proposed,
+                schedule=TenantSchedule(db, tenant.id, now),
             )
         except LLMUnavailableError, CalendarProviderUnavailableError:
             if not last_attempt:
@@ -584,7 +731,10 @@ async def agent_turn(
 
 __all__ = [
     "AGENT_REPLY",
+    "BRIEFING_EARLIEST",
+    "BRIEFING_LATEST",
     "CREATE_EVENT",
+    "MAX_AHEAD",
     "MAX_FIELD",
     "MAX_WINDOW",
     "NOT_CONNECTED",
