@@ -58,7 +58,7 @@ _EN: Final = {
     "event_not_added": (
         "I couldn't add it just now. Check your calendar, and ask me again if it isn't there."
     ),
-    "reminder": "Reminder: {text}",
+    "reminder": "Just a reminder: {text}",
     "briefing_intro": "Good morning! Here's your day:",
     "briefing_reminders_heading": "Reminders:",
     "briefing_empty": "Good morning! Nothing on your calendar today. Have a good one.",
@@ -87,7 +87,7 @@ _HE: Final = {
     "all_set": (
         'הכול מוכן, יומן Google שלך מחובר! אפשר לשאול אותי למשל "מה יש לי מחר?" '
         'או "תוסיף רופא שיניים ביום חמישי בתשע". '
-        "וכל בוקר ב-7:30 אשלח לך הצצה קצרה ליום שלך. אם מתאימה שעה אחרת, או שעדיף בלי, "
+        "וכל בוקר ב-7:30 אשלח לך הצצה קצרה ליום שלך. אם נוח לך שעה אחרת, או שעדיף בלי, "
         "אפשר פשוט לכתוב לי."
     ),
     "agent_unavailable": "סליחה, לא הצלחתי לענות כרגע. אפשר לנסות שוב בעוד דקה.",

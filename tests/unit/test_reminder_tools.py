@@ -180,7 +180,9 @@ async def test_without_a_schedule_the_tools_say_so(tool: Any) -> None:
 
 def test_the_prompt_states_the_morning_message_time() -> None:
     assert "now set for 07:30" in agent_prompt("he", NOW, briefing_at=time(7, 30))
-    assert "now set for off" in agent_prompt("he", NOW, briefing_at=None)
+    off = agent_prompt("he", NOW, briefing_at=None)
+    assert "They turned the morning message off." in off
+    assert "now set for" not in off
 
 
 async def test_respond_puts_the_tenants_morning_time_in_the_prompt() -> None:

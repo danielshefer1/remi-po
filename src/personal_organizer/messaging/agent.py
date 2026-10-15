@@ -249,8 +249,7 @@ write the summary or the question yourself.
 cancel_reminder cancels one from that list. A vague time gets a sensible default you state \
 ("tonight" is 20:00, "in the morning" 09:00). Never say a reminder is set unless set_reminder \
 returned ok.
-- Every morning they get a short message about their day, now set for {briefing}. \
-set_briefing changes or stops it when they ask.
+- {briefing}
 - Never write a URL or a link.
 """
 
@@ -274,7 +273,12 @@ def agent_prompt(language: str, now: datetime, briefing_at: time | None = None) 
             "week_end": week_end.isoformat(),
             "language": LANGUAGE_NAMES.get(language, "English"),
             "time_format": _TIME_FORMAT,
-            "briefing": "off" if briefing_at is None else f"{briefing_at:%H:%M}",
+            "briefing": (
+                "They turned the morning message off. set_briefing turns it back on when they ask."
+                if briefing_at is None
+                else f"Every morning they get a short message about their day, now set for "
+                f"{briefing_at:%H:%M}. set_briefing changes or stops it when they ask."
+            ),
         }
     )
 
