@@ -290,6 +290,14 @@ def _local(value: object, zone: ZoneInfo) -> datetime | None:
     return moment.replace(tzinfo=zone) if moment.tzinfo is None else None
 
 
+def _date_only(value: str) -> bool:
+    try:
+        date.fromisoformat(value)
+    except ValueError:
+        return False
+    return True
+
+
 def shown_event(event: CalendarEvent, zone: ZoneInfo) -> dict[str, object]:
     """What the model reads of an event: no id, description or attendees."""
     start, end = event.start.astimezone(zone), event.end.astimezone(zone)
@@ -454,6 +462,8 @@ async def remind(
         return f"error: text is required, at most {MAX_FIELD} characters"
     if at is None:
         return "error: at is a local time, ISO 8601 with no offset"
+    if _date_only(arguments["at"]):  # it would read as midnight
+        return "error: at needs a time, e.g. 2026-10-16T09:00"
     if at <= now:
         return "error: that time has passed"
     if at - now > MAX_AHEAD:

@@ -99,6 +99,15 @@ async def test_set_reminder_refuses_the_past_and_far_future_and_bad_text(
     assert schedule.reminders == []
 
 
+async def test_set_reminder_refuses_a_date_with_no_time() -> None:
+    """Else "remind me on Friday" fires at midnight."""
+    schedule = InMemorySchedule(NOW)
+    at = call("set_reminder", text="call mom", at="2026-10-16")
+    llm = await _respond(schedule, said("", at), said("מתי?"))
+    assert llm.calls[1][-1].content == "error: at needs a time, e.g. 2026-10-16T09:00"
+    assert schedule.reminders == []
+
+
 async def test_list_reminders_shows_local_times_and_short_numbers() -> None:
     schedule = await _seeded()
     llm = await _respond(schedule, said("", call("list_reminders")), said("ok"))
