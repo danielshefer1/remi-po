@@ -102,9 +102,9 @@ _SCHEDULE_TOOLS: Final = frozenset(
     {"set_reminder", "list_reminders", "cancel_reminder", "set_briefing"}
 )
 
-_LANGUAGE_NAMES: Final = {HEBREW: "Hebrew", ENGLISH: "English"}
+LANGUAGE_NAMES: Final = {HEBREW: "Hebrew", ENGLISH: "English"}
 #: By index, not ``strftime``: the names must not follow the worker's locale.
-_WEEKDAYS: Final = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+WEEKDAYS: Final = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
 _HE_WEEKDAYS: Final = (
     "יום שני",
     "יום שלישי",
@@ -266,13 +266,13 @@ def agent_prompt(language: str, now: datetime, briefing_at: time | None = None) 
     week_start, week_end = week_of(now.date())
     return _PROMPT.format_map(
         {
-            "weekday": _WEEKDAYS[now.weekday()],
+            "weekday": WEEKDAYS[now.weekday()],
             "today": now.date().isoformat(),
             "clock": now.strftime("%H:%M"),
             "zone": str(now.tzinfo),
             "week_start": week_start.isoformat(),
             "week_end": week_end.isoformat(),
-            "language": _LANGUAGE_NAMES.get(language, "English"),
+            "language": LANGUAGE_NAMES.get(language, "English"),
             "time_format": _TIME_FORMAT,
             "briefing": "off" if briefing_at is None else f"{briefing_at:%H:%M}",
         }
@@ -374,7 +374,7 @@ def check_event(arguments: Mapping[str, Any], zone: ZoneInfo) -> CalendarEvent |
 def event_summary(event: CalendarEvent, zone: ZoneInfo, language: str) -> str:
     """The title, the local day and times, and the location, one per line."""
     start, end = event.start.astimezone(zone), event.end.astimezone(zone)
-    names = _HE_WEEKDAYS if language == HEBREW else _WEEKDAYS
+    names = _HE_WEEKDAYS if language == HEBREW else WEEKDAYS
 
     def day(when: date) -> str:
         return f"{names[when.weekday()]} {when.isoformat()}"
@@ -581,7 +581,7 @@ async def respond(
     return said
 
 
-def _fit(text: str) -> str:
+def fit_message(text: str) -> str:
     if len(text) <= WHATSAPP_TEXT_LIMIT:
         return text
     # shortcut: a reply longer than one message is cut at a line or sentence, so one send
@@ -666,7 +666,7 @@ async def agent_turn(
                 pass
             log.info("agent.confirm", inbox_id=str(row.id), decision=picked)
         if picked is not None:
-            text = _fit(
+            text = fit_message(
                 await _confirmed(
                     db, row, tenant, action, picked, calendar=calendar, account=account, now=now
                 )
@@ -716,7 +716,7 @@ async def agent_turn(
                 payload=_payload(proposed[0], row.id),
                 now=now,
             )
-    text = _fit(reply or t("agent_unavailable", tenant.language))
+    text = fit_message(reply or t("agent_unavailable", tenant.language))
     await send_once(
         db,
         channel,
@@ -734,17 +734,20 @@ __all__ = [
     "BRIEFING_EARLIEST",
     "BRIEFING_LATEST",
     "CREATE_EVENT",
+    "LANGUAGE_NAMES",
     "MAX_AHEAD",
     "MAX_FIELD",
     "MAX_WINDOW",
     "NOT_CONNECTED",
     "TOOLS",
     "UNAVAILABLE",
+    "WEEKDAYS",
     "add_event",
     "agent_prompt",
     "agent_turn",
     "check_event",
     "event_summary",
+    "fit_message",
     "read_calendar",
     "respond",
     "shown_event",

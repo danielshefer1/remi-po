@@ -39,7 +39,7 @@ from personal_organizer.db.repositories.messages import record_outbound
 from personal_organizer.db.repositories.reminders import mark_briefed, upcoming_reminders
 from personal_organizer.interfaces.calendar import CalendarEvent, CalendarProvider
 from personal_organizer.interfaces.llm import LLMProvider, Message
-from personal_organizer.messaging.agent import _LANGUAGE_NAMES, _WEEKDAYS, shown_event
+from personal_organizer.messaging.agent import LANGUAGE_NAMES, WEEKDAYS, fit_message, shown_event
 from personal_organizer.messaging.inbound import ChannelResolver
 from personal_organizer.messaging.onboarding_text import t
 from personal_organizer.messaging.outbox import send_once
@@ -103,9 +103,9 @@ async def compose_briefing(
     Provider errors pass through: the caller retries or falls back.
     """
     system = _PROMPT.format(
-        weekday=_WEEKDAYS[day.weekday()],
+        weekday=WEEKDAYS[day.weekday()],
         day=day.isoformat(),
-        language=_LANGUAGE_NAMES.get(language, "English"),
+        language=LANGUAGE_NAMES.get(language, "English"),
     )
     data = {
         "events": [shown_event(event, zone) for event in events],
@@ -202,7 +202,7 @@ async def send_briefing(
         line = t("calendar_disconnected", language)
         listed = fallback_briefing([], reminders, zone=zone, language=language)
         text = f"{listed}\n\n{line}" if reminders else line
-    text = text or fallback_briefing(events, reminders, zone=zone, language=language)
+    text = fit_message(text or fallback_briefing(events, reminders, zone=zone, language=language))
     status = await send_once(
         db,
         target.channel,
