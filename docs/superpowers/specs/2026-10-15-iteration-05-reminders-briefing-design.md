@@ -22,11 +22,11 @@ and memory (item 4) come after.
 
 | Done-When | Where it is proved |
 |---|---|
-| A reminder set in chat is sent once, at its time, in the tenant's zone | `tests/db/test_reminders.py` (due query, send, re-run sends nothing new). Staging: set one two minutes out |
+| A reminder set in chat is sent once, at its time, in the tenant's zone | `tests/db/test_reminders_repository.py` (due query), `tests/db/test_reminder_delivery.py` (send, re-run sends nothing new). Staging: set one two minutes out |
 | List and cancel work from natural language | `tests/unit/test_reminder_tools.py`, plus evals in Hebrew and English |
-| A reminder is in the history, so "done, thanks" reads right | `tests/db/test_reminders.py` asserts the outbound `messages` row |
-| A briefing goes out once per local day, at or after `briefing_at`, never more than 2 h late | `tests/db/test_briefing.py` (zones, the window, `briefed_on`, re-run) |
-| The briefing survives a model or calendar outage | `tests/db/test_briefing.py` with a failing fake LLM and calendar: the fixed fallback is sent |
+| A reminder is in the history, so "done, thanks" reads right | `tests/db/test_reminder_delivery.py` asserts the outbound `messages` row |
+| A briefing goes out once per local day, at or after `briefing_at`, never more than 2 h late | `tests/db/test_reminders_repository.py` (zones, the window), `tests/db/test_briefing.py` (`briefed_on`, re-run) |
+| The briefing survives a model or calendar outage | `tests/db/test_briefing.py` with a failing fake LLM and calendar: the fixed fallback is sent, never a false empty day |
 | Tenants never see each other's reminders | `tests/db/test_isolation.py` gains `reminders` |
 
 ## Approach
@@ -79,8 +79,8 @@ to somewhere real.
 
 - **`set_reminder(text, at)`**
   - `at` is a naive local time, as with the calendar tools (D6).
-  - Errors the model reads: a time in the past, a time more than a year out, or empty or
-    over-long text.
+  - Errors the model reads: a time in the past, a time more than a year out, a date with no
+    time (it would fire at midnight), or empty or over-long text.
   - Returns `ok` with the local time it stored, so the model can say it back.
 - **`list_reminders`**: the pending reminders, as `{id, text, at}` in local time.
   - The `id` is a short index valid for this turn only, never the UUID.
@@ -103,8 +103,14 @@ ticks never pile up.
 - It calls both definer functions.
 - It defers one `schedule:reminder(reminder_id, tenant_id)` or
   `schedule:briefing(tenant_id, local_day)` job each, on `webhooks`: the queue every worker takes by default, as `onboarding:connected` does.
-- The jobs carry ids only (ADR 0001), with `queueing_lock` set to the send key so a slow
-  minute never queues the same send twice.
+- The jobs carry ids only (ADR 0001), with Procrastinate's `lock` set to the send key, and a
+  key is deferred only when no job with that lock is `todo` or `doing`. Not a per-job
+  `queueing_lock`: it is unique over `todo` jobs only, so a job queued while the first runs
+  would make retrying the first (its worker died) fail on that lock, leaving it `doing` and the
+  second stuck behind its lock. Two ticks at once can still queue one twice; the bodies below
+  are safe to run twice.
+- Reminders are scanned and deferred first, in their own session, so a failing briefing scan
+  never holds them back.
 
 **`schedule:reminder`**
 1. In `tenant_session`, load the reminder. If it is not `pending`, stop.
@@ -112,11 +118,13 @@ ticks never pile up.
    `phone_of`). With either missing, log it and stop.
 3. `send_once(idempotency_key=f"reminder:{id}", kind="reminder")` sends a fixed line, with
    no model call.
-   - English: "Reminder: {text}".
+   - English: "Just a reminder: {text}".
    - Hebrew: "תזכורת: {text}".
    - The final wording is reviewed against the voice rules in `onboarding_text.py`.
 4. In one transaction, set `status = 'sent'` and record the outbound `messages` row.
    - `record_outbound` takes `inbox_id: UUID | None`. The column is already nullable.
+   - The update is guarded on `pending`; only the run that makes it records the message, so
+     two racing runs keep one copy.
 
 A reminder that fires late (the worker was down) still goes out, up to 12 hours late: a missed
 reminder is worse than a late one. Past 12 hours, `due_reminders` stops returning it, so a
@@ -128,23 +136,33 @@ retried after its `set_reminder` sets it once. `po-chat` uses an in-memory sched
 it touches no database.
 
 **`schedule:briefing`**
-1. Load the tenant. If it is not active or `briefed_on == local_day`, stop.
+1. Load the tenant. If it is not active or there is nowhere to send, set `briefed_on` (a
+   retry, or the next tick, would find the same) and stop. If `briefed_on == local_day`, stop.
 2. Read `local_day`'s events through `list_events` (00:00 to 00:00 next day), plus that day's
    pending reminders.
 3. One model call with no tools. Its own short prompt gives the tone, the language, and the
    events and reminders as JSON data, never instructions. It returns two to four friendly
    lines.
-   - On an empty day the model writes one line. No events are invented: the reply is dropped
-     if it holds a URL, as in `respond`.
+   - An event's location is not sent: it is free text from the invite, and adds nothing a
+     morning message needs.
+   - The reply is dropped if it holds a link (`http://`, `https://`, `www.`), as in `respond`.
+   - An empty day makes no model call: the fixed `briefing_empty` line is sent.
 4. Fallbacks:
    - **Model unavailable on the last attempt, or refused:** a fixed list built by code (the
      title and time of each event, then each reminder), under a fixed opening line in each
-     language.
+     language. Links are stripped from the titles; an event whose title was only a link is
+     left out.
    - **Calendar not connected:** reminders only, plus the existing `calendar_disconnected`
      line.
-   - **Calendar unavailable:** raise for a retry, then on the last attempt send reminders only.
+   - **Calendar unread** (refused, or unavailable: raise for a retry, then the last attempt):
+     never "nothing on your calendar". With reminders, the reminders plus the
+     `briefing_calendar_unavailable` line ("I couldn't reach your calendar this morning, so
+     today's events aren't here. Ask me later and I'll check again."). With none, nothing is
+     sent and `briefed_on` is set.
 5. `send_once(idempotency_key=f"briefing:{tenant_id}:{local_day}", kind="briefing")`.
-6. Set `briefed_on = local_day` and record the outbound message, in one transaction.
+6. Set `briefed_on = local_day` and record the outbound message, in one transaction. The update
+   is guarded (`briefed_on IS DISTINCT FROM local_day`); only the run that makes it records the
+   message.
 
 **Onboarding.** `all_set` in both languages gains one sentence: in English, "I'll send you a
 quick look at your day every morning at 7:30. Just tell me if you'd like another time, or
@@ -157,18 +175,30 @@ none." The Hebrew is written as Hebrew.
 - **No content outside RLS:** the definer functions return ids, and job kwargs are ids. The
   reminder text lives only in `reminders` and `messages`.
 - **Prompt injection through event titles:** the briefing call has no tools and sees titles
-  only as data, so the worst case is an odd sentence.
+  only as data, so the worst case is an odd sentence. No link from an invite is ever echoed:
+  the location is not sent to the model, a reply with a link is dropped, and the fixed list
+  strips links from titles.
+- **Stalled jobs:** `system:retry_stalled_jobs` logs a retry that fails (job id and task name,
+  never args) and goes on, so one stuck job never blocks the others' recovery.
 - A tenant who is suspended or deleted between the tick and the job is skipped by the job's
   own check.
 
 ## Testing
 
-- `tests/db/test_reminders.py`: `due_reminders` across zones and statuses, the send, the
-  re-run, the history row, and a cancelled reminder not sent.
-- `tests/db/test_briefing.py`: `due_briefings` before, inside and after the window,
-  `briefed_on`, `briefing_at` off, the empty day, and the model and calendar fallbacks.
+- `tests/db/test_reminders_repository.py`: `due_reminders` and `due_briefings` across zones,
+  statuses and the window, `briefing_at` off, and the guarded status and `briefed_on` updates.
+- `tests/db/test_reminder_delivery.py`: the send, the re-run, a racing run, the history row,
+  and a cancelled reminder not sent.
+- `tests/db/test_briefing.py`: `briefed_on`, the re-run, the empty day, nowhere to send, and
+  the model and calendar fallbacks (including an outage with no reminders).
+- `tests/unit/test_briefing_text.py`: the fixed list (links stripped) and the model call (no
+  tools, no location).
 - `tests/unit/test_reminder_tools.py`: argument checking, local-time handling and the
   per-turn index for cancel.
+- `tests/db/test_schedule_tick.py`: one job per due key, none while one is `todo` or `doing`,
+  a running job still retryable, and reminders deferred when the briefing scan fails.
+- `tests/worker/test_schedule_tasks.py`: the tick's cron and `queueing_lock`, and the jobs'
+  queue and retry strategy.
 - `tests/db/test_isolation.py`: `reminders` added to the table list.
 - `tests/evals/test_agent_evals.py`: set in Hebrew and English with relative times ("מחר
   בשש", "in 20 minutes"), "what reminders do I have", "cancel the one about mom", "make the
