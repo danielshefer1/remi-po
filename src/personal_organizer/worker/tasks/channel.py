@@ -70,24 +70,24 @@ def is_last_attempt(attempts: int) -> bool:
 
 
 @functools.cache
-def _agent_llm() -> AnthropicLLM | None:
+def agent_llm() -> AnthropicLLM | None:
     """One client for the process, built on first use: the agent is off unless enabled."""
     settings = get_settings()
     return AnthropicLLM.from_settings(settings) if settings.agent.enabled else None
 
 
 @functools.cache
-def _agent_calendar() -> ComposioConnector:
+def agent_calendar() -> ComposioConnector:
     """One Composio client for the process; the agent being on implies Composio is."""
     return ComposioConnector.from_settings(get_settings().composio)
 
 
 def _on_allowed(db: Database, *, last_attempt: bool) -> OnAllowed:
     """The agent's turn when it is enabled, else Iteration 02's acknowledgement."""
-    llm = _agent_llm()
+    llm = agent_llm()
     if llm is not None:
         return functools.partial(
-            agent_turn, db=db, llm=llm, calendar=_agent_calendar(), last_attempt=last_attempt
+            agent_turn, db=db, llm=llm, calendar=agent_calendar(), last_attempt=last_attempt
         )
 
     async def ack(
@@ -119,9 +119,16 @@ def register(app: procrastinate.App) -> None:
             on_allowed=_on_allowed(db, last_attempt=last_attempt),
             # Composio on: the tenant gate and onboarding. Off: Iteration 02's gate, exactly.
             settings=settings,
-            llm=_agent_llm(),
+            llm=agent_llm(),
             last_attempt=last_attempt,
         )
 
 
-__all__ = ["HANDLE_INBOUND_TASK", "INBOUND_RETRY", "is_last_attempt", "register"]
+__all__ = [
+    "HANDLE_INBOUND_TASK",
+    "INBOUND_RETRY",
+    "agent_calendar",
+    "agent_llm",
+    "is_last_attempt",
+    "register",
+]
