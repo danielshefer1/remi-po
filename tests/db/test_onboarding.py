@@ -558,7 +558,7 @@ class TestTalkedThrough:
         )
         assert await _kinds(person.conn) == ["onboarding:reply"]
         [messages] = person.llm.calls
-        assert AMSTERDAM in messages[0].content  # the step and the guess
+        assert "Amsterdam time" in messages[0].content  # the step and the guess, by place name
         assert messages[-1] == Message("user", "can you add my dentist tomorrow?")
         tenant = await tenant_by_phone(db, NL_PHONE)
         assert tenant is not None

@@ -71,7 +71,8 @@ class TestPrompt:
         guessed = onboarding_prompt(language, connect=False, guess="Europe/London")
         asked = onboarding_prompt(language, connect=False, guess=None)
         connect = onboarding_prompt(language, connect=True, guess=None)
-        assert "Europe/London" in guessed
+        assert "Europe/London" not in guessed
+        assert ("London" if language == "en" else "לונדון") in guessed
         assert len({guessed, asked, connect}) == 3
         assert detect_language(connect) == language
         assert "{" not in guessed + asked + connect
