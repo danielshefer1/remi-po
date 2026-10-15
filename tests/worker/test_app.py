@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import functools
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any, cast
 
 import procrastinate
@@ -103,6 +104,29 @@ class TestStalledJobRecovery:
     def test_runs_never_pile_up(self, settings: Settings) -> None:
         app = build_procrastinate_app(settings)
         assert app.tasks[RETRY_STALLED_TASK].queueing_lock == RETRY_STALLED_TASK
+
+    async def test_one_failing_retry_does_not_stop_the_rest(self, settings: Settings) -> None:
+        jobs = [
+            procrastinate.jobs.Job(
+                id=n, queue="webhooks", lock=None, queueing_lock=None, task_name="t"
+            )
+            for n in (1, 2)
+        ]
+        retried: list[int | None] = []
+
+        class Manager:
+            async def get_stalled_jobs(self) -> list[procrastinate.jobs.Job]:
+                return jobs
+
+            async def retry_job(self, job: procrastinate.jobs.Job) -> None:
+                if job.id == 1:
+                    raise RuntimeError("unique violation")
+                retried.append(job.id)
+
+        context = SimpleNamespace(app=SimpleNamespace(job_manager=Manager()))
+        task = build_procrastinate_app(settings).tasks[RETRY_STALLED_TASK]
+        await task.func(context, timestamp=0)
+        assert retried == [2]
 
 
 class TestOnboardingTasks:
