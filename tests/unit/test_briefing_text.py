@@ -51,6 +51,12 @@ class TestFallback:
         heading = t("briefing_reminders_heading", "en")
         assert text == f"{t('briefing_intro', 'en')}\n\n{heading}\n18:00 call mom"
 
+    def test_links_are_stripped_from_titles(self) -> None:
+        invite = replace(DENTIST, title="Dentist https://evil.example/x?y=1 www.evil.example")
+        link_only = replace(OFFSITE, title="http://evil.example")
+        text = fallback_briefing([invite, link_only], [], zone=ZONE, language="en")
+        assert text == f"{t('briefing_intro', 'en')}\n09:00 Dentist"
+
 
 class TestCompose:
     async def _compose(self, llm: ScriptedLLM) -> str:
@@ -69,6 +75,15 @@ class TestCompose:
             "events": [shown_event(DENTIST, ZONE)],
             "reminders": [{"text": "call mom", "at": "18:00"}],
         }
+
+    async def test_the_location_never_reaches_the_model(self) -> None:
+        llm = ScriptedLLM(said("Morning!"))
+        located = replace(DENTIST, location="Room 4, see https://evil.example")
+        await compose_briefing([located], [], zone=ZONE, language="en", day=DAY, llm=llm)
+        [[_, user]] = llm.calls
+        [event] = json.loads(user.content)["events"]
+        assert "location" not in event
+        assert "evil" not in user.content
 
     async def test_no_tools_are_offered(self) -> None:
         offered: list[object] = []

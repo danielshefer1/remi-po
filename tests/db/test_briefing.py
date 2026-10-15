@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from personal_organizer.core.errors import (
+    CalendarProviderRejectedError,
     CalendarProviderUnavailableError,
     LLMRejectedError,
     LLMUnavailableError,
@@ -291,7 +292,9 @@ class TestSendBriefing:
         _, gowa = await _brief(db, tenant_id, NoLLM())
         assert [m.body for m in gowa.sent] == [t("calendar_disconnected", "he")]
 
-    async def test_a_calendar_outage_retries_then_goes_without_events(self, db: Database) -> None:
+    async def test_a_calendar_outage_retries_then_sends_reminders_and_says_so(
+        self, db: Database
+    ) -> None:
         tenant_id = await _tenant(db)
         await _remind(db, tenant_id, datetime(2026, 10, 15, 18, tzinfo=ZONE))
         down = Failing(CalendarProviderUnavailableError())
@@ -299,9 +302,35 @@ class TestSendBriefing:
             await _brief(db, tenant_id, None, down)
         assert await _out(db, tenant_id) == []
 
-        _, gowa = await _brief(db, tenant_id, None, down, last_attempt=True)
+        _, gowa = await _brief(db, tenant_id, NoLLM(), down, last_attempt=True)
         listed = fallback_briefing([], await _pending(db, tenant_id), zone=ZONE, language="he")
-        assert [m.body for m in gowa.sent] == [listed]
+        line = t("briefing_calendar_unavailable", "he")
+        assert [m.body for m in gowa.sent] == [f"{listed}\n\n{line}"]
+
+    @pytest.mark.parametrize(
+        ("error", "last_attempt"),
+        [(CalendarProviderUnavailableError(), True), (CalendarProviderRejectedError(400), False)],
+    )
+    async def test_a_failed_calendar_read_and_no_reminders_sends_nothing(
+        self, db: Database, error: Exception, last_attempt: bool
+    ) -> None:
+        """Never "nothing on your calendar" when the calendar could not be read."""
+        tenant_id = await _tenant(db)
+        status, gowa = await _brief(
+            db, tenant_id, NoLLM(), Failing(error), last_attempt=last_attempt
+        )
+        assert status is None
+        assert gowa.attempts == []
+        assert await _briefed_on(db, tenant_id) == DAY
+
+    async def test_nowhere_to_send_marks_the_day(self, db: Database) -> None:
+        """Else the tick defers it again every minute of the window."""
+        tenant_id = await seed_tenant(db, language="he")
+        await make_active(db, tenant_id)
+        status, gowa = await _brief(db, tenant_id, NoLLM())
+        assert status is None
+        assert gowa.attempts == []
+        assert await _briefed_on(db, tenant_id) == DAY
 
     async def test_an_inactive_tenant_gets_nothing(self, db: Database) -> None:
         tenant_id = await _tenant(db)

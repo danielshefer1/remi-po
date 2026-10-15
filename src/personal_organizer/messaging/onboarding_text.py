@@ -62,6 +62,10 @@ _EN: Final = {
     "briefing_intro": "Good morning! Here's your day:",
     "briefing_reminders_heading": "Reminders:",
     "briefing_empty": "Good morning! Nothing on your calendar today. Have a good one.",
+    "briefing_calendar_unavailable": (
+        "I couldn't reach your calendar this morning, so today's events aren't here. "
+        "Ask me later and I'll check again."
+    ),
 }
 
 _HE: Final = {
@@ -100,6 +104,10 @@ _HE: Final = {
     "briefing_intro": "בוקר טוב! זה מה שיש לך היום:",
     "briefing_reminders_heading": "תזכורות:",
     "briefing_empty": "בוקר טוב! היומן פנוי היום. שיהיה יום טוב.",
+    "briefing_calendar_unavailable": (
+        "לא הצלחתי להגיע ליומן שלך הבוקר, אז האירועים של היום לא מופיעים כאן. "
+        "אפשר לשאול אותי שוב בהמשך ואבדוק."
+    ),
 }
 
 ONBOARDING_TEXT: Final[Mapping[str, Mapping[str, str]]] = MappingProxyType(
