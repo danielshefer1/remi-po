@@ -214,8 +214,8 @@ async def send_briefing(
         idempotency_key=briefing_key(tenant_id, day),
     )
     async with db.tenant_session(TenantId(tenant_id)) as session:
-        await mark_briefed(session, tenant_id, day)
-        if status != "failed":
+        # Only the run that marks the day records the message, so a racing one adds no copy.
+        if await mark_briefed(session, tenant_id, day) and status != "failed":
             await record_outbound(
                 session, tenant_id, inbox_id=None, channel=target.channel.name, body=text
             )

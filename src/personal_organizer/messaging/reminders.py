@@ -5,7 +5,8 @@ however often the job runs, the line goes out at most once. It goes to the tenan
 the channel they last wrote on, through ``messaging.proactive``. Then the reminder leaves
 ``pending``: ``sent`` and kept in the history as an ``out`` message, or ``failed`` when there
 is nowhere to send it or the channel refused it. A re-run that finds the key already settled
-(the last run died after the send) still finishes the reminder, without sending again.
+(the last run died after the send) still finishes the reminder, without sending again; only
+the run that finishes it records the message.
 """
 
 from __future__ import annotations
@@ -67,8 +68,9 @@ async def send_reminder(
     async with db.tenant_session(TenantId(tenant_id)) as session:
         if status == "failed":
             await finish_reminder(session, tenant_id, reminder_id, status="failed")
-        else:  # accepted, or settled by an earlier attempt: it went out, or may have
-            await finish_reminder(session, tenant_id, reminder_id, status="sent")
+        # Accepted, or settled by an earlier attempt: it went out, or may have. Only the run
+        # that finishes the reminder records it, so a racing one adds no second copy.
+        elif await finish_reminder(session, tenant_id, reminder_id, status="sent"):
             await record_outbound(
                 session, tenant_id, inbox_id=None, channel=target.channel.name, body=text
             )

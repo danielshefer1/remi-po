@@ -28,6 +28,7 @@ from personal_organizer.db.repositories import reminders
 from personal_organizer.db.repositories.connections import bind_connection
 from personal_organizer.db.repositories.tenants import get_tenant, set_timezone
 from personal_organizer.interfaces.calendar import CalendarEvent
+from personal_organizer.messaging import briefing
 from personal_organizer.messaging.agent import shown_event
 from personal_organizer.messaging.briefing import (
     BRIEFING_KIND,
@@ -37,6 +38,7 @@ from personal_organizer.messaging.briefing import (
 )
 from personal_organizer.messaging.onboarding_text import t
 from personal_organizer.messaging.outbox import send_once
+from personal_organizer.messaging.proactive import proactive_target
 from personal_organizer.providers.calendar.memory import InMemoryCalendar
 from personal_organizer.settings import Settings
 from tests.db.test_handle_inbound import FakeOutbound
@@ -183,6 +185,27 @@ class TestSendBriefing:
         assert status == "accepted"
         assert len(gowa.attempts) == 1
         assert await _briefed_on(db, tenant_id) == DAY
+        assert await _out(db, tenant_id) == ["Morning!"]
+
+    async def test_a_run_racing_another_records_the_message_once(
+        self, db: Database, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Two runs both read the day as not briefed: only the one that marks it records."""
+        tenant_id = await _tenant(db)
+        gowa = FakeOutbound(name="gowa")
+        await _brief(db, tenant_id, ScriptedLLM(said("Morning!")), gowa=gowa)
+
+        async def not_yet_briefed(*args: Any, **kwargs: Any) -> Any:
+            target = await proactive_target(*args, **kwargs)
+            assert target is not None
+            target.tenant.briefed_on = None
+            return target
+
+        monkeypatch.setattr(briefing, "proactive_target", not_yet_briefed)
+        status, _ = await _brief(db, tenant_id, ScriptedLLM(said("Morning!")), gowa=gowa)
+
+        assert status == "accepted"
+        assert len(gowa.attempts) == 1
         assert await _out(db, tenant_id) == ["Morning!"]
 
     async def test_only_todays_events_and_still_pending_reminders_are_used(

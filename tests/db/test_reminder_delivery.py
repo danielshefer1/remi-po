@@ -19,6 +19,7 @@ from personal_organizer.core.errors import RejectedChannelError, TransientChanne
 from personal_organizer.core.types import TenantId
 from personal_organizer.db.engine import Database
 from personal_organizer.db.repositories import reminders
+from personal_organizer.messaging import reminders as delivery
 from personal_organizer.messaging.onboarding_text import t
 from personal_organizer.messaging.outbox import send_once
 from personal_organizer.messaging.reminders import REMINDER_KIND, reminder_key, send_reminder
@@ -132,6 +133,28 @@ async def test_a_rerun_after_the_send_but_before_the_update_finishes_the_row(
     assert len(gowa.sent) == 1
     assert await _status(db, tenant_id, reminder_id) == "sent"
     assert await _sent_messages(db, tenant_id) == [(line, None)]
+
+
+async def test_a_run_racing_another_records_the_message_once(
+    db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two runs both read the reminder as pending: only the one that finishes it records."""
+    tenant_id = await _tenant(db)
+    reminder_id = await _add(db, tenant_id)
+    async with db.tenant_session(TenantId(tenant_id)) as session:
+        stale = await reminders.get_reminder(session, tenant_id, reminder_id)
+    gowa = FakeOutbound(name="gowa")
+    await send_reminder(reminder_id, tenant_id, db=db, channels=resolver(gowa))
+
+    async def still_pending(*args: Any) -> Any:
+        return stale
+
+    monkeypatch.setattr(delivery, "get_reminder", still_pending)
+    status = await send_reminder(reminder_id, tenant_id, db=db, channels=resolver(gowa))
+
+    assert status == "accepted"
+    assert len(gowa.sent) == 1
+    assert len(await _sent_messages(db, tenant_id)) == 1
 
 
 async def test_a_cancelled_reminder_is_not_sent(db: Database) -> None:

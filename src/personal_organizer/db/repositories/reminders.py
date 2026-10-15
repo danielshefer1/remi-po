@@ -84,9 +84,9 @@ async def cancel_reminder(session: AsyncSession, tenant_id: UUID, reminder_id: U
 
 async def finish_reminder(
     session: AsyncSession, tenant_id: UUID, reminder_id: UUID, *, status: str
-) -> None:
-    """``pending`` → ``sent`` or ``failed``. A reminder no longer pending is left alone."""
-    await _leave_pending(session, tenant_id, reminder_id, status)
+) -> bool:
+    """``pending`` → ``sent`` or ``failed``. ``False`` (left alone) if it was not pending."""
+    return await _leave_pending(session, tenant_id, reminder_id, status)
 
 
 async def set_briefing(session: AsyncSession, tenant_id: UUID, at: time | None) -> None:
@@ -96,9 +96,16 @@ async def set_briefing(session: AsyncSession, tenant_id: UUID, at: time | None) 
     )
 
 
-async def mark_briefed(session: AsyncSession, tenant_id: UUID, day: date) -> None:
-    """Local ``day``'s briefing went out: a re-run or a later tick skips it."""
-    await session.execute(scoped(update(Tenant), Tenant, tenant_id).values(briefed_on=day))
+async def mark_briefed(session: AsyncSession, tenant_id: UUID, day: date) -> bool:
+    """Local ``day``'s briefing went out: a re-run or a later tick skips it. ``False`` if the
+    day was already marked."""
+    result = await session.execute(
+        scoped(update(Tenant), Tenant, tenant_id)
+        .where(Tenant.briefed_on.is_distinct_from(day))
+        .values(briefed_on=day)
+        .returning(Tenant.id)
+    )
+    return result.first() is not None
 
 
 async def due_reminders(session: AsyncSession, now: datetime) -> list[tuple[UUID, UUID]]:

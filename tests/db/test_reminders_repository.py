@@ -137,12 +137,21 @@ async def test_add_list_cancel_finish(db: Database) -> None:
         assert await reminders.cancel_reminder(session, tenant_id, later) is True
         assert await reminders.cancel_reminder(session, tenant_id, later) is False
 
-        await reminders.finish_reminder(session, tenant_id, sooner, status="sent")
+        assert await reminders.finish_reminder(session, tenant_id, sooner, status="sent")
+        assert not await reminders.finish_reminder(session, tenant_id, sooner, status="sent")
         assert await reminders.upcoming_reminders(session, tenant_id, after=NOW) == []
         reminder = await reminders.get_reminder(session, tenant_id, sooner)
         assert reminder is not None
         assert reminder.status == "sent"
         assert await reminders.cancel_reminder(session, tenant_id, sooner) is False
+
+
+async def test_mark_briefed_marks_a_day_once(db: Database) -> None:
+    tenant_id = await _tenant(db, "+972500000001")
+    async with db.tenant_session(TenantId(tenant_id)) as session:
+        assert await reminders.mark_briefed(session, tenant_id, TODAY) is True
+        assert await reminders.mark_briefed(session, tenant_id, TODAY) is False
+        assert await reminders.mark_briefed(session, tenant_id, TODAY + timedelta(days=1)) is True
 
 
 async def test_adding_the_same_pending_reminder_again_is_a_no_op(db: Database) -> None:
