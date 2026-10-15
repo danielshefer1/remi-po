@@ -10,8 +10,9 @@ never itself parsed as a template.
 reliably, but not one with a character glued to it. ``all_set`` is sent by the
 ``onboarding:connected`` task (PR 4). ``agent_unavailable``, ``calendar_disconnected`` and
 the confirm outcomes (``event_*``, ``proposal_closed``) are the agent's
-(``messaging.agent``). ``{zone}`` is a ``timezones.zone_label`` ("Jerusalem"), never an IANA
-name. No line offers numbered options: people answer in words.
+(``messaging.agent``). ``reminder`` is sent by the reminder job, and the ``briefing_*``
+lines by the morning briefing (Iteration 05). ``{zone}`` is a ``timezones.zone_label``
+("Jerusalem"), never an IANA name. No line offers numbered options: people answer in words.
 """
 
 from __future__ import annotations
@@ -40,7 +41,9 @@ _EN: Final = {
     ),
     "all_set": (
         "You're all set, your Google Calendar is connected! Ask me things like "
-        '"what do I have tomorrow?" or "add the dentist on Thursday at 9".'
+        '"what do I have tomorrow?" or "add the dentist on Thursday at 9". '
+        "I'll also send you a quick look at your day every morning at 7:30. Just tell me if "
+        "you'd like another time, or none."
     ),
     "agent_unavailable": "Sorry, I couldn't answer just now. Try me again in a minute.",
     "calendar_disconnected": (
@@ -55,6 +58,10 @@ _EN: Final = {
     "event_not_added": (
         "I couldn't add it just now. Check your calendar, and ask me again if it isn't there."
     ),
+    "reminder": "Reminder: {text}",
+    "briefing_intro": "Good morning! Here's your day:",
+    "briefing_reminders_heading": "Reminders:",
+    "briefing_empty": "Good morning! Nothing on your calendar today. Have a good one.",
 }
 
 _HE: Final = {
@@ -75,7 +82,9 @@ _HE: Final = {
     ),
     "all_set": (
         'הכול מוכן, יומן Google שלך מחובר! אפשר לשאול אותי למשל "מה יש לי מחר?" '
-        'או "תוסיף רופא שיניים ביום חמישי בתשע".'
+        'או "תוסיף רופא שיניים ביום חמישי בתשע". '
+        "וכל בוקר ב-7:30 אשלח לך הצצה קצרה ליום שלך. אם מתאימה שעה אחרת, או שעדיף בלי, "
+        "אפשר פשוט לכתוב לי."
     ),
     "agent_unavailable": "סליחה, לא הצלחתי לענות כרגע. אפשר לנסות שוב בעוד דקה.",
     "calendar_disconnected": (
@@ -87,6 +96,10 @@ _HE: Final = {
     "event_not_added": (
         "לא הצלחתי להוסיף את זה כרגע. כדאי לבדוק ביומן, ולבקש שוב אם האירוע לא שם."
     ),
+    "reminder": "תזכורת: {text}",
+    "briefing_intro": "בוקר טוב! זה מה שיש לך היום:",
+    "briefing_reminders_heading": "תזכורות:",
+    "briefing_empty": "בוקר טוב! היומן פנוי היום. שיהיה יום טוב.",
 }
 
 ONBOARDING_TEXT: Final[Mapping[str, Mapping[str, str]]] = MappingProxyType(

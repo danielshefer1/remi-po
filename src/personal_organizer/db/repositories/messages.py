@@ -49,9 +49,10 @@ async def record_inbound(
 
 
 async def record_outbound(
-    session: AsyncSession, tenant_id: UUID, *, inbox_id: UUID, channel: str, body: str
+    session: AsyncSession, tenant_id: UUID, *, inbox_id: UUID | None, channel: str, body: str
 ) -> None:
-    """Record the reply to ``inbox_id``, so the next turn's history has it (D4)."""
+    """Record a sent message: the reply to ``inbox_id``, or a send that answers nothing
+    (a reminder, a briefing) when it is ``None``."""
     await session.execute(
         insert(Message).values(
             tenant_id=tenant_id,

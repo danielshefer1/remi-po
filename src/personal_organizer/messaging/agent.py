@@ -214,7 +214,7 @@ def _local(value: object, zone: ZoneInfo) -> datetime | None:
     return moment.replace(tzinfo=zone) if moment.tzinfo is None else None
 
 
-def _shown(event: CalendarEvent, zone: ZoneInfo) -> dict[str, object]:
+def shown_event(event: CalendarEvent, zone: ZoneInfo) -> dict[str, object]:
     """What the model reads of an event: no id, description or attendees."""
     start, end = event.start.astimezone(zone), event.end.astimezone(zone)
     if event.all_day:
@@ -262,7 +262,7 @@ async def read_calendar(
         raise
     except CalendarProviderRejectedError:
         return UNAVAILABLE
-    result: dict[str, object] = {"events": [_shown(event, zone) for event in events]}
+    result: dict[str, object] = {"events": [shown_event(event, zone) for event in events]}
     if note:
         result["note"] = note
     return json.dumps(result, ensure_ascii=False)
@@ -597,5 +597,6 @@ __all__ = [
     "event_summary",
     "read_calendar",
     "respond",
+    "shown_event",
     "week_of",
 ]

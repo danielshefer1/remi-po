@@ -7,6 +7,7 @@ from personal_organizer.db.models.tenant import (
     CalendarConnection,
     Message,
     OnboardingLink,
+    Reminder,
     Tenant,
     TenantIdentity,
 )
@@ -18,6 +19,7 @@ __all__ = [
     "Invite",
     "Message",
     "OnboardingLink",
+    "Reminder",
     "Tenant",
     "TenantIdentity",
 ]
