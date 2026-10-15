@@ -2,10 +2,13 @@
 
 ``schedule:tick`` runs every minute. It reads the two ``SECURITY DEFINER`` scans, which return
 ids only, and defers one job per due reminder or briefing on ``webhooks``, the queue that
-already sends. Each job is deferred with its idempotency key as both ``queueing_lock`` and
-``lock``: a later tick cannot queue a second one while the first waits, and two can never run
-at once (finishing a reminder and recording the message are not safe to race). The send
-itself is keyed too (ADR 0003), so a re-run sends nothing new. Kwargs are ids only (ADR 0001).
+already sends. Each job is deferred with its idempotency key as its ``lock``, so two never run
+at once, and only when no job with that lock is waiting or running. Not a ``queueing_lock``:
+it is unique over waiting jobs only, so a job queued while the first runs would make retrying
+the first (its worker died) fail, leaving it ``doing`` and the second stuck behind its lock.
+Two near-simultaneous ticks can still both queue one; the bodies are safe to run twice, and
+the send itself is keyed (ADR 0003), so a re-run sends nothing new. Kwargs are ids only
+(ADR 0001).
 """
 
 from __future__ import annotations
@@ -16,7 +19,6 @@ from uuid import UUID
 
 import procrastinate
 import structlog
-from procrastinate.exceptions import AlreadyEnqueued
 
 from personal_organizer.db.engine import get_database
 from personal_organizer.db.repositories.reminders import due_briefings, due_reminders
@@ -40,19 +42,22 @@ BRIEFING_TASK: Final = "schedule:briefing"
 
 
 async def _defer(app: procrastinate.App, task: str, key: str, **kwargs: str) -> int:
-    """Defer one job under ``key``; 0 when one is already queued for it."""
-    try:
-        await app.configure_task(task, lock=key, queueing_lock=key).defer_async(**kwargs)
-    except AlreadyEnqueued:
+    """Defer one job under ``key``; 0 when one is already waiting or running for it."""
+    jobs = await app.job_manager.list_jobs_async(lock=key)
+    if any(job.status in ("todo", "doing") for job in jobs):
         return 0
+    await app.configure_task(task, lock=key).defer_async(**kwargs)
     return 1
 
 
 async def run_tick(app: procrastinate.App, now: datetime, *, briefings: bool) -> tuple[int, int]:
-    """Defer what is due at ``now``. Returns how many reminder and briefing jobs were new."""
+    """Defer what is due at ``now``. Returns how many reminder and briefing jobs were new.
+
+    Reminders are scanned and deferred first, on their own, so a failing briefing scan never
+    holds them back.
+    """
     async with get_database().system_session() as session:
         reminders = await due_reminders(session, now)
-        days = await due_briefings(session, now) if briefings else []
     sent_reminders = 0
     for reminder_id, tenant_id in reminders:
         sent_reminders += await _defer(
@@ -62,6 +67,10 @@ async def run_tick(app: procrastinate.App, now: datetime, *, briefings: bool) ->
             reminder_id=str(reminder_id),
             tenant_id=str(tenant_id),
         )
+    days = []
+    if briefings:
+        async with get_database().system_session() as session:
+            days = await due_briefings(session, now)
     sent_briefings = 0
     for tenant_id, day in days:
         sent_briefings += await _defer(
