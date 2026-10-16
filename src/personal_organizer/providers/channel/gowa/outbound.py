@@ -15,6 +15,9 @@ As with Meta there is no idempotency key, so every failure is sorted by one ques
   (400 ``INVALID_JID``), a malformed request, or WhatsApp's anti-spam timelock on starting a
   new chat (429 ``WA_REACHOUT_TIMELOCK``, recorded under WhatsApp's own code, 463).
 
+Downloads (Iteration 06) are GETs: any failure that may pass is transient, a refusal is
+``MediaUnavailableError``.
+
 Only the HTTP status and the gateway's error code are logged, never the body: its error
 messages can quote the recipient back.
 """
@@ -25,18 +28,21 @@ import asyncio
 import random
 from collections.abc import Awaitable, Callable
 from typing import Any, Final
+from urllib.parse import quote
 
 import httpx
 import structlog
 
 from personal_organizer.core.errors import (
     AmbiguousDeliveryError,
+    MediaUnavailableError,
     MessageTooLongError,
     RejectedChannelError,
     TransientChannelError,
 )
 from personal_organizer.core.phone import normalise_e164
 from personal_organizer.interfaces.channel import OutboundMessage
+from personal_organizer.interfaces.voice import MAX_AUDIO_BYTES, Audio
 from personal_organizer.messaging.text import WHATSAPP_TEXT_LIMIT
 from personal_organizer.providers.channel.gowa.inbound import CHANNEL_NAME
 from personal_organizer.providers.channel.gowa.parser import phone_jid
@@ -46,6 +52,11 @@ log = structlog.get_logger(__name__)
 
 SEND_PATH: Final = "send/message"
 PRESENCE_PATH: Final = "send/chat-presence"
+DOWNLOAD_PATH: Final = "message/{message_id}/download"
+#: The gateway fetches from WhatsApp's CDN before it answers: slower than a send.
+DOWNLOAD_TIMEOUT: Final = httpx.Timeout(30.0, connect=5.0)
+#: Statuses where the gateway itself is not ready: worth another attempt.
+_RETRY_STATUSES: Final = frozenset({401, 408, 429})
 DEVICE_HEADER: Final = "X-Device-Id"
 
 #: WhatsApp's own number for the reach-out timelock, stored as the outbox ``error_code``.
@@ -120,6 +131,58 @@ class GowaOutbound:
     async def mark_read(self, provider_message_id: str) -> None:
         """A no-op: the gateway's read endpoint needs the chat's JID, which this protocol
         does not carry, and blue ticks are cosmetic."""
+
+    async def download(
+        self, provider_message_id: str, *, phone: str | None, user_id: str | None
+    ) -> Audio:
+        """A received message's media, saved by the gateway and fetched from it (Iteration 06).
+
+        Only the path of the gateway's ``file_url`` is used, through this client: the worker
+        never goes to a host a response names.
+        """
+        chat = phone_jid(phone) if phone else user_id
+        if not chat:
+            raise MediaUnavailableError("no chat to download from")
+        path = DOWNLOAD_PATH.format(message_id=quote(provider_message_id, safe=""))
+        response = await self._get(path, params={"phone": chat})
+        try:
+            data = response.json()
+        except ValueError:
+            data = None
+        results = data.get("results") if isinstance(data, dict) else None
+        results = results if isinstance(results, dict) else {}
+        file_url, size = results.get("file_url"), results.get("file_size")
+        if not isinstance(file_url, str) or not file_url:
+            raise MediaUnavailableError("the gateway saved no file")
+        if isinstance(size, int) and size > MAX_AUDIO_BYTES:
+            raise MediaUnavailableError("audio too large")
+        file_path = httpx.URL(file_url).path.lstrip("/")
+        # shortcut: the file is read whole into memory before its size is checked when the
+        # gateway gave no file_size; fine at 20 MB on our own gateway, stream it if it ever
+        # serves files it did not size.
+        content = (await self._get(file_path)).content
+        if len(content) > MAX_AUDIO_BYTES:
+            raise MediaUnavailableError("audio too large")
+        filename = results.get("filename")
+        if not isinstance(filename, str) or "." not in filename:
+            filename = file_path.rsplit("/", 1)[-1] or "voice.ogg"
+        return Audio(content, filename)
+
+    async def _get(self, path: str, *, params: dict[str, str] | None = None) -> httpx.Response:
+        try:
+            response = await self._http.get(
+                path, params=params, headers=self._headers, timeout=DOWNLOAD_TIMEOUT
+            )
+        except httpx.HTTPError as exc:
+            log.warning("gowa.download_failed", error_type=type(exc).__name__)
+            raise TransientChannelError("GOWA gateway unreachable") from exc
+        if response.is_success:
+            return response
+        status, code = response.status_code, _error_code(response)
+        log.warning("gowa.download_error", status_code=status, reason=code)
+        if status >= httpx.codes.INTERNAL_SERVER_ERROR or status in _RETRY_STATUSES:
+            raise TransientChannelError(f"GOWA {status}")
+        raise MediaUnavailableError(f"GOWA {status}")
 
     async def _typing(self, jid: str) -> None:
         """Best effort: a typing indicator, then a pause of varying length. Never fails the

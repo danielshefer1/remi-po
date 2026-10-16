@@ -1,0 +1,17 @@
+{
+  "event": "message",
+  "device_id": "31600000001@s.whatsapp.net",
+  "payload": {
+    "id": "3EB0C127D7BACC83D6B7",
+    "chat_id": "31612345678@s.whatsapp.net",
+    "from": "31612345678@s.whatsapp.net",
+    "from_name": "John Doe",
+    "timestamp": "2026-09-21T14:17:00Z",
+    "audio": {
+      "url": "https://mmg.whatsapp.net/v/t62.7117-24/fake.enc",
+      "mimetype": "audio/ogg; codecs=opus",
+      "ptt": true,
+      "seconds": 4
+    }
+  }
+}
