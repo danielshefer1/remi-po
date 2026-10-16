@@ -39,6 +39,7 @@ from personal_organizer.interfaces.llm import LLMProvider, Message
 from personal_organizer.messaging.agent import AGENT_REPLY, add_event, event_summary, respond
 from personal_organizer.messaging.confirm import CONFIRM_ADD, decide
 from personal_organizer.messaging.inbox import InboxRow
+from personal_organizer.messaging.notes import InMemoryNotes
 from personal_organizer.messaging.onboarding import next_reply
 from personal_organizer.messaging.onboarding_text import t
 from personal_organizer.messaging.schedule import InMemorySchedule
@@ -140,6 +141,7 @@ async def agent_chat(
     waiting: list[CalendarEvent] = []
     # Reminders and the morning time live in memory for the session, like the history.
     schedule = InMemorySchedule(datetime.now(UTC))
+    notes = InMemoryNotes()
     while True:
         try:
             line = await asyncio.to_thread(read, "you> ")
@@ -172,6 +174,7 @@ async def agent_chat(
                 now=datetime.now(UTC),
                 proposed=waiting,
                 schedule=schedule,
+                notes=notes,
             )
         write(f"bot [{AGENT_REPLY}]> {text or NO_ANSWER}")
         history += [Message("user", line), Message("assistant", text)]
