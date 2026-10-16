@@ -6,10 +6,11 @@ The job carries the inbox row id and nothing else -- the body is read back from 
 database, per docs/adr/0001.
 
 Retries are Procrastinate's, and only for failures that are definitely-not-sent, a lost
-database connection, or an LLM or Composio that is down (D3 of docs/plan-iteration-04.md). One
-retry layer keeps every attempt visible in ``procrastinate_jobs``; an in-task retry loop would
-hide them and hold a worker slot while it slept. The price is ordering: a job waiting to retry
-keeps its lock, so the same sender's next message waits too. The backoff's waits add up to about
+database connection, or an LLM, Composio or transcriber that is down (D3 of
+docs/plan-iteration-04.md). One retry layer keeps every attempt visible in
+``procrastinate_jobs``; an in-task retry loop would hide them and hold a worker slot while it
+slept. The price is ordering: a job waiting to retry keeps its lock, so the same sender's next
+message waits too. The backoff's waits add up to about
 two minutes, and the seven attempts' own time comes on top: with the model timing out, 20 s each
 (``AGENT__REQUEST_TIMEOUT_S``, no SDK retries), about four and a half minutes in all. On the last
 attempt an LLM or Composio that is still down is answered with the fixed texts instead, so the
@@ -30,6 +31,7 @@ from sqlalchemy.exc import InterfaceError, OperationalError
 from personal_organizer.core.errors import (
     CalendarProviderUnavailableError,
     LLMUnavailableError,
+    TranscriptionUnavailableError,
     TransientChannelError,
 )
 from personal_organizer.db.engine import Database, get_database
@@ -41,6 +43,7 @@ from personal_organizer.messaging.runtime import get_outbound_channel
 from personal_organizer.messaging.tenancy import TenantState
 from personal_organizer.providers.calendar.composio import ComposioConnector
 from personal_organizer.providers.llm.anthropic import AnthropicLLM
+from personal_organizer.providers.transcription.openai import OpenAITranscriber
 from personal_organizer.settings import get_settings
 from personal_organizer.worker.queues import Queue
 
@@ -57,6 +60,7 @@ INBOUND_RETRY: Final = procrastinate.RetryStrategy(
         TransientChannelError,
         LLMUnavailableError,
         CalendarProviderUnavailableError,
+        TranscriptionUnavailableError,
         OperationalError,
         InterfaceError,
     },
@@ -80,6 +84,13 @@ def agent_llm() -> AnthropicLLM | None:
 def agent_calendar() -> ComposioConnector:
     """One Composio client for the process; the agent being on implies Composio is."""
     return ComposioConnector.from_settings(get_settings().composio)
+
+
+@functools.cache
+def voice_transcriber() -> OpenAITranscriber | None:
+    """One client for the process, built on first use: voice is off unless enabled."""
+    settings = get_settings()
+    return OpenAITranscriber.from_settings(settings) if settings.voice.enabled else None
 
 
 def _on_allowed(db: Database, *, last_attempt: bool) -> OnAllowed:
@@ -120,6 +131,7 @@ def register(app: procrastinate.App) -> None:
             # Composio on: the tenant gate and onboarding. Off: Iteration 02's gate, exactly.
             settings=settings,
             llm=agent_llm(),
+            transcriber=voice_transcriber(),
             last_attempt=last_attempt,
         )
 
@@ -131,4 +143,5 @@ __all__ = [
     "agent_llm",
     "is_last_attempt",
     "register",
+    "voice_transcriber",
 ]

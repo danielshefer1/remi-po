@@ -398,6 +398,19 @@ class AgentSettings(BaseModel):
     request_timeout_s: float = 20.0
 
 
+class VoiceSettings(BaseModel):
+    """Voice notes, transcribed through OpenAI (Iteration 06). Worker only.
+
+    Off by default. On, it needs its key. The model is ``MODELS__TRANSCRIPTION_MODEL``. The
+    timeout is per call with the SDK's retries off, as for the agent: ``INBOUND_RETRY`` is the
+    one retry layer.
+    """
+
+    enabled: bool = False
+    api_key: SecretStr | None = None
+    request_timeout_s: float = 30.0
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -423,6 +436,7 @@ class Settings(BaseSettings):
     composio: ComposioSettings = ComposioSettings()
     onboarding: OnboardingSettings = OnboardingSettings()
     agent: AgentSettings = AgentSettings()
+    voice: VoiceSettings = VoiceSettings()
     flags: dict[str, bool] = Field(default_factory=dict)
 
     @property
@@ -481,6 +495,13 @@ class Settings(BaseSettings):
             msg = (
                 f"Invalid agent settings: {', '.join(missing)} required when AGENT__ENABLED is true"
             )
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _voice_is_complete(self) -> Settings:
+        if self.voice.enabled and self.voice.api_key is None:
+            msg = "Invalid voice settings: VOICE__API_KEY required when VOICE__ENABLED is true"
             raise ValueError(msg)
         return self
 

@@ -13,6 +13,7 @@ from personal_organizer.core.errors import (
     CalendarProviderUnavailableError,
     LLMUnavailableError,
     RejectedChannelError,
+    TranscriptionUnavailableError,
     TransientChannelError,
 )
 from personal_organizer.db.engine import Database
@@ -143,8 +144,13 @@ class TestOnboardingTasks:
 
 
 class TestLastAttempt:
-    @pytest.mark.parametrize("error", [LLMUnavailableError, CalendarProviderUnavailableError])
-    def test_an_llm_or_calendar_outage_is_retried(self, error: type[Exception]) -> None:
+    @pytest.mark.parametrize(
+        "error",
+        [LLMUnavailableError, CalendarProviderUnavailableError, TranscriptionUnavailableError],
+    )
+    def test_an_llm_calendar_or_transcription_outage_is_retried(
+        self, error: type[Exception]
+    ) -> None:
         assert error in (INBOUND_RETRY.retry_exceptions or set())
 
     @pytest.mark.parametrize("attempts", range(9))

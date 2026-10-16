@@ -49,6 +49,13 @@ class TestMessageTypes:
         assert message.text == "My prescription"
         assert message.media_id is None
 
+    def test_a_voice_note_is_audio_without_text(self) -> None:
+        """Synthetic until replaced by a real staging voice note (Task 7)."""
+        message = _only_message("audio")
+        assert message.message_type == "audio"
+        assert message.text is None
+        assert message.provider_message_id == load("audio")["payload"]["id"]
+
     def test_a_list_selection_is_an_interactive_reply(self) -> None:
         message = _only_message("selection")
         assert message.message_type == "interactive"

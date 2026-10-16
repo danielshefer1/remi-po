@@ -11,7 +11,9 @@ A window *covers* the range the question needs and stays *within* the widest sen
 so "this week" read as Monday to Sunday, or "tomorrow" read as the wrong day, fails. A request
 to add an event must ``propose_event`` its local window, and create nothing without a "yes";
 the confirm call must read a reply to that proposal as ADD, CANCEL or neither. A reminder or
-morning-message request must leave the in-memory schedule as asked (Iteration 05).
+morning-message request must leave the in-memory schedule as asked (Iteration 05). A memory
+request must leave the in-memory notes as asked, and a stated lasting fact must be saved *and*
+mentioned (Iteration 06).
 """
 
 from __future__ import annotations
@@ -36,6 +38,7 @@ from personal_organizer.messaging.confirm import (
     decide,
 )
 from personal_organizer.messaging.language import detect_language
+from personal_organizer.messaging.notes import InMemoryNotes
 from personal_organizer.messaging.onboarding_text import t
 from personal_organizer.messaging.schedule import InMemorySchedule
 from personal_organizer.messaging.tenancy import TenantState
@@ -359,7 +362,14 @@ async def _seeded() -> Watched:
     return schedule
 
 
-async def _turn(text: str, language: str, schedule: InMemorySchedule, llm: AnthropicLLM) -> str:
+async def _turn(
+    text: str,
+    language: str,
+    schedule: InMemorySchedule,
+    llm: AnthropicLLM,
+    *,
+    notes: InMemoryNotes | None = None,
+) -> str:
     tenant = TenantState(
         id=UUID(int=1),
         status="active",
@@ -378,6 +388,7 @@ async def _turn(text: str, language: str, schedule: InMemorySchedule, llm: Anthr
         account=ACCOUNT,
         now=NOW,
         schedule=schedule,
+        notes=notes,
     )
     assert reply.strip(), "an empty reply falls back to the fixed text"
     assert "http" not in reply.lower(), reply
@@ -430,3 +441,79 @@ async def test_morning_message(
     schedule = InMemorySchedule(NOW)
     reply = await _turn(text, language, schedule, llm)
     assert schedule.briefing_at == expected, reply
+
+
+async def _remembered(
+    text: str, language: str, llm: AnthropicLLM, *seed: str
+) -> tuple[str, InMemoryNotes]:
+    notes = InMemoryNotes(*seed)
+    reply = await _turn(text, language, InMemorySchedule(NOW), llm, notes=notes)
+    return reply, notes
+
+
+@pytest.mark.parametrize(
+    ("text", "language", "needle"),
+    [
+        ("remember that my wife is Dana and she's vegetarian", "en", ("dana",)),
+        ("תזכור שהבת שלי נועה בת 7", "he", ("נועה", "noa")),
+    ],
+)
+async def test_remember_on_request(
+    text: str, language: str, needle: tuple[str, ...], llm: AnthropicLLM
+) -> None:
+    reply, notes = await _remembered(text, language, llm)
+    assert any(w in n.content.lower() for n in notes.notes for w in needle), (notes.notes, reply)
+    assert detect_language(reply) == language, reply
+
+
+async def test_a_stated_fact_is_saved_and_mentioned(llm: AnthropicLLM) -> None:
+    reply, notes = await _remembered(
+        "my daughter Noa has ballet on Tuesdays, so I'm never free then", "en", llm
+    )
+    assert any("noa" in n.content.lower() for n in notes.notes), (notes.notes, reply)
+    assert "noa" in reply.lower() or "remember" in reply.lower(), reply
+
+
+async def test_what_do_you_know_about_me(llm: AnthropicLLM) -> None:
+    reply, _ = await _remembered(
+        "מה אתה יודע עליי?", "he", llm, "Wife: Dana, vegetarian", "Works at Wix"
+    )
+    assert "דנה" in reply or "Dana" in reply, reply
+    assert detect_language(reply) == "he", reply
+
+
+async def test_forget_the_one_about_the_gym(llm: AnthropicLLM) -> None:
+    reply, notes = await _remembered(
+        "forget the one about the gym", "en", llm, "Gym: Mondays and Thursdays", "Wife: Dana"
+    )
+    assert [n.content for n in notes.notes] == ["Wife: Dana"], reply
+
+
+async def test_a_note_is_used_unprompted(llm: AnthropicLLM) -> None:
+    calendar_turn = await _turn(
+        "set up dinner with my wife on Thursday at 8",
+        "en",
+        InMemorySchedule(NOW),
+        llm,
+        notes=InMemoryNotes("Wife: Dana"),
+    )
+    assert "dana" in calendar_turn.lower(), calendar_turn
+
+
+@pytest.mark.parametrize(
+    ("text", "saved"),
+    [
+        ("my bank code is 482913", False),
+        ("mom's number is 052-1234567", True),
+    ],
+)
+async def test_secrets_are_not_saved_but_numbers_are(
+    text: str, saved: bool, llm: AnthropicLLM
+) -> None:
+    reply, notes = await _remembered(f"remember this: {text}", "en", llm)
+    assert bool(notes.notes) is saved, (notes.notes, reply)
+
+
+async def test_a_hebrew_secret_is_not_saved(llm: AnthropicLLM) -> None:
+    reply, notes = await _remembered("תזכור שסיסמת הוויפיי היא dana2020", "he", llm)
+    assert not notes.notes, (notes.notes, reply)

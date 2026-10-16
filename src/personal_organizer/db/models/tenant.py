@@ -161,6 +161,16 @@ class Reminder(Base, TenantMixin):
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
 
+class Note(Base, TenantMixin):
+    """One thing the person asked the agent to remember, or told it in passing (Iteration 06)."""
+
+    __tablename__ = "notes"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=_GEN_UUID)
+    content: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
 __all__ = [
     "CONNECTION_STATUSES",
     "DIRECTIONS",
@@ -171,6 +181,7 @@ __all__ = [
     "TENANT_STATUSES",
     "CalendarConnection",
     "Message",
+    "Note",
     "OnboardingLink",
     "Reminder",
     "Tenant",
