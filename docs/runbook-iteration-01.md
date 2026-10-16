@@ -152,7 +152,7 @@ scheme and driver rewriting. Verified resolving to `postgres.railway.internal:54
 | `MODELS__CHAT_MODEL` | `claude-haiku-5-5` (Iteration 04; `AGENT__ENABLED` and `AGENT__API_KEY` on the worker only) |
 | `MODELS__FALLBACK_MODEL` | `claude-haiku-4-5` |
 | `MODELS__EMBEDDING_MODEL` | `text-embedding-3-small` |
-| `MODELS__TRANSCRIPTION_MODEL` | `gpt-4o-mini-transcribe` |
+| `MODELS__TRANSCRIPTION_MODEL` | `stt-async-v5` |
 | `LANGFUSE__PUBLIC_KEY`, `LANGFUSE__SECRET_KEY` | optional |
 | `FLAGS__GROUPS`, `FLAGS__TASKS` | `false` |
 

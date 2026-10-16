@@ -43,7 +43,7 @@ from personal_organizer.messaging.runtime import get_outbound_channel
 from personal_organizer.messaging.tenancy import TenantState
 from personal_organizer.providers.calendar.composio import ComposioConnector
 from personal_organizer.providers.llm.anthropic import AnthropicLLM
-from personal_organizer.providers.transcription.openai import OpenAITranscriber
+from personal_organizer.providers.transcription.soniox import SonioxTranscriber
 from personal_organizer.settings import get_settings
 from personal_organizer.worker.queues import Queue
 
@@ -87,10 +87,10 @@ def agent_calendar() -> ComposioConnector:
 
 
 @functools.cache
-def voice_transcriber() -> OpenAITranscriber | None:
+def voice_transcriber() -> SonioxTranscriber | None:
     """One client for the process, built on first use: voice is off unless enabled."""
     settings = get_settings()
-    return OpenAITranscriber.from_settings(settings) if settings.voice.enabled else None
+    return SonioxTranscriber.from_settings(settings) if settings.voice.enabled else None
 
 
 def _on_allowed(db: Database, *, last_attempt: bool) -> OnAllowed:

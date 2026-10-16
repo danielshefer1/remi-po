@@ -166,7 +166,7 @@ class GowaOutbound:
         filename = results.get("filename")
         if not isinstance(filename, str) or "." not in filename:
             filename = file_path.rsplit("/", 1)[-1]
-        if "." not in filename:  # OpenAI reads the format from the extension; notes are ogg/opus
+        if "." not in filename:  # the extension names the format; notes are ogg/opus
             filename = "voice.ogg"
         return Audio(content, filename)
 

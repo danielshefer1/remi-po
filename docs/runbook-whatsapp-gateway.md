@@ -120,11 +120,12 @@ outcome known.
 
 ## Voice notes (Iteration 06)
 
-A voice note is downloaded from the gateway, transcribed with OpenAI, and handled as text.
+A voice note is downloaded from the gateway, transcribed with Soniox, and handled as text.
 Only the worker does this.
 
-1. **Set the worker's variables.** `VOICE__ENABLED=true` and `VOICE__API_KEY`, an OpenAI
-   project key. Set them on the **worker** only.
+1. **Set the worker's variables.** `VOICE__ENABLED=true`, `VOICE__API_KEY` (a Soniox API key
+   from console.soniox.com) and `MODELS__TRANSCRIPTION_MODEL=stt-async-v5`. Set them on the
+   **worker** only. Soniox keeps nothing: each upload and transcription is deleted once read.
 2. **Leave the gateway's auto-download off.** `WHATSAPP_AUTO_DOWNLOAD_MEDIA` stays `false`.
    The worker asks the gateway for each file when it needs it (`GET /message/{id}/download`).
 3. **Watch the gateway's volume.** The gateway keeps each downloaded file under its statics

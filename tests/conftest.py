@@ -40,7 +40,7 @@ _BASE_ENV: dict[str, str] = {
     "MODELS__CHAT_MODEL": "gpt-5-mini",
     "MODELS__FALLBACK_MODEL": "claude-haiku-4-5",
     "MODELS__EMBEDDING_MODEL": "text-embedding-3-small",
-    "MODELS__TRANSCRIPTION_MODEL": "gpt-4o-mini-transcribe",
+    "MODELS__TRANSCRIPTION_MODEL": "stt-async-v5",
     "LOGGING__PII_PEPPER": "test-pepper",
 }
 
