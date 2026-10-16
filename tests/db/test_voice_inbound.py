@@ -66,6 +66,19 @@ async def _active(db: Database, *, connected: bool = True) -> TenantState:
     return state
 
 
+def _fail_finishing_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The job dies in the transaction that finishes the row, after its sends."""
+    real, calls = record_inbound, []
+
+    async def flaky(*args: Any, **kwargs: Any) -> Any:
+        calls.append(1)
+        if len(calls) == 1:
+            raise ConnectionResetError("the database went away at the commit")
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(inbound, "record_inbound", flaky)
+
+
 async def _handle(
     db: Database,
     settings: Settings,
@@ -175,6 +188,77 @@ class TestActiveMember:
         )
         assert len(first.sent) == 1
         assert again.attempts == []
+        assert [m.direction for m in await messages_of(db, tenant.id)] == ["in", "out"]
+
+    async def test_a_note_heard_then_unheard_on_the_re_run_sends_one_reply(
+        self,
+        db: Database,
+        owner_conn: Any,
+        onboarding_settings: Settings,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        tenant = await _active(db)
+        inbox_id = await insert_inbox(
+            owner_conn, phone=IL_PHONE, body=None, message_type="audio", sent_at=NOW
+        )
+        _fail_finishing_once(monkeypatch)
+        channel = ListeningOutbound()
+        agent = functools.partial(
+            agent_turn, db=db, llm=ScriptedLLM(said("בטח.")), calendar=InMemoryCalendar()
+        )
+        with pytest.raises(ConnectionResetError):
+            await _handle(
+                db,
+                onboarding_settings,
+                inbox_id,
+                channel,
+                on_allowed=agent,
+                transcriber=FakeTranscriber("תזכיר לי"),
+            )
+        await _handle(
+            db,
+            onboarding_settings,
+            inbox_id,
+            channel,
+            on_allowed=Spy(),
+            transcriber=FakeTranscriber(""),
+        )
+        assert [m.body for m in channel.sent] == ["בטח."]
+        # The re-run records only the message: agent_turn's own re-run path returns no reply.
+        assert [m.direction for m in await messages_of(db, tenant.id)] == ["in"]
+
+    async def test_a_note_unheard_then_heard_on_the_re_run_sends_one_reply(
+        self,
+        db: Database,
+        owner_conn: Any,
+        onboarding_settings: Settings,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        tenant = await _active(db)
+        inbox_id = await insert_inbox(
+            owner_conn, phone=IL_PHONE, body=None, message_type="audio", sent_at=NOW
+        )
+        _fail_finishing_once(monkeypatch)
+        channel = ListeningOutbound()
+        with pytest.raises(ConnectionResetError):
+            await _handle(
+                db,
+                onboarding_settings,
+                inbox_id,
+                channel,
+                on_allowed=Spy(),
+                transcriber=FakeTranscriber(""),
+            )
+        llm = NoLLM()
+        await _handle(
+            db,
+            onboarding_settings,
+            inbox_id,
+            channel,
+            on_allowed=functools.partial(agent_turn, db=db, llm=llm, calendar=InMemoryCalendar()),
+            transcriber=FakeTranscriber("תזכיר לי"),
+        )
+        assert [m.body for m in channel.sent] == [t("voice_unheard", "he")]
         assert [m.direction for m in await messages_of(db, tenant.id)] == ["in", "out"]
 
     async def test_a_spoken_yes_confirms_the_pending_event(

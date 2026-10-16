@@ -71,12 +71,13 @@ from personal_organizer.db.repositories.tenants import (
 from personal_organizer.interfaces.channel import OutboundChannel
 from personal_organizer.interfaces.llm import LLMProvider
 from personal_organizer.interfaces.voice import Transcriber
+from personal_organizer.messaging.agent import AGENT_REPLY
 from personal_organizer.messaging.inbox import InboxRow, load_row
 from personal_organizer.messaging.invites import is_invited
 from personal_organizer.messaging.language import detect_language
 from personal_organizer.messaging.onboarding import Advance, onboarding_step
 from personal_organizer.messaging.onboarding_text import t
-from personal_organizer.messaging.outbox import send_once
+from personal_organizer.messaging.outbox import already_sent, send_once
 from personal_organizer.messaging.replies import (
     ACK_TEXT,
     INVITE_ONLY_MUTE,
@@ -274,7 +275,9 @@ async def _unheard(
 ) -> Advance:
     """The fixed "couldn't catch that" line for an active tenant's voice note, sent once."""
     address = row.sender_phone or await phone_of(db, tenant.id)
-    if address is None:
+    # One reply per message: a re-run whose transcript flipped must not add this line after the
+    # agent's answer (and the gate does not ask the agent after this line, see below).
+    if address is None or await already_sent(db, row.id, AGENT_REPLY):
         return Advance()
     text = t("voice_unheard", tenant.language)
     await send_once(
@@ -331,6 +334,12 @@ async def _tenant_gate(
         if heard is None:
             unheard = await _unheard(db, channel, row, tenant)
             await _finish_known(db, row, tenant.id, "allowed", unheard)
+            return "allowed"
+        if await already_sent(db, row.id, VOICE_UNHEARD):
+            # A re-run that hears what the first run could not: the line went out, so it stays
+            # the one reply, and no model is asked.
+            text = t("voice_unheard", tenant.language)
+            await _finish_known(db, row, tenant.id, "allowed", Advance(reply=text))
             return "allowed"
         decided = await on_allowed(heard, channel, tenant, current)
         await _finish_known(db, heard, tenant.id, "allowed", decided)
