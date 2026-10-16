@@ -412,6 +412,21 @@ class TestAgent:
         assert "sk-ant-test" not in repr(cfg) + cfg.model_dump_json()
 
 
+class TestVoice:
+    def test_off_by_default(self, settings: Settings) -> None:
+        assert not settings.voice.enabled
+
+    def test_enabled_without_a_key_fails(self, settings_factory: Any) -> None:
+        with pytest.raises(ValidationError) as excinfo:
+            settings_factory(VOICE__ENABLED="true")
+        assert "VOICE__API_KEY" in str(excinfo.value)
+
+    def test_enabled_with_a_key_boots_and_hides_it(self, settings_factory: Any) -> None:
+        cfg = settings_factory(VOICE__ENABLED="true", VOICE__API_KEY="sk-proj-test")
+        assert cfg.voice.enabled
+        assert "sk-proj-test" not in repr(cfg) + cfg.model_dump_json()
+
+
 class TestPublicBaseUrl:
     def test_unset_by_default(self, settings: Settings) -> None:
         assert settings.app.public_base_url is None

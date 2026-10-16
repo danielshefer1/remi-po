@@ -146,6 +146,33 @@ class LLMRejectedError(LLMError):
         self.status_code = status_code
 
 
+class VoiceError(AppError):
+    """A voice note could not be fetched or transcribed.
+
+    Messages are fixed strings: never the audio's text, which is the person's words.
+    """
+
+    code = "voice_error"
+
+
+class MediaUnavailableError(VoiceError):
+    """The audio is gone, too big, or the gateway refused it. Retrying won't help."""
+
+    code = "media_unavailable"
+
+
+class TranscriptionUnavailableError(VoiceError):
+    """Timed out, unreachable, throttled or a 5xx. The same request may work later."""
+
+    code = "transcription_unavailable"
+
+
+class TranscriptionRefusedError(VoiceError):
+    """A 4xx, or a response we cannot use. Retrying won't help."""
+
+    code = "transcription_refused"
+
+
 __all__ = [
     "AmbiguousDeliveryError",
     "AppError",
@@ -160,8 +187,12 @@ __all__ = [
     "LLMError",
     "LLMRejectedError",
     "LLMUnavailableError",
+    "MediaUnavailableError",
     "MessageTooLongError",
     "MissingDatabaseRoleError",
     "RejectedChannelError",
+    "TranscriptionRefusedError",
+    "TranscriptionUnavailableError",
     "TransientChannelError",
+    "VoiceError",
 ]
