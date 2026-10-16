@@ -165,7 +165,9 @@ class GowaOutbound:
             raise MediaUnavailableError("audio too large")
         filename = results.get("filename")
         if not isinstance(filename, str) or "." not in filename:
-            filename = file_path.rsplit("/", 1)[-1] or "voice.ogg"
+            filename = file_path.rsplit("/", 1)[-1]
+        if "." not in filename:  # OpenAI reads the format from the extension; notes are ogg/opus
+            filename = "voice.ogg"
         return Audio(content, filename)
 
     async def _get(self, path: str, *, params: dict[str, str] | None = None) -> httpx.Response:

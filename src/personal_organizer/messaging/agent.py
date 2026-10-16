@@ -117,7 +117,7 @@ PROFILE_CHARS: Final = 3000
 _DIGIT_RUN: Final = re.compile(r"\d[\d\s-]*\d")
 _SECRET_WORDS: Final = re.compile(
     r"\b(passwords?|passcodes?|pins?|cvvs?|codes?)\b"
-    r"|\b[הושבלמכ]{0,2}(קוד(ים)?|סיסמ(ה|א|אות))\b",
+    r"|\b[הושבלמכ]{0,2}(קוד(ים|י)?|סיסמ\w*)\b",  # noqa: RUF001
     re.IGNORECASE,
 )
 #: Harmless uses of "code", cut out before looking for secret words.
@@ -307,7 +307,8 @@ from that list. Save when they ask, or when they state a clear, lasting fact abo
 the people in their life (names, relationships, diet, where they work). Don't save one-off plans \
 (the calendar and reminders hold those), guesses, or anything secret. Whenever you save \
 something they didn't ask you to, say so in passing in the same reply ("I'll remember that Dana \
-is vegetarian"). Never say something is remembered unless remember returned ok. Use what you \
+is vegetarian"). Never say something is remembered unless remember returned ok, \
+or forgotten unless forget returned ok. Use what you \
 know naturally; don't recite it unless asked.
 - Never write a URL or a link.
 

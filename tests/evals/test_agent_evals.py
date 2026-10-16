@@ -502,10 +502,18 @@ async def test_a_note_is_used_unprompted(llm: AnthropicLLM) -> None:
 
 @pytest.mark.parametrize(
     ("text", "saved"),
-    [("my bank code is 482913", False), ("mom's number is 052-1234567", True)],
+    [
+        ("my bank code is 482913", False),
+        ("mom's number is 052-1234567", True),
+    ],
 )
 async def test_secrets_are_not_saved_but_numbers_are(
     text: str, saved: bool, llm: AnthropicLLM
 ) -> None:
     reply, notes = await _remembered(f"remember this: {text}", "en", llm)
     assert bool(notes.notes) is saved, (notes.notes, reply)
+
+
+async def test_a_hebrew_secret_is_not_saved(llm: AnthropicLLM) -> None:
+    reply, notes = await _remembered("תזכור שסיסמת הוויפיי היא dana2020", "he", llm)
+    assert not notes.notes, (notes.notes, reply)

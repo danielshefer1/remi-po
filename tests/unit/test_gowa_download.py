@@ -118,3 +118,19 @@ async def test_no_sender_to_name_is_unavailable() -> None:
     with pytest.raises(MediaUnavailableError):
         await gowa.download("3EB0ABC", phone=None, user_id=None)
     assert seen == []
+
+
+async def test_a_name_without_an_extension_becomes_voice_ogg() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.startswith("/message/"):
+            results = {
+                "filename": "1729000000-abc",
+                "file_url": f"{BASE}/statics/media/1729000000-abc",
+                "file_size": len(OGG),
+            }
+            return httpx.Response(200, json={"code": "SUCCESS", "results": results})
+        return httpx.Response(200, content=OGG)
+
+    gowa, _ = _gowa(handler)
+    audio = await gowa.download("3EB0ABC", phone="+972521234567", user_id=None)
+    assert audio.filename == "voice.ogg"

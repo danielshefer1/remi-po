@@ -81,3 +81,9 @@ async def test_unreachable_is_unavailable_and_tried_once(settings_factory: Any) 
 def test_no_key_is_a_config_error(settings_factory: Any) -> None:
     with pytest.raises(ConfigError):
         OpenAITranscriber.from_settings(settings_factory())
+
+
+async def test_a_reply_without_text_is_refused(settings_factory: Any) -> None:
+    transcriber = _transcriber(settings_factory, lambda r: httpx.Response(200, json={}))
+    with pytest.raises(TranscriptionRefusedError):
+        await transcriber.transcribe(AUDIO)

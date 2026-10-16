@@ -142,10 +142,10 @@ None needs a confirm: they write only our own table.
   and content that looks like a secret.
   - Whitespace is collapsed before saving.
   - A secret is a card-length run of 13 to 19 digits (spaces and dashes ignored), or the
-    words password, סיסמה, PIN, CVV or קוד. The secret check also catches plurals and Hebrew
-    prefixes (ה/ו/ש/ב/ל/מ/כ). It exempts zip, area, dress and postal code, and קוד לבוש. A run
-    counts as a card only when its digit groups are all four digits (lists of years excepted)
-    or it is one unbroken 13 to 19 digit group. The check is code, not just the prompt. Phone
+    words password, סיסמה, PIN, CVV or קוד. The secret check also catches plurals, Hebrew
+    construct and suffixed forms (סיסמת, סיסמתי, קודי) and Hebrew prefixes (ה/ו/ש/ב/ל/מ/כ). It exempts zip, area, dress and postal code, and קוד לבוש. A run
+    counts as a card only when its digit groups are four digits each with the last up to four
+    (e.g. 4-4-4-4 or 4-4-4-3; lists of years excepted) or it is one unbroken 13 to 19 digit run. The check is code, not just the prompt. Phone
     numbers (9 to 12 digits) are fine to save; ID numbers are left to the prompt rule.
 - **`list_notes`**: the notes, newest first, as `{n, content}`. `n` is a per-turn index,
   never the UUID, as with reminders.

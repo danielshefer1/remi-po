@@ -66,6 +66,8 @@ class OpenAITranscriber:
             )
         except openai.OpenAIError as exc:
             raise _translate(exc) from None
+        if not isinstance(result.text, str):
+            raise TranscriptionRefusedError("transcription response unusable")
         return result.text.strip()
 
 
