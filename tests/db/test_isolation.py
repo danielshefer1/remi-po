@@ -123,6 +123,12 @@ async def _seed_reminder(conn: Any, tenant: UUID, tag: str) -> None:
     )
 
 
+async def _seed_note(conn: Any, tenant: UUID, tag: str) -> None:
+    await conn.execute(
+        "INSERT INTO notes (tenant_id, content) VALUES ($1, $2)", tenant, f"secret note of {tag}"
+    )
+
+
 #: ``tenants`` first: every other table references it.
 SEEDS: dict[str, Seed] = {
     "tenants": _seed_tenant,
@@ -131,6 +137,7 @@ SEEDS: dict[str, Seed] = {
     "onboarding_links": _seed_link,
     "messages": _seed_message,
     "reminders": _seed_reminder,
+    "notes": _seed_note,
 }
 
 TABLES = sorted(tenant_tables())
