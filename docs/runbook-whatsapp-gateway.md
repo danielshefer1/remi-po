@@ -118,6 +118,29 @@ outcome known.
 
 ---
 
+## Voice notes (Iteration 06)
+
+A voice note is downloaded from the gateway, transcribed with OpenAI, and handled as text.
+Only the worker does this.
+
+1. **Set the worker's variables.** `VOICE__ENABLED=true` and `VOICE__API_KEY`, an OpenAI
+   project key. Set them on the **worker** only.
+2. **Leave the gateway's auto-download off.** `WHATSAPP_AUTO_DOWNLOAD_MEDIA` stays `false`.
+   The worker asks the gateway for each file when it needs it (`GET /message/{id}/download`).
+3. **Watch the gateway's volume.** The gateway keeps each downloaded file under its statics
+   directory, on the volume that already holds the WhatsApp login. After a week, check
+   whether it prunes them: `du -sh` on the volume through `railway ssh`. If it does not,
+   add a cleanup.
+4. **Staging check.** Send one voice note in Hebrew and one in English. Each should get a
+   proper reply. In the worker's logs, the `voice.heard` lines show `chars`, never the text.
+5. **Save a real fixture.** Copy one real webhook body from the gateway, with the phone
+   numbers replaced, as `tests/fixtures/gowa/audio.json`.
+
+If a voice note gets the fallback line ("Sorry, I couldn't quite catch that voice note"),
+the transcription failed or came back empty, the file was over 20 MB, voice is off, or the
+message came through the Meta channel. Check the worker's
+logs for the reason. A re-run of the same message never sends a second reply.
+
 ## When replies stop
 
 | Symptom | Likely cause | Fix |

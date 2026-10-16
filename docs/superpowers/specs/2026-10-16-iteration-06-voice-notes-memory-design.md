@@ -46,8 +46,8 @@ gateway and returns `results.file_url` (and `file_path`, `file_size`).
   there is no phone.
 - A file over **20 MB** is refused before transcription (OpenAI's limit is 25 MB; a minute of
   voice note is roughly 100 KB, so this is about half an hour).
-- The `file_url` must be on the gateway's own host. Anything else is refused, so a crafted
-  response can't send the worker to an arbitrary URL.
+- Only the path of `file_url` is fetched, through the gateway client. The worker never goes
+  to a host a response names.
 - **Meta channel:** not built (Meta is parked). Audio there gets the fallback line below.
 
 A GOWA audio fixture (`tests/fixtures/gowa/audio.json`) is added from a real voice note on
@@ -95,7 +95,13 @@ runs:
   - The fallback line, `voice_unheard`, lives in `onboarding_text.py`. English is "Sorry, I
     couldn't quite catch that voice note. Could you type it for me?"; the Hebrew is written
     as Hebrew. It is reviewed against the voice rules.
-  - The row then finishes as usual. Its `messages` row has `message_type="audio"` and an empty body.
+  - The row then finishes as usual. Its `messages` row has `message_type="audio"`, an empty
+    body, and disposition `allowed` (the column has a CHECK constraint).
+  - A tenant still onboarding (a new invitee included) whose note can't be heard goes through
+    the onboarding step as before, and that prompt is told `[audio]` is a note it couldn't
+    hear, so the welcome still goes out. The fixed line is for active members.
+  - A re-run never sends a second reply: the unheard line is skipped if the agent already
+    answered this message, and the agent is skipped if the unheard line already went out.
 
 `InboxRow` gains nothing new: the provider message id and the sender are already on it.
 
@@ -134,8 +140,12 @@ None needs a confirm: they write only our own table.
 - **`remember(content)`**: one fact per call, rewritten by the model as a short third-person
   line ("Wife: Dana, vegetarian"). It returns errors for empty or over-long content, the cap,
   and content that looks like a secret.
+  - Whitespace is collapsed before saving.
   - A secret is a card-length run of 13 to 19 digits (spaces and dashes ignored), or the
-    words password, סיסמה, PIN, CVV or קוד. The check is code, not just the prompt. Phone
+    words password, סיסמה, PIN, CVV or קוד. The secret check also catches plurals and Hebrew
+    prefixes (ה/ו/ש/ב/ל/מ/כ). It exempts zip, area, dress and postal code, and קוד לבוש. A run
+    counts as a card only when its digit groups are all four digits (lists of years excepted)
+    or it is one unbroken 13 to 19 digit group. The check is code, not just the prompt. Phone
     numbers (9 to 12 digits) are fine to save; ID numbers are left to the prompt rule.
 - **`list_notes`**: the notes, newest first, as `{n, content}`. `n` is a per-turn index,
   never the UUID, as with reminders.
