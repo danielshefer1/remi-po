@@ -10,14 +10,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Final, Protocol, runtime_checkable
 
-#: OpenAI takes up to 25 MB; a minute of voice note is roughly 100 KB.
+#: Our own cap, far above any voice note: a minute is roughly 100 KB.
 MAX_AUDIO_BYTES: Final = 20 * 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
 class Audio:
     content: bytes
-    #: With its extension: the transcription API reads the format from it.
+    #: With its extension, so the upload names its format.
     filename: str
 
 

@@ -399,11 +399,11 @@ class AgentSettings(BaseModel):
 
 
 class VoiceSettings(BaseModel):
-    """Voice notes, transcribed through OpenAI (Iteration 06). Worker only.
+    """Voice notes, transcribed through Soniox (Iteration 06). Worker only.
 
     Off by default. On, it needs its key. The model is ``MODELS__TRANSCRIPTION_MODEL``. The
-    timeout is per call with the SDK's retries off, as for the agent: ``INBOUND_RETRY`` is the
-    one retry layer.
+    timeout is per HTTP call and also bounds the wait for the transcript; there are no retries
+    here, as for the agent: ``INBOUND_RETRY`` is the one retry layer.
     """
 
     enabled: bool = False
