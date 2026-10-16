@@ -42,6 +42,9 @@ Replies go out on the channel the message came in on. Several channels can be li
 so the handler is given a resolver and looks up the row's ``channel`` by name. The
 invite-only mute, though, is per *person* (``recipient_key``), not per channel: a stranger
 who writes to two of our numbers is told once.
+
+**Voice notes (Iteration 06).** A served sender's voice note is transcribed by
+``messaging.voice.hear`` before anything reads its body.
 """
 
 from __future__ import annotations
@@ -67,10 +70,12 @@ from personal_organizer.db.repositories.tenants import (
 )
 from personal_organizer.interfaces.channel import OutboundChannel
 from personal_organizer.interfaces.llm import LLMProvider
+from personal_organizer.interfaces.voice import Transcriber
 from personal_organizer.messaging.inbox import InboxRow, load_row
 from personal_organizer.messaging.invites import is_invited
 from personal_organizer.messaging.language import detect_language
 from personal_organizer.messaging.onboarding import Advance, onboarding_step
+from personal_organizer.messaging.onboarding_text import t
 from personal_organizer.messaging.outbox import send_once
 from personal_organizer.messaging.replies import (
     ACK_TEXT,
@@ -84,8 +89,10 @@ from personal_organizer.messaging.tenancy import (
     enrol,
     load_history,
     load_state,
+    phone_of,
     resolve_sender,
 )
+from personal_organizer.messaging.voice import AUDIO, VOICE_UNHEARD, hear
 from personal_organizer.settings import Settings
 
 log = structlog.get_logger(__name__)
@@ -262,6 +269,26 @@ async def _allowlist_gate(
     return disposition
 
 
+async def _unheard(
+    db: Database, channel: OutboundChannel, row: InboxRow, tenant: TenantState
+) -> Advance:
+    """The fixed "couldn't catch that" line for an active tenant's voice note, sent once."""
+    address = row.sender_phone or await phone_of(db, tenant.id)
+    if address is None:
+        return Advance()
+    text = t("voice_unheard", tenant.language)
+    await send_once(
+        db,
+        channel,
+        inbox_id=row.id,
+        kind=VOICE_UNHEARD,
+        recipient_key=row.sender_key,
+        to=address,
+        text=text,
+    )
+    return Advance(reply=text)
+
+
 async def _tenant_gate(
     db: Database,
     channel: OutboundChannel,
@@ -272,16 +299,25 @@ async def _tenant_gate(
     on_allowed: OnAllowed,
     settings: Settings,
     llm: LLMProvider | None,
+    transcriber: Transcriber | None,
     last_attempt: bool,
 ) -> str:
     """D2: serve, onboard, enrol or turn away. See the module docstring's table."""
     stale = _is_stale(row, current)
     tenant_id = await resolve_sender(db, row)
     # Asked only for a sender with no tenant: identity wins over invites.
-    if tenant_id is None and not stale and await is_invited(db, row.sender_phone, allowlist):
-        # Their first message. Its words decide the tenant's language (D11).
-        tenant_id = await enrol(db, row, language=detect_language(row.body))
+    invited = tenant_id is None and not stale and await is_invited(db, row.sender_phone, allowlist)
     tenant = await load_state(db, tenant_id) if tenant_id is not None else None
+    served = invited or (tenant is not None and tenant.status in _SERVED)
+    # Iteration 06: a voice note's words, for everything below. Strangers' audio is never
+    # fetched, so only someone we serve costs a transcription. None: it can't be heard.
+    heard: InboxRow | None = row
+    if row.message_type == AUDIO and served and not stale:
+        heard = await hear(row, channel, transcriber, last_attempt=last_attempt)
+    if invited:
+        # Their first message. Its words decide the tenant's language (D11).
+        tenant_id = await enrol(db, row, language=detect_language((heard or row).body))
+        tenant = await load_state(db, tenant_id)
 
     if tenant is None or tenant.status not in _SERVED:
         disposition = "stale" if stale else await _turn_away(db, channel, row, current)
@@ -292,14 +328,21 @@ async def _tenant_gate(
         return "stale"
     await _mark_read(channel, row)
     if tenant.status == "active":
-        decided = await on_allowed(row, channel, tenant, current)
-        await _finish_known(db, row, tenant.id, "allowed", decided)
+        if heard is None:
+            unheard = await _unheard(db, channel, row, tenant)
+            await _finish_known(db, row, tenant.id, "allowed", unheard)
+            return "allowed"
+        decided = await on_allowed(heard, channel, tenant, current)
+        await _finish_known(db, heard, tenant.id, "allowed", decided)
         return "allowed"
+    # Onboarding: an unheard note goes through as [audio], which the prompt explains, so the
+    # welcome and the setup still happen.
+    message = heard or row
     history = await load_history(db, tenant.id) if llm is not None else ()
     advance = await onboarding_step(
         db,
         channel,
-        row,
+        message,
         tenant,
         settings=settings,
         now=current,
@@ -307,7 +350,7 @@ async def _tenant_gate(
         history=history,
         last_attempt=last_attempt,
     )
-    await _finish_known(db, row, tenant.id, "onboarding", advance)
+    await _finish_known(db, message, tenant.id, "onboarding", advance)
     return "onboarding"
 
 
@@ -320,6 +363,7 @@ async def handle_inbound(
     on_allowed: OnAllowed,
     settings: Settings | None = None,
     llm: LLMProvider | None = None,
+    transcriber: Transcriber | None = None,
     last_attempt: bool = False,
     now: Callable[[], datetime] = _utcnow,
 ) -> str | None:
@@ -328,6 +372,7 @@ async def handle_inbound(
     ``settings`` with ``composio.enabled`` selects the tenant gate. ``None``, or Composio
     off, is Iteration 02's allowlist gate exactly. ``llm`` talks onboarding through (D10);
     ``last_attempt`` is the job's last, when an unavailable model falls back instead (D3).
+    ``transcriber`` hears voice notes (Iteration 06); ``None`` answers them with the fixed line.
     """
     row = await load_row(db, inbox_id)
     if row is None:
@@ -350,6 +395,7 @@ async def handle_inbound(
             on_allowed=on_allowed,
             settings=settings,
             llm=llm,
+            transcriber=transcriber,
             last_attempt=last_attempt,
         )
     else:
