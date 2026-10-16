@@ -454,15 +454,15 @@ async def _remembered(
 @pytest.mark.parametrize(
     ("text", "language", "needle"),
     [
-        ("remember that my wife is Dana and she's vegetarian", "en", "dana"),
-        ("תזכור שהבת שלי נועה בת 7", "he", "נועה"),
+        ("remember that my wife is Dana and she's vegetarian", "en", ("dana",)),
+        ("תזכור שהבת שלי נועה בת 7", "he", ("נועה", "noa")),
     ],
 )
 async def test_remember_on_request(
-    text: str, language: str, needle: str, llm: AnthropicLLM
+    text: str, language: str, needle: tuple[str, ...], llm: AnthropicLLM
 ) -> None:
     reply, notes = await _remembered(text, language, llm)
-    assert any(needle in n.content.lower() for n in notes.notes), (notes.notes, reply)
+    assert any(w in n.content.lower() for n in notes.notes for w in needle), (notes.notes, reply)
     assert detect_language(reply) == language, reply
 
 

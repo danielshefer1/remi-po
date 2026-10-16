@@ -71,6 +71,18 @@ async def test_remember_checks_its_argument(content: str) -> None:
         ("הסיסמה למחשב", True),
         ("Zip area: מיקוד 6100000", False),
         ("Daughter Noa, ballet on Tuesdays", False),
+        ("My PINs are 1234", True),
+        ("passwords in 1Password", True),
+        ("הסיסמאות שלי", True),
+        ("בקוד 4821", True),
+        ("והקוד 1234", True),
+        ("Phones 052-1234567 054-7654321", False),
+        ("Kids born 2015 2018 2021 2023", False),
+        ("4580 1234 5678 9012", True),
+        ("4580123456789012", True),
+        ("Dress code at work: business casual", False),
+        ("Zip code 6100000", False),
+        ("Pinchas is pinned to the board", False),
     ],
 )
 def test_secret_check(content: str, secret: bool) -> None:
@@ -133,3 +145,9 @@ def test_the_profile_is_cut_keeping_the_newest() -> None:
 def test_no_notes_reads_as_one_line() -> None:
     prompt = agent_prompt("en", NOW, None)
     assert "nothing yet" in prompt
+
+
+async def test_a_note_with_a_newline_is_stored_as_one_line() -> None:
+    notes = InMemoryNotes()
+    await _run(notes, said("", call("remember", content=" Wife:\nDana \n")), said("ok"))
+    assert [n.content for n in notes.notes] == ["Wife: Dana"]

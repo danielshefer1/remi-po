@@ -113,11 +113,15 @@ _NOTES_TOOLS: Final = frozenset({"remember", "list_notes", "forget"})
 #: The most of the profile the prompt carries; the newest notes are kept.
 PROFILE_CHARS: Final = 3000
 
-#: A card number's length, once spaces and dashes are gone. A phone number is shorter.
-_CARD: Final = re.compile(r"\d{13,19}")
+#: A run of digits, spaces and dashes: a card number is one run, not digits spread over a note.
+_DIGIT_RUN: Final = re.compile(r"\d[\d\s-]*\d")
 _SECRET_WORDS: Final = re.compile(
-    r"\b(password|passcode|pin|cvv|code)\b|\b[הוש]?(קוד|סיסמה|סיסמא)\b", re.IGNORECASE
+    r"\b(passwords?|passcodes?|pins?|cvvs?|codes?)\b"
+    r"|\b[הושבלמכ]{0,2}(קוד(ים)?|סיסמ(ה|א|אות))\b",
+    re.IGNORECASE,
 )
+#: Harmless uses of "code", cut out before looking for secret words.
+_HARMLESS_CODE: Final = re.compile(r"\b(zip|area|dress|postal) codes?\b|קוד לבוש", re.IGNORECASE)
 
 LANGUAGE_NAMES: Final = {HEBREW: "Hebrew", ENGLISH: "English"}
 #: By index, not ``strftime``: the names must not follow the worker's locale.
@@ -579,10 +583,21 @@ async def move_briefing(arguments: Mapping[str, Any], schedule: Schedule) -> str
     return f"ok: morning message at {at:%H:%M}"
 
 
+def _card_like(run: str) -> bool:
+    """4-4-4-4(-3) groups, or one unbroken 13 to 19 digits: not phones, not a list of years."""
+    groups = re.split(r"[\s-]+", run)
+    if not 13 <= sum(map(len, groups)) <= 19 or all(
+        re.fullmatch(r"(19|20)\d\d", g) for g in groups
+    ):
+        return False  # a list of years is four groups of four too
+    return len(groups) == 1 or (all(len(g) == 4 for g in groups[:-1]) and len(groups[-1]) <= 4)
+
+
 def looks_secret(content: str) -> bool:
     """A card number, or a word that names a secret: never saved, whatever the model thinks."""
-    digits = re.sub(r"[\s-]", "", content)
-    return bool(_CARD.search(digits) or _SECRET_WORDS.search(content))
+    if any(_card_like(run) for run in _DIGIT_RUN.findall(content)):
+        return True
+    return bool(_SECRET_WORDS.search(_HARMLESS_CODE.sub("", content)))
 
 
 def profile_lines(contents: Sequence[str]) -> list[str]:
@@ -600,11 +615,13 @@ def profile_lines(contents: Sequence[str]) -> list[str]:
 async def save_note(arguments: Mapping[str, Any], notes: Notes) -> str:
     """``remember``: the tool result the model reads."""
     content = arguments.get("content")
-    if not isinstance(content, str) or not content.strip() or len(content) > MAX_FIELD:
+    if isinstance(content, str):
+        content = " ".join(content.split())  # one profile line, however it was typed
+    if not isinstance(content, str) or not content or len(content) > MAX_FIELD:
         return f"error: content is required, at most {MAX_FIELD} characters"
     if looks_secret(content):
         return "error: that looks like a secret; it is not saved. Tell them you don't keep those"
-    added = await notes.add(content.strip())
+    added = await notes.add(content)
     if added == "full":
         return "error: the notes are full; ask which old one to forget"
     return "ok: saved" if added == "added" else "ok: already saved"
