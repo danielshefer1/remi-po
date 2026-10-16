@@ -17,7 +17,7 @@ Composio's ``user_id`` for a tenant is ``str(tenant.id)``, never a phone number,
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime, time
 from typing import Any, Final
 from uuid import UUID
 
@@ -36,6 +36,7 @@ LANGUAGES: Final = ("he", "en")
 NETWORK_WHATSAPP: Final = "whatsapp"
 CONNECTION_STATUSES: Final = ("active", "revoked", "failed")
 DIRECTIONS: Final = ("in", "out")
+REMINDER_STATUSES: Final = ("pending", "sent", "cancelled", "failed")
 
 _GEN_UUID = text("gen_random_uuid()")
 
@@ -59,6 +60,10 @@ class Tenant(Base, TenantRoot):
     #: ``{claimed_by}`` once claimed. Read and written only through ``repositories.pending``
     #: (Iteration 04, D5).
     pending_action: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    #: Local time of the morning briefing; ``NULL`` is off. Iteration 05.
+    briefing_at: Mapped[time | None] = mapped_column(server_default=text("'07:30'"))
+    #: The tenant's last local day a briefing went out, so a re-run or a later tick skips it.
+    briefed_on: Mapped[date | None]
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
@@ -139,16 +144,35 @@ class Message(Base, TenantMixin):
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
 
+class Reminder(Base, TenantMixin):
+    """One reminder the person asked for. Sent once by ``schedule:reminder`` (Iteration 05)."""
+
+    __tablename__ = "reminders"
+    __table_args__ = (
+        CheckConstraint(check_in("status", REMINDER_STATUSES), name="status"),
+        Index(None, "status", "due_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=_GEN_UUID)
+    text: Mapped[str] = mapped_column(Text)
+    due_at: Mapped[datetime]
+    # A plain string default: the ``text`` column above shadows ``sqlalchemy.text`` here.
+    status: Mapped[str] = mapped_column(Text, server_default="pending")
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
 __all__ = [
     "CONNECTION_STATUSES",
     "DIRECTIONS",
     "LANGUAGES",
     "NETWORK_WHATSAPP",
     "ONBOARDING_STEPS",
+    "REMINDER_STATUSES",
     "TENANT_STATUSES",
     "CalendarConnection",
     "Message",
     "OnboardingLink",
+    "Reminder",
     "Tenant",
     "TenantIdentity",
 ]

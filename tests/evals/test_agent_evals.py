@@ -10,7 +10,8 @@ this week is 2026-10-11 to 2026-10-17.
 A window *covers* the range the question needs and stays *within* the widest sensible range,
 so "this week" read as Monday to Sunday, or "tomorrow" read as the wrong day, fails. A request
 to add an event must ``propose_event`` its local window, and create nothing without a "yes";
-the confirm call must read a reply to that proposal as ADD, CANCEL or neither.
+the confirm call must read a reply to that proposal as ADD, CANCEL or neither. A reminder or
+morning-message request must leave the in-memory schedule as asked (Iteration 05).
 """
 
 from __future__ import annotations
@@ -18,14 +19,14 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
 import anthropic
 import pytest
 
-from personal_organizer.db.models.tenant import CalendarConnection
+from personal_organizer.db.models.tenant import CalendarConnection, Reminder
 from personal_organizer.interfaces.calendar import CalendarEvent
 from personal_organizer.messaging.agent import respond
 from personal_organizer.messaging.confirm import (
@@ -36,6 +37,7 @@ from personal_organizer.messaging.confirm import (
 )
 from personal_organizer.messaging.language import detect_language
 from personal_organizer.messaging.onboarding_text import t
+from personal_organizer.messaging.schedule import InMemorySchedule
 from personal_organizer.messaging.tenancy import TenantState
 from personal_organizer.providers.calendar.memory import InMemoryCalendar
 from personal_organizer.providers.llm.anthropic import AnthropicLLM
@@ -335,3 +337,96 @@ async def test_decide(text: str, expected: str | None, llm: AnthropicLLM) -> Non
     """Only a clear yes adds; a change, a question or something more is the agent's."""
     summary = "Dentist\nTuesday 2026-10-13, 10:00-11:00"
     assert await decide(summary, text, llm=llm) == expected
+
+
+class Watched(InMemorySchedule):
+    """Counts ``list_reminders`` reads."""
+
+    def __init__(self, now: datetime) -> None:
+        super().__init__(now)
+        self.reads = 0
+
+    async def upcoming(self) -> list[Reminder]:
+        self.reads += 1
+        return await super().upcoming()
+
+
+async def _seeded() -> Watched:
+    schedule = Watched(NOW)
+    zone = ZoneInfo(JERUSALEM)
+    await schedule.add("call mom", datetime(2026, 10, 12, 19, 0, tzinfo=zone))
+    await schedule.add("take the laundry out", datetime(2026, 10, 13, 9, 0, tzinfo=zone))
+    return schedule
+
+
+async def _turn(text: str, language: str, schedule: InMemorySchedule, llm: AnthropicLLM) -> str:
+    tenant = TenantState(
+        id=UUID(int=1),
+        status="active",
+        step=None,
+        language=language,
+        first_message=False,
+        timezone=JERUSALEM,
+        briefing_at=schedule.briefing_at,
+    )
+    reply = await respond(
+        [],
+        text,
+        tenant,
+        llm=llm,
+        calendar=InMemoryCalendar(_events(ZoneInfo(JERUSALEM))),
+        account=ACCOUNT,
+        now=NOW,
+        schedule=schedule,
+    )
+    assert reply.strip(), "an empty reply falls back to the fixed text"
+    assert "http" not in reply.lower(), reply
+    return reply
+
+
+async def test_reminder_tomorrow_at_six_he(llm: AnthropicLLM) -> None:
+    schedule = InMemorySchedule(NOW)
+    reply = await _turn("תזכיר לי מחר בשש להתקשר לאמא", "he", schedule, llm)
+    [reminder] = schedule.reminders
+    local = reminder.due_at.astimezone(ZoneInfo(JERUSALEM)).replace(tzinfo=None)
+    # "בשש" is six in the evening or the morning, as in the calendar scenario.
+    assert local in {_local("2026-10-13T18:00"), _local("2026-10-13T06:00")}, (local, reply)
+    assert "אמא" in reminder.text, reminder.text
+
+
+async def test_reminder_in_twenty_minutes(llm: AnthropicLLM) -> None:
+    schedule = InMemorySchedule(NOW)
+    reply = await _turn("remind me in 20 minutes to take the laundry out", "en", schedule, llm)
+    [reminder] = schedule.reminders
+    assert abs(reminder.due_at - (NOW + timedelta(minutes=20))) <= SLACK, (reminder, reply)
+    assert detect_language(reply) == "en", reply
+
+
+async def test_list_reminders(llm: AnthropicLLM) -> None:
+    schedule = await _seeded()
+    reply = await _turn("what reminders do I have?", "en", schedule, llm)
+    assert schedule.reads, reply
+    assert "mom" in reply.lower(), reply
+    assert "laundry" in reply.lower(), reply
+
+
+async def test_cancel_the_one_about_mom(llm: AnthropicLLM) -> None:
+    schedule = await _seeded()
+    reply = await _turn("cancel the one about mom", "en", schedule, llm)
+    mom, laundry = schedule.reminders
+    assert (mom.status, laundry.status) == ("cancelled", "pending"), reply
+
+
+@pytest.mark.parametrize(
+    ("text", "language", "expected"),
+    [
+        ("make the morning message 8", "en", time(8, 0)),
+        ("תפסיק לשלוח לי הודעת בוקר", "he", None),
+    ],
+)
+async def test_morning_message(
+    text: str, language: str, expected: time | None, llm: AnthropicLLM
+) -> None:
+    schedule = InMemorySchedule(NOW)
+    reply = await _turn(text, language, schedule, llm)
+    assert schedule.briefing_at == expected, reply

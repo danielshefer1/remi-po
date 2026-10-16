@@ -99,11 +99,12 @@ async def test_the_definer_owns_no_tables(app_conn: Any) -> None:
     assert owned == 0
 
 
-#: Exactly what app_definer may own. A third function here is a third door past RLS.
-DEFINER_FUNCTIONS = {"resolve_tenant", "create_tenant"}
+#: Exactly what app_definer may own. Another function here is another door past RLS: the
+#: two resolution functions (Iteration 03) and the tick's two id-only scans (Iteration 05).
+DEFINER_FUNCTIONS = {"resolve_tenant", "create_tenant", "due_reminders", "due_briefings"}
 
 
-async def test_the_definer_owns_exactly_the_two_resolution_functions(app_conn: Any) -> None:
+async def test_the_definer_owns_exactly_the_definer_functions(app_conn: Any) -> None:
     rows = await app_conn.fetch(
         "SELECT p.proname, p.prosecdef, p.proconfig FROM pg_proc p "
         "JOIN pg_roles r ON p.proowner = r.oid WHERE r.rolname = 'app_definer'"

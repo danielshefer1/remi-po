@@ -54,11 +54,15 @@ def register(app: procrastinate.App) -> None:
         its sender's lock while it does, so everything that sender sends afterwards queues
         behind it and is never processed. Stalled means the worker stopped heartbeating,
         not merely that the job is slow. Retrying a reply mid-send is safe: see
-        ``messaging.outbox``.
+        ``messaging.outbox``. One failing retry is logged and the rest still go.
         """
         manager = context.app.job_manager
         for job in await manager.get_stalled_jobs():
-            await manager.retry_job(job)
+            try:
+                await manager.retry_job(job)
+            except Exception:  # one stuck job must not keep the rest stuck
+                log.exception("job.stalled_retry_failed", job_id=job.id, task_name=job.task_name)
+                continue
             log.warning(
                 "job.stalled_retried", job_id=job.id, task_name=job.task_name, queue=job.queue
             )

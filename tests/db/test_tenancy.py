@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from datetime import time
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -176,7 +177,12 @@ class TestState:
         row = await _row(db, owner_conn)
         tenant_id = await enrol(db, row, language="he")
         assert await load_state(db, tenant_id) == TenantState(
-            id=tenant_id, status="onboarding", step="zone", language="he", first_message=True
+            id=tenant_id,
+            status="onboarding",
+            step="zone",
+            language="he",
+            first_message=True,
+            briefing_at=time(7, 30),
         )
         async with db.tenant_session(TenantId(tenant_id)) as session:
             await record_inbound(

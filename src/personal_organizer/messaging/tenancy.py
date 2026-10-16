@@ -24,6 +24,7 @@ Resolution and creation run as ``app_user`` through the two ``SECURITY DEFINER``
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import time
 from types import MappingProxyType
 from typing import Final
 from uuid import UUID
@@ -69,6 +70,8 @@ class TenantState:
     first_message: bool
     #: Set on the ``zone`` step, so every active tenant has one.
     timezone: str | None = None
+    #: Local time of the morning briefing; ``None`` is off (Iteration 05).
+    briefing_at: time | None = None
 
 
 def network_for(channel: str) -> str:
@@ -179,6 +182,7 @@ async def load_state(db: Database, tenant_id: UUID) -> TenantState | None:
         step=tenant.onboarding_step,
         language=tenant.language,
         timezone=tenant.timezone,
+        briefing_at=tenant.briefing_at,
         first_message=first,
     )
 
