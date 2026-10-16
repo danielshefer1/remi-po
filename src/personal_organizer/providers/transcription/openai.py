@@ -1,7 +1,9 @@
 """OpenAI speech to text as the :class:`~personal_organizer.interfaces.voice.Transcriber`.
 
 The model is ``MODELS__TRANSCRIPTION_MODEL`` (``gpt-4o-mini-transcribe``). No ``language`` is
-sent: the model hears Hebrew or English itself, and a mixed note stays mixed. The SDK's own
+sent: the model hears Hebrew or English itself, and a mixed note stays mixed. A short context
+``prompt`` steers its word choice, since a 3-second note gives it little else (a Hebrew "voice
+messages" once came back as "both kidneys"). The SDK's own
 retries are off (``INBOUND_RETRY`` is the one layer), and its errors are translated without
 chaining: their messages can carry the response body.
 """
@@ -20,6 +22,13 @@ from personal_organizer.core.errors import (
 )
 from personal_organizer.interfaces.voice import Audio
 from personal_organizer.settings import Settings
+
+#: What notes are about, in both languages, so a short note is heard as an organizer request.
+_CONTEXT: Final = (
+    "A WhatsApp voice note to a personal assistant, in Hebrew or English, about the calendar, "
+    "meetings, reminders or things to remember. "
+    "הודעה קולית לעוזר אישי: יומן, פגישה, תזכורת, הודעות קוליות, מחר, היום."
+)
 
 #: Statuses worth another attempt later. Any 5xx is too.
 _TRANSIENT_STATUSES: Final = frozenset({408, 429})
@@ -62,7 +71,7 @@ class OpenAITranscriber:
     async def transcribe(self, audio: Audio) -> str:
         try:
             result = await self._client.audio.transcriptions.create(
-                model=self._model, file=(audio.filename, audio.content)
+                model=self._model, file=(audio.filename, audio.content), prompt=_CONTEXT
             )
         except openai.OpenAIError as exc:
             raise _translate(exc) from None

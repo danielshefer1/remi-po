@@ -43,7 +43,8 @@ async def test_it_sends_the_audio_to_the_model(settings_factory: Any) -> None:
     body = request.read()
     assert b"gpt-4o-mini-transcribe" in body
     assert b'filename="voice.ogg"' in body
-    assert b"language" not in body
+    assert b'name="language"' not in body
+    assert b'name="prompt"' in body
 
 
 @pytest.mark.parametrize("status", [408, 429, 500, 503])
