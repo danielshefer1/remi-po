@@ -30,6 +30,7 @@ import pytest
 
 from personal_organizer.db.models.tenant import CalendarConnection, Reminder
 from personal_organizer.interfaces.calendar import CalendarEvent
+from personal_organizer.interfaces.llm import Message
 from personal_organizer.messaging.agent import respond
 from personal_organizer.messaging.confirm import (
     CONFIRM_ADD,
@@ -369,6 +370,7 @@ async def _turn(
     llm: AnthropicLLM,
     *,
     notes: InMemoryNotes | None = None,
+    history: tuple[Message, ...] = (),
 ) -> str:
     tenant = TenantState(
         id=UUID(int=1),
@@ -380,7 +382,7 @@ async def _turn(
         briefing_at=schedule.briefing_at,
     )
     reply = await respond(
-        [],
+        history,
         text,
         tenant,
         llm=llm,
@@ -426,6 +428,39 @@ async def test_cancel_the_one_about_mom(llm: AnthropicLLM) -> None:
     reply = await _turn("cancel the one about mom", "en", schedule, llm)
     mom, laundry = schedule.reminders
     assert (mom.status, laundry.status) == ("cancelled", "pending"), reply
+
+
+#: Staging, 2026-10-16: a reminder that already went off, then an unrelated question.
+FIRED = (
+    Message("user", "תזכיר לי בעוד עשר דקות להגיד לעדן שאני אוהב אותה"),
+    Message("assistant", "קבעתי, אזכיר לך ב-04:57."),
+    Message("assistant", "תזכורת: להגיד לעדן שאני אוהב אותה"),
+    Message("user", "תודה"),
+    Message("assistant", "בכיף. בהצלחה עם עדן ❤️"),
+)
+
+
+def _fired() -> InMemorySchedule:
+    schedule = InMemorySchedule(NOW)
+    due = NOW - timedelta(minutes=3)
+    schedule.reminders.append(
+        Reminder(id=UUID(int=9), text="להגיד לעדן שאני אוהב אותה", due_at=due, status="sent")
+    )
+    return schedule
+
+
+async def test_a_fired_reminder_is_left_alone(llm: AnthropicLLM) -> None:
+    schedule = _fired()
+    reply = await _turn("אתה מבין הודעות קוליות?", "he", schedule, llm, history=FIRED)
+    assert len(schedule.reminders) == 1, (schedule.reminders, reply)
+    assert "עדן" not in reply, reply
+
+
+async def test_a_fired_reminder_is_not_set_again(llm: AnthropicLLM) -> None:
+    schedule = _fired()
+    reply = await _turn("מתי התזכורת לעדן?", "he", schedule, llm, history=FIRED)
+    assert len(schedule.reminders) == 1, (schedule.reminders, reply)
+    assert detect_language(reply) == "he", reply
 
 
 @pytest.mark.parametrize(
