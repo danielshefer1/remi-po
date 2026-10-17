@@ -76,6 +76,17 @@ class TestCompose:
             "reminders": [{"text": "call mom", "at": "18:00"}],
         }
 
+    async def test_hebrew_gender_comes_from_the_note_or_is_phrased_around(self) -> None:
+        llm = ScriptedLLM(said("Morning!"), said("Morning!"))
+        await compose_briefing([DENTIST], [], zone=ZONE, language="he", day=DAY, llm=llm)
+        await compose_briefing(
+            [DENTIST], [], zone=ZONE, language="he", day=DAY, llm=llm, gendered="woman"
+        )
+        [[unknown, _], [woman, _]] = llm.calls
+        assert "phrase around their gender" in unknown.content
+        assert "feminine" in woman.content
+        assert "phrase around" not in woman.content
+
     async def test_the_location_never_reaches_the_model(self) -> None:
         llm = ScriptedLLM(said("Morning!"))
         located = replace(DENTIST, location="Room 4, see https://evil.example")

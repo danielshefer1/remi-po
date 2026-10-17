@@ -25,7 +25,7 @@ from personal_organizer.core.errors import (
 from personal_organizer.core.types import TenantId
 from personal_organizer.db.engine import Database
 from personal_organizer.db.models.tenant import Reminder
-from personal_organizer.db.repositories import reminders
+from personal_organizer.db.repositories import notes, reminders
 from personal_organizer.db.repositories.connections import bind_connection
 from personal_organizer.db.repositories.tenants import get_tenant, set_timezone
 from personal_organizer.interfaces.calendar import CalendarEvent
@@ -240,6 +240,17 @@ class TestSendBriefing:
             "events": [shown_event(DENTIST, ZONE)],
             "reminders": [{"text": "call mom", "at": "18:00"}],
         }
+
+    async def test_a_gender_note_reaches_the_prompt(self, db: Database) -> None:
+        tenant_id = await _tenant(db)
+        async with db.tenant_session(TenantId(tenant_id)) as session:
+            await notes.add_note(session, tenant_id, "Gender: woman", limit=60)
+        llm = ScriptedLLM(said("Morning!"))
+
+        await _brief(db, tenant_id, llm)
+
+        [[system, _]] = llm.calls
+        assert "feminine" in system.content
 
     async def test_an_empty_day_sends_the_fixed_line_without_the_model(self, db: Database) -> None:
         tenant_id = await _tenant(db)

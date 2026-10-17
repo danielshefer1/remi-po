@@ -39,7 +39,7 @@ from personal_organizer.messaging.confirm import (
     decide,
 )
 from personal_organizer.messaging.language import detect_language
-from personal_organizer.messaging.notes import InMemoryNotes
+from personal_organizer.messaging.notes import InMemoryNotes, gender
 from personal_organizer.messaging.onboarding_text import t
 from personal_organizer.messaging.schedule import InMemorySchedule
 from personal_organizer.messaging.tenancy import TenantState
@@ -555,17 +555,18 @@ async def test_a_hebrew_secret_is_not_saved(llm: AnthropicLLM) -> None:
 
 
 @pytest.mark.parametrize(
-    ("text", "needle"),
+    ("text", "expected"),
     [
-        ("אני עייפה מאוד היום, מה יש לי מחר?", ("woman", "female", "feminine", "אישה")),
-        ("אני עסוק כל השבוע, מה יש לי מחר?", ("man", "male", "masculine", "גבר")),
+        ("אני עייפה מאוד היום, מה יש לי מחר?", "woman"),
+        ("אני עסוק כל השבוע, מה יש לי מחר?", "man"),
     ],
 )
 async def test_gender_from_how_they_write_is_saved(
-    text: str, needle: tuple[str, ...], llm: AnthropicLLM
+    text: str, expected: str, llm: AnthropicLLM
 ) -> None:
     reply, notes = await _remembered(text, "he", llm)
-    assert any(w in n.content.lower() for n in notes.notes for w in needle), (notes.notes, reply)
+    # The briefing reads it back with the same parser.
+    assert gender(notes.notes) == expected, (notes.notes, reply)
 
 
 async def test_no_gender_cue_saves_nothing(llm: AnthropicLLM) -> None:
