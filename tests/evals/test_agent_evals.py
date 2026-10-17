@@ -558,7 +558,7 @@ async def test_a_hebrew_secret_is_not_saved(llm: AnthropicLLM) -> None:
     ("text", "expected"),
     [
         ("אני עייפה מאוד היום, מה יש לי מחר?", "woman"),
-        ("אני עסוק כל השבוע, מה יש לי מחר?", "man"),
+        ("אני לחוץ נורא, מה יש לי מחר?", "man"),
     ],
 )
 async def test_gender_from_how_they_write_is_saved(
@@ -569,6 +569,8 @@ async def test_gender_from_how_they_write_is_saved(
     assert gender(notes.notes) == expected, (notes.notes, reply)
 
 
-async def test_no_gender_cue_saves_nothing(llm: AnthropicLLM) -> None:
-    reply, notes = await _remembered("מה יש לי מחר?", "he", llm)
+# "חולה" is written the same for a woman and a man.
+@pytest.mark.parametrize("text", ["מה יש לי מחר?", "אני חולה היום, מה יש לי?"])
+async def test_no_gender_cue_saves_nothing(text: str, llm: AnthropicLLM) -> None:
+    reply, notes = await _remembered(text, "he", llm)
     assert not notes.notes, (notes.notes, reply)
