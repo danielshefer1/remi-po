@@ -7,6 +7,8 @@ is ``po-chat``'s, which touches no database, and the tests'. Same shape as
 
 from __future__ import annotations
 
+import re
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Final, Protocol
 from uuid import UUID, uuid4
@@ -19,6 +21,16 @@ from personal_organizer.db.repositories.notes import Added
 
 #: The most notes one person keeps. The 61st asks which old one to forget.
 MAX_NOTES: Final = 60
+#: The note the agent saves when their Hebrew shows their gender.
+_GENDER: Final = re.compile(r"\s*gender:\s*(woman|man)\b", re.IGNORECASE)
+
+
+def gender(saved: Sequence[Note]) -> str | None:
+    """``"woman"`` or ``"man"`` from the first ``Gender:`` note (newest first), else ``None``."""
+    for note in saved:
+        if match := _GENDER.match(note.content):
+            return match.group(1).lower()
+    return None
 
 
 class Notes(Protocol):
@@ -74,4 +86,4 @@ class InMemoryNotes:
         return len(self.notes) < before
 
 
-__all__ = ["MAX_NOTES", "InMemoryNotes", "Notes", "TenantNotes"]
+__all__ = ["MAX_NOTES", "InMemoryNotes", "Notes", "TenantNotes", "gender"]

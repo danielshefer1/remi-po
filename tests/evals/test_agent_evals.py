@@ -13,7 +13,7 @@ to add an event must ``propose_event`` its local window, and create nothing with
 the confirm call must read a reply to that proposal as ADD, CANCEL or neither. A reminder or
 morning-message request must leave the in-memory schedule as asked (Iteration 05). A memory
 request must leave the in-memory notes as asked, and a stated lasting fact must be saved *and*
-mentioned (Iteration 06).
+mentioned (Iteration 06); their gender, read from how they write in Hebrew, is saved quietly.
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ from personal_organizer.messaging.confirm import (
     decide,
 )
 from personal_organizer.messaging.language import detect_language
-from personal_organizer.messaging.notes import InMemoryNotes
+from personal_organizer.messaging.notes import InMemoryNotes, gender
 from personal_organizer.messaging.onboarding_text import t
 from personal_organizer.messaging.schedule import InMemorySchedule
 from personal_organizer.messaging.tenancy import TenantState
@@ -551,4 +551,26 @@ async def test_secrets_are_not_saved_but_numbers_are(
 
 async def test_a_hebrew_secret_is_not_saved(llm: AnthropicLLM) -> None:
     reply, notes = await _remembered("תזכור שסיסמת הוויפיי היא dana2020", "he", llm)
+    assert not notes.notes, (notes.notes, reply)
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("אני עייפה מאוד היום, מה יש לי מחר?", "woman"),
+        ("אני לחוץ נורא, מה יש לי מחר?", "man"),
+    ],
+)
+async def test_gender_from_how_they_write_is_saved(
+    text: str, expected: str, llm: AnthropicLLM
+) -> None:
+    reply, notes = await _remembered(text, "he", llm)
+    # The briefing reads it back with the same parser.
+    assert gender(notes.notes) == expected, (notes.notes, reply)
+
+
+# "חולה" is written the same for a woman and a man.
+@pytest.mark.parametrize("text", ["מה יש לי מחר?", "אני חולה היום, מה יש לי?"])
+async def test_no_gender_cue_saves_nothing(text: str, llm: AnthropicLLM) -> None:
+    reply, notes = await _remembered(text, "he", llm)
     assert not notes.notes, (notes.notes, reply)
