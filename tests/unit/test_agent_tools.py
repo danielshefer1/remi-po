@@ -24,6 +24,7 @@ from personal_organizer.core.errors import (
 )
 from personal_organizer.db.models.tenant import CalendarConnection
 from personal_organizer.interfaces.calendar import CalendarEvent
+from personal_organizer.interfaces.llm import ToolCall
 from personal_organizer.messaging.agent import (
     MAX_WINDOW,
     NOT_CONNECTED,
@@ -519,3 +520,41 @@ class TestAddEvent:
         calendar = Creating()
         assert await self._add(calendar, account=None) == t("calendar_disconnected", "en")
         assert calendar.events == []
+
+
+NOW = datetime(2026, 10, 16, 9, 0, tzinfo=UTC)
+
+
+class _FakeGrants:
+    def __init__(self) -> None:
+        self.asked: list[tuple[str, str]] = []
+
+    async def let_see(self, name: str) -> str:
+        self.asked.append(("let_see", name))
+        return "ok"
+
+    async def stop(self, name: str) -> str:
+        self.asked.append(("stop", name))
+        return "ok"
+
+
+async def test_the_sharing_tools_reach_the_grants_port() -> None:
+    grants = _FakeGrants()
+    llm = ScriptedLLM(
+        said(
+            "",
+            ToolCall("c1", "let_see_details", {"name": "Rina"}),
+            ToolCall("c2", "stop_details", {"name": " Dana "}),
+        ),
+        said("Done."),
+    )
+    await respond(
+        [], "hi", TENANT, llm=llm, calendar=InMemoryCalendar(), account=None, now=NOW, grants=grants
+    )
+    assert grants.asked == [("let_see", "Rina"), ("stop", " Dana ")]
+
+
+async def test_without_grants_the_sharing_tools_say_so() -> None:
+    llm = ScriptedLLM(said("", ToolCall("c1", "let_see_details", {"name": "Rina"})), said("ok"))
+    await respond([], "hi", TENANT, llm=llm, calendar=InMemoryCalendar(), account=None, now=NOW)
+    assert llm.calls[1][-1].content == "error: sharing details is not available here"

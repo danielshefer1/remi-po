@@ -71,6 +71,7 @@ from personal_organizer.interfaces.channel import OutboundChannel
 from personal_organizer.interfaces.llm import LLMProvider, Message
 from personal_organizer.messaging.confirm import CONFIRM_ADD, confirm_prompt, decide
 from personal_organizer.messaging.conversation import converse
+from personal_organizer.messaging.groups.grants import Grants, TenantGrants
 from personal_organizer.messaging.inbox import InboxRow
 from personal_organizer.messaging.language import ENGLISH, HEBREW
 from personal_organizer.messaging.notes import Notes, TenantNotes
@@ -110,6 +111,8 @@ _SCHEDULE_TOOLS: Final = frozenset(
 )
 NO_NOTES: Final = "error: notes are not available here"
 _NOTES_TOOLS: Final = frozenset({"remember", "list_notes", "forget"})
+NO_GRANTS: Final = "error: sharing details is not available here"
+_GRANT_TOOLS: Final = frozenset({"let_see_details", "stop_details"})
 #: The most of the profile the prompt carries; the newest notes are kept.
 PROFILE_CHARS: Final = 3000
 
@@ -261,6 +264,28 @@ TOOLS: Final[tuple[Mapping[str, Any], ...]] = (
             "required": ["n"],
         },
     },
+    {
+        "name": "let_see_details",
+        "description": (
+            "Let one person they share a WhatsApp group with see what their calendar events "
+            "are. name is who they mean, worked out from their notes (Mom may be Rina). If it "
+            "errors, ask once which of the listed people they mean."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"name": {"type": "string", "description": "Who, by name"}},
+            "required": ["name"],
+        },
+    },
+    {
+        "name": "stop_details",
+        "description": "Take back let_see_details: that person no longer sees their event details.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"name": {"type": "string", "description": "Who, by name"}},
+            "required": ["name"],
+        },
+    },
 )
 
 _PROMPT: Final = """\
@@ -319,6 +344,10 @@ is vegetarian"), except their gender, which you save without mentioning it. Neve
 something is remembered unless remember returned ok, or forgotten unless forget returned ok. \
 Use what you \
 know naturally; don't recite it unless asked.
+- Sharing: they can let someone they share a group with see what their events are \
+(let_see_details), and take it back (stop_details). Use what you know about them to work out who \
+"Mom" is. Those details are only ever sent to that person privately, never in a group. Say who \
+you understood, and never say it is done unless the tool returned ok.
 - They can type or send voice notes. You hear a voice note as its transcript, so you do \
 understand voice notes; never say you can't listen to audio. A transcript can be misheard: if one \
 makes no sense from them, say in a few words what you heard and check what they meant, instead of \
@@ -690,6 +719,7 @@ async def respond(
     proposed: list[CalendarEvent] | None = None,
     schedule: Schedule | None = None,
     notes: Notes | None = None,
+    grants: Grants | None = None,
 ) -> str:
     """The model's answer to ``text``, or ``""`` when it has none worth sending.
 
@@ -699,7 +729,7 @@ async def respond(
     its confirm question; the caller stores it, or nothing confirms it. With ``schedule``
     ``None``, the reminder and morning-message tools answer that they are not available.
     With ``notes`` ``None``, the memory tools answer that they are not available and the profile
-    is empty.
+    is empty. With ``grants`` ``None``, the two sharing tools answer that they are not available.
     """
     # Every active tenant has a zone; UTC only keeps a broken row answerable.
     zone = ZoneInfo(tenant.timezone or "UTC")
@@ -713,6 +743,13 @@ async def respond(
 
     async def run_tool(name: str, arguments: Mapping[str, Any]) -> str:
         nonlocal disconnected
+        if name in _GRANT_TOOLS:
+            if grants is None:
+                return NO_GRANTS
+            who = arguments.get("name")
+            if not isinstance(who, str) or not who.strip():
+                return "error: name is required"
+            return await (grants.let_see if name == "let_see_details" else grants.stop)(who)
         if name in _NOTES_TOOLS:
             if notes is None:
                 return NO_NOTES
@@ -890,6 +927,7 @@ async def agent_turn(
                 proposed=proposed,
                 schedule=TenantSchedule(db, tenant.id, now),
                 notes=TenantNotes(db, tenant.id),
+                grants=TenantGrants(db, tenant.id),
             )
         except LLMUnavailableError, CalendarProviderUnavailableError:
             if not last_attempt:
@@ -931,6 +969,7 @@ __all__ = [
     "MAX_FIELD",
     "MAX_WINDOW",
     "NOT_CONNECTED",
+    "NO_GRANTS",
     "NO_NOTES",
     "PROFILE_CHARS",
     "TOOLS",
