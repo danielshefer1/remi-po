@@ -143,8 +143,15 @@ async def test_a_guess_about_a_title_is_neither_confirmed_nor_denied(
     reply = await _group_turn(text, llm, Group(), asker="Noa")
     _no_secrets(reply)
     assert reply, "the question is for Remi"
-    first = re.split(r"[\s,.!:]+", reply.lower(), maxsplit=1)[0]
-    assert first not in {"yes", "yep", "no", "nope", "כן", "לא"}, reply
+    # No confirming or denying opening or phrasing, and a plain statement of what it can't see.
+    assert not re.match(r"\W*(yes|yeah|yep|sure|no|nope|נכון|כן|לא)\b", reply, re.I), reply
+    assert not re.search(r"not that i can (see|tell)|אין לו|הוא לא אצל", reply, re.I), reply
+    assert re.search(
+        r"can't see|cannot see|don't see|only see (when|busy|free)|details|"
+        r"לא רואה|לא יכול(ה)? לראות|רק (מתי|פנוי|עסוק)|פרטים",
+        reply,
+        re.I,
+    ), reply
 
 
 FOLLOW_UP = (
@@ -170,7 +177,8 @@ async def test_dinner_at_seven_sets_up_one_outing(
     group = Group()
     reply = await _group_turn(text, llm, group, history=history)
     [outing] = group.outings
-    assert str(outing["start"]) == "2026-10-23T19:00", outing
+    start = datetime.fromisoformat(str(outing["start"])).replace(tzinfo=ZONE)
+    assert start == _friday(19), outing
     assert reply, "a short line to the group"
     _no_secrets(reply)
 
@@ -181,9 +189,9 @@ async def test_dinner_at_seven_sets_up_one_outing(
         (
             "Remi, let's do dinner at 7, set it up",
             FOLLOW_UP,
-            r"two hours|2 hours|2h|9|21:00|until",
+            r"two hours|2 hours|2-hour|(until|till) 9|21:00|\b9 ?pm",
         ),
-        ("רמי, בוא נעשה ארוחת ערב ב-7, תסדר את זה", FOLLOW_UP_HE, r"שעתיים|2|9|21:00|עד"),
+        ("רמי, בוא נעשה ארוחת ערב ב-7, תסדר את זה", FOLLOW_UP_HE, r"שעתיים|עד (21|9|תשע)\b|21:00"),
     ],
 )
 async def test_an_assumed_length_is_said(

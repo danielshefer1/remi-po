@@ -45,7 +45,7 @@ On the **gateway**:
 | `WHATSAPP_WEBHOOK` | `https://<api's public domain>/webhooks/gowa` | where messages go |
 | `WHATSAPP_WEBHOOK_SECRET` | the secret above | signs every webhook |
 | `WHATSAPP_WEBHOOK_EVENTS` | `message,message.ack` | nothing else is used |
-| `WHATSAPP_WEBHOOK_IGNORE_JIDS` | `@g.us,@newsletter,status@broadcast` | groups, channels, statuses |
+| `WHATSAPP_WEBHOOK_IGNORE_JIDS` | `@g.us,@newsletter,status@broadcast` | groups, channels, statuses; for groups use the Iteration 07 value (see "Iteration 07: groups") |
 | `WHATSAPP_AUTO_DOWNLOAD_MEDIA` | `false` | on by default: would keep every photo on its volume |
 | `MCP_ENABLED` | `false` | on by default: an MCP server that can send as the number |
 
@@ -187,7 +187,7 @@ never titles), posts outings as polls, and follows up on unanswered ones. Before
    - From the inbox rows' `raw`, confirm: `selected_options` carries the voted option's text;
      whether senders arrive as phone numbers or LIDs; the mention's shape.
    - Replace the provisional fixtures in `tests/fixtures/gowa/` with those payloads (numbers
-     replaced), run the tests, then resume the worker.
+     replaced), run the tests, then **resume the worker**.
 4. **Staging script, with the family group** (the Done-When). Add the bot's number to the group,
    then:
    - A member says "Remi, I'm okay sharing my calendar here". Remi replies and confirms.
