@@ -12,7 +12,8 @@ reliably, but not one with a character glued to it. ``all_set`` is sent by the
 the confirm outcomes (``event_*``, ``proposal_closed``) are the agent's
 (``messaging.agent``). ``reminder`` is sent by the reminder job, and the ``briefing_*``
 lines by the morning briefing (Iteration 05). ``voice_unheard`` answers a voice note that
-couldn't be heard (Iteration 06). ``{zone}`` is a ``timezones.zone_label``
+couldn't be heard (Iteration 06). The ``group_*`` and ``outing_*`` lines are the family
+groups' (Iteration 07). ``{zone}`` is a ``timezones.zone_label``
 ("Jerusalem"), never an IANA name. No line offers numbered options: people answer in words.
 """
 
@@ -68,6 +69,18 @@ _EN: Final = {
         "I couldn't reach your calendar this morning, so today's events aren't here. "
         "Ask me later and I'll check again."
     ),
+    "group_details": "Here's what's on, just for you:",
+    "group_shared_on": (
+        "Done, from now on I'll show here when you're busy. Only the times, never what it is."
+    ),
+    "group_shared_off": "Okay, I won't show your schedule here anymore.",
+    "outing_kept": (
+        "Got it. It's still in your calendar, though, since I can't take things out yet. "
+        "You can delete it there whenever you like."
+    ),
+    "outing_nudge_fallback": (
+        "Hey, just checking if you're coming: {summary}. No pressure, just let me know."
+    ),
 }
 
 _HE: Final = {
@@ -110,6 +123,16 @@ _HE: Final = {
     "briefing_calendar_unavailable": (
         "לא הצלחתי להגיע ליומן שלך הבוקר, אז האירועים של היום לא מופיעים כאן. "
         "אפשר לשאול אותי שוב בהמשך ואבדוק."
+    ),
+    "group_details": "הנה מה שיש, רק בשבילך:",
+    "group_shared_on": "סגור, מעכשיו אראה כאן מתי יש לך משהו. רק את השעות, אף פעם לא מה זה.",
+    "group_shared_off": "בסדר, מעכשיו לא אראה כאן מתי יש לך משהו.",
+    "outing_kept": (
+        "קיבלתי. רק שזה עדיין ביומן שלך, כי אני עוד לא יכול להוריד משם דברים. "
+        "אפשר למחוק את זה ביומן מתי שנוח."
+    ),
+    "outing_nudge_fallback": (
+        "היי, רציתי לבדוק אם מסתדר לך להגיע: {summary}. בלי לחץ, רק לעדכן אותי."
     ),
 }
 

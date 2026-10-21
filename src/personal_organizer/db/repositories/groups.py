@@ -54,13 +54,21 @@ async def add_context(
     sender_name: str | None,
     body: str,
     sent_at: datetime,
+    inbox_id: UUID | None = None,
 ) -> None:
     """Add one group message, then delete what falls out of the window: older than
-    ``CONTEXT_AGE`` before this message, or beyond the newest ``CONTEXT_LIMIT``."""
+    ``CONTEXT_AGE`` before this message, or beyond the newest ``CONTEXT_LIMIT``. A message
+    already added under its ``inbox_id`` is not added again."""
     await session.execute(
-        insert(GroupContext).values(
-            group_id=group_id, sender_name=sender_name, body=body, sent_at=sent_at
+        insert(GroupContext)
+        .values(
+            group_id=group_id,
+            sender_name=sender_name,
+            body=body,
+            sent_at=sent_at,
+            inbox_id=inbox_id,
         )
+        .on_conflict_do_nothing()
     )
     newest = (
         select(GroupContext.id)

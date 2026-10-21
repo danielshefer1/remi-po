@@ -41,13 +41,19 @@ class GroupContext(Base):
     """One recent group message, kept so "let's do dinner at 7, set it up" makes sense."""
 
     __tablename__ = "group_context"
-    __table_args__ = (Index(None, "group_id", "sent_at"),)
+    __table_args__ = (
+        Index(None, "group_id", "sent_at"),
+        # A retried job re-adds its message: kept once.
+        UniqueConstraint("inbox_id"),
+    )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, server_default=_GEN_UUID)
     group_id: Mapped[UUID] = mapped_column(ForeignKey("wa_groups.id", ondelete="CASCADE"))
     sender_name: Mapped[str | None] = mapped_column(Text)
     body: Mapped[str] = mapped_column(Text)
     sent_at: Mapped[datetime]
+    #: The inbound message this line is; ``None`` for Remi's own replies.
+    inbox_id: Mapped[UUID | None]
 
 
 class GroupPoll(Base):

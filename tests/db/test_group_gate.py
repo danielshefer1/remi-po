@@ -202,6 +202,39 @@ async def test_poll_vote_is_handed_on_but_not_kept_as_context(
     assert await _context(owner_conn) == []
 
 
+async def test_retried_turn_keeps_one_context_line(
+    db: Database, owner_conn: Any, settings: Settings
+) -> None:
+    """A turn that raised is retried with the same row: its line is not kept twice."""
+    await _member(db)
+
+    class FailsOnce(GroupSpy):
+        async def __call__(self, row: InboxRow, channel: OutboundChannel, turn: GroupTurn) -> None:
+            await super().__call__(row, channel, turn)
+            if len(self.calls) == 1:
+                raise RuntimeError("model down")
+
+    spy = FailsOnce()
+    inbox_id = await insert_inbox(owner_conn, phone=IL_PHONE, group_id=JID, sender_name="Dana")
+    channel = FakeOutbound(name="gowa")
+    for attempt in range(2):
+        call = handle_inbound(
+            inbox_id,
+            db=db,
+            channels={channel.name: channel}.__getitem__,
+            allowlist=frozenset(),
+            on_allowed=Spy(),
+            settings=settings,
+            on_group=spy,
+        )
+        if attempt == 0:
+            with pytest.raises(RuntimeError):
+                await call
+        else:
+            assert await call == "group"
+    assert await _context(owner_conn) == [("Dana", "hi")]
+
+
 async def test_group_message_not_in_personal_history(
     db: Database, owner_conn: Any, settings: Settings
 ) -> None:

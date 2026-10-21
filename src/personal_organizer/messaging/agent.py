@@ -402,6 +402,23 @@ def shown_event(event: CalendarEvent, zone: ZoneInfo) -> dict[str, object]:
     return shown
 
 
+def read_window(
+    arguments: Mapping[str, Any], zone: ZoneInfo
+) -> tuple[datetime, datetime, str | None] | str:
+    """A tool's local ``start`` and ``end`` in ``zone``, cut at :data:`MAX_WINDOW` with a note
+    saying so, or the error the model reads."""
+    start, end = _local(arguments.get("start"), zone), _local(arguments.get("end"), zone)
+    if start is None or end is None:
+        return f"error: {_TIME_FORMAT}"
+    if end <= start:
+        return "error: end must be after start"
+    if end - start <= MAX_WINDOW:
+        return start, end, None
+    end = start + MAX_WINDOW
+    note = f"only the first {MAX_WINDOW.days} days were read, up to {end:%Y-%m-%dT%H:%M}"
+    return start, end, note
+
+
 async def read_calendar(
     arguments: Mapping[str, Any],
     *,
@@ -411,15 +428,10 @@ async def read_calendar(
 ) -> str:
     """``list_events``: the tool result the model reads. Raises only
     :class:`CalendarProviderUnavailableError`, for the job to retry."""
-    start, end = _local(arguments.get("start"), zone), _local(arguments.get("end"), zone)
-    if start is None or end is None:
-        return f"error: {_TIME_FORMAT}"
-    if end <= start:
-        return "error: end must be after start"
-    note = None
-    if end - start > MAX_WINDOW:
-        end = start + MAX_WINDOW
-        note = f"only the first {MAX_WINDOW.days} days were read, up to {end:%Y-%m-%dT%H:%M}"
+    window = read_window(arguments, zone)
+    if isinstance(window, str):
+        return window
+    start, end, note = window
     if account is None:
         return NOT_CONNECTED
     try:
@@ -465,13 +477,18 @@ def check_event(arguments: Mapping[str, Any], zone: ZoneInfo) -> CalendarEvent |
     return CalendarEvent("", title.strip(), start, end, all_day, (location or "").strip() or None)
 
 
+def day_label(when: date, language: str) -> str:
+    """The weekday and the date, e.g. "Friday 2026-10-23"."""
+    names = _HE_WEEKDAYS if language == HEBREW else WEEKDAYS
+    return f"{names[when.weekday()]} {when.isoformat()}"
+
+
 def event_summary(event: CalendarEvent, zone: ZoneInfo, language: str) -> str:
     """The title, the local day and times, and the location, one per line."""
     start, end = event.start.astimezone(zone), event.end.astimezone(zone)
-    names = _HE_WEEKDAYS if language == HEBREW else WEEKDAYS
 
     def day(when: date) -> str:
-        return f"{names[when.weekday()]} {when.isoformat()}"
+        return day_label(when, language)
 
     if event.all_day:
         last = max(end.date() - timedelta(days=1), start.date())
@@ -923,11 +940,13 @@ __all__ = [
     "agent_prompt",
     "agent_turn",
     "check_event",
+    "day_label",
     "event_summary",
     "fit_message",
     "looks_secret",
     "profile_lines",
     "read_calendar",
+    "read_window",
     "respond",
     "shown_event",
     "week_of",

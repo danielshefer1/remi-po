@@ -106,6 +106,7 @@ async def handle_group(
                 sender_name=row.sender_name,
                 body=row.body or f"[{row.message_type}]",
                 sent_at=row.sent_at,
+                inbox_id=row.id,
             )
     addressed = await is_addressed(db, row, group_jid=jid, bot_phone=bot_phone, now=current)
     await on_group(

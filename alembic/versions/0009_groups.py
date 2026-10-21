@@ -151,8 +151,10 @@ def _create_group_tables() -> None:
         sa.Column("sender_name", sa.Text(), nullable=True),
         sa.Column("body", sa.Text(), nullable=False),
         sa.Column("sent_at", _TZ, nullable=False),
+        sa.Column("inbox_id", sa.Uuid(), nullable=True),
         sa.PrimaryKeyConstraint("id", name="pk_group_context"),
         _group_fk("group_context"),
+        sa.UniqueConstraint("inbox_id", name="uq_group_context_inbox_id"),
     )
     op.create_index("ix_group_context_group_id_sent_at", "group_context", ["group_id", "sent_at"])
     op.create_table(
