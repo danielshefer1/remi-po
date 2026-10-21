@@ -39,7 +39,14 @@ from personal_organizer.core.types import TenantId
 from personal_organizer.db import repositories
 from personal_organizer.db.engine import Database
 from personal_organizer.db.models.tenant import NETWORK_WHATSAPP
-from personal_organizer.db.repositories import connections, groups, links, messages, tenants
+from personal_organizer.db.repositories import (
+    connections,
+    groups,
+    links,
+    messages,
+    outings,
+    tenants,
+)
 from tests.db.tenant_tables import tenant_tables
 
 pytestmark = [
@@ -306,8 +313,11 @@ async def test_updates_through_every_repository_function_leave_b_alone(
     database: Database, app_conn: Any, seeded: Seeded
 ) -> None:
     before = await _snapshot(app_conn, seeded.b)
-    group = await _group(app_conn)
+    group, poll = await _group(app_conn), await _poll(app_conn)
     async with database.tenant_session(TenantId(seeded.a)) as session:
+        answer = await outings.answer_of(session, seeded.b, poll)
+        assert answer is None or answer.tenant_id == seeded.a
+        await outings.claim_event(session, seeded.b, poll, NOW)
         await tenants.set_timezone(session, seeded.b, "Europe/London")
         await tenants.set_onboarding_step(session, seeded.b, "connect")
         await tenants.activate(session, seeded.b)
@@ -344,6 +354,28 @@ async def test_inserts_for_b_under_a_are_refused(
     with pytest.raises(DBAPIError, match="row-level security"):
         async with database.tenant_session(TenantId(seeded.a)) as session:
             await write(session, seeded.b)
+    assert await _snapshot(app_conn, seeded.b) == before
+
+
+@pytest.mark.parametrize(
+    "write",
+    [
+        lambda s, b, poll: outings.set_answer(s, b, poll, answer="in", reason=None),
+        lambda s, b, poll: outings.mark_nudged(s, b, poll, NOW),
+    ],
+    ids=["set_answer", "mark_nudged"],
+)
+async def test_answers_for_b_under_a_are_refused(
+    database: Database,
+    app_conn: Any,
+    seeded: Seeded,
+    write: Callable[[Any, UUID, UUID], Awaitable[object]],
+) -> None:
+    before = await _snapshot(app_conn, seeded.b)
+    poll = await _poll(app_conn)
+    with pytest.raises(DBAPIError, match="row-level security"):
+        async with database.tenant_session(TenantId(seeded.a)) as session:
+            await write(session, seeded.b, poll)
     assert await _snapshot(app_conn, seeded.b) == before
 
 

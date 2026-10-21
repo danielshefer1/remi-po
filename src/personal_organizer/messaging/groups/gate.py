@@ -42,6 +42,8 @@ from personal_organizer.messaging.tenancy import resolve_sender
 GROUP_REPLY: Final = "group:reply"
 #: The ``message_type`` of a poll vote, as the GOWA parser stores it.
 POLL_VOTE: Final = "poll_vote"
+#: Remi's own lines in the group context, the only ones with no ``inbox_id``.
+REMI: Final = "Remi"
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,4 +122,4 @@ async def handle_group(
     return "group"
 
 
-__all__ = ["GROUP_REPLY", "GroupTurn", "OnGroup", "handle_group"]
+__all__ = ["GROUP_REPLY", "POLL_VOTE", "REMI", "GroupTurn", "OnGroup", "handle_group"]

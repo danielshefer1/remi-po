@@ -12,10 +12,14 @@ in the same windows, each in its owner's own session. Code writes that message, 
 model, and sends it to the asker's phone, not the group, before the group reply: until that
 reply is out a retry runs the turn again, and the details' own key keeps them to one send.
 
+**Outings** (:mod:`.outings`). A poll vote goes to ``handle_vote`` and never to the model. A
+message not for Remi goes to ``read_answer``, which costs a model call only when its sender
+has an open outing to answer. ``set_up_outing`` posts one poll per message, members only.
+
 **Silence.** The model may reply with nothing (the message was for someone else, or for a
-person named Rami): nothing is sent. Not-addressed messages cost no model call. An unavailable
-model or Composio raises for the job to retry, and the last attempt answers with the fixed
-``agent_unavailable`` line, as the agent does.
+person named Rami): nothing is sent. Not-addressed messages cost no model call beyond
+``read_answer``'s. An unavailable model or Composio raises for the job to retry, and the last
+attempt answers with the fixed ``agent_unavailable`` line, as the agent does.
 """
 
 from __future__ import annotations
@@ -55,7 +59,8 @@ from personal_organizer.interfaces.llm import LLMProvider, Message
 from personal_organizer.messaging.agent import day_label, fit_message, read_window, shown_event
 from personal_organizer.messaging.conversation import converse
 from personal_organizer.messaging.groups.addressing import group_key
-from personal_organizer.messaging.groups.gate import GROUP_REPLY, GroupTurn
+from personal_organizer.messaging.groups.gate import GROUP_REPLY, POLL_VOTE, REMI, GroupTurn
+from personal_organizer.messaging.groups.outings import handle_vote, read_answer, set_up_outing
 from personal_organizer.messaging.groups.prompt import group_prompt
 from personal_organizer.messaging.inbox import InboxRow
 from personal_organizer.messaging.language import detect_language
@@ -67,8 +72,6 @@ log = structlog.get_logger(__name__)
 
 #: The outbox kind of the private message with granted details.
 DETAILS_KIND: Final = "group:details"
-#: Remi's own lines in the group context.
-REMI: Final = "Remi"
 #: Anyone with no name: a context line, or a member with no ``display_name``.
 SOMEONE: Final = "Someone"
 #: Where a group turn's times are when neither the asker nor any sharer has a zone.
@@ -109,6 +112,28 @@ GROUP_TOOLS: Final[tuple[Mapping[str, Any], ...]] = (
                 "on": {"type": "boolean", "description": "true to share, false to stop"}
             },
             "required": ["on"],
+        },
+    },
+    {
+        "name": "set_up_outing",
+        "description": (
+            "Post a poll in this group for a plan the group agreed on, when someone asks you to "
+            "set it up. Everyone who votes in gets it in their own calendar. The poll shows the "
+            "title, day, time and place, so give a short title in the group's words. start and "
+            "end are local times, ISO 8601 with no offset, e.g. 2026-10-23T19:00; with no end "
+            "given, make it two hours. For an all-day plan, set all_day and give dates, end "
+            "being its last day. One per message."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "What it is, e.g. 'Family dinner'"},
+                "start": {"type": "string", "description": "Local start, e.g. 2026-10-23T19:00"},
+                "end": {"type": "string", "description": "Local end, e.g. 2026-10-23T21:00"},
+                "location": {"type": "string", "description": "Where, only if they said"},
+                "all_day": {"type": "boolean", "description": "True for an all-day plan"},
+            },
+            "required": ["title", "start", "end"],
         },
     },
     {
@@ -276,8 +301,20 @@ async def group_turn(
     calendar: CalendarProvider,
     last_attempt: bool = False,
 ) -> None:
-    """Answer ``row`` in the group if it was for Remi; send any granted details privately."""
+    """Count a vote; read an answer said to the group; or answer ``row`` in the group if it
+    was for Remi, sending any granted details privately."""
+    if row.message_type == POLL_VOTE:
+        await handle_vote(row, channel, turn, db=db, calendar=calendar)
+        return
     if not turn.addressed:
+        try:
+            await read_answer(row, turn, db=db, llm=llm)
+        except LLMUnavailableError:
+            if not last_attempt:
+                raise
+            log.warning("group.answer_unread", reason="unavailable")
+        except LLMRejectedError:
+            log.warning("group.answer_unread", reason="rejected")
         return
     if await already_sent(db, row.id, GROUP_REPLY):
         log.info("group.already_sent", inbox_id=str(row.id))
@@ -301,6 +338,7 @@ async def group_turn(
     )
     windows: list[tuple[datetime, datetime]] = []
     shared: list[bool] = []
+    posted: list[bool] = []
 
     async def run_tool(name: str, arguments: Mapping[str, Any]) -> str:
         if name == "who_is_free":
@@ -313,10 +351,19 @@ async def group_turn(
             if note:
                 result["note"] = note
             return json.dumps(result, ensure_ascii=False)
-        if name not in {"share_my_calendar", "call_me"}:
+        if name not in {"share_my_calendar", "call_me", "set_up_outing"}:
             return "error: unknown tool"
         if turn.tenant_id is None:
             return NOT_A_MEMBER
+        if name == "set_up_outing":
+            if posted:
+                return "error: one outing per message; this message's poll is already posted"
+            outcome = await set_up_outing(
+                arguments, db=db, channel=channel, row=row, turn=turn, zone=zone, language=language
+            )
+            if outcome.startswith("ok"):
+                posted.append(True)
+            return outcome
         tenant = TenantId(turn.tenant_id)
         if name == "share_my_calendar":
             on = arguments.get("on")
