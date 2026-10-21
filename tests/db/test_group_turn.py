@@ -17,7 +17,12 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from personal_organizer.core.errors import CalendarProviderUnavailableError, TransientChannelError
+from personal_organizer.core.errors import (
+    CalendarProviderUnavailableError,
+    LLMRejectedError,
+    LLMUnavailableError,
+    TransientChannelError,
+)
 from personal_organizer.core.types import TenantId
 from personal_organizer.db.engine import Database
 from personal_organizer.db.repositories import groups
@@ -203,6 +208,41 @@ async def test_share_my_calendar_sets_sharing(
     async with db.system_session() as session:
         assert await groups.group_tenants(session, group) == [(dana, True)]
     assert [message.body for message in channel.sent] == [t("group_shared_on", "en")]
+
+
+@pytest.mark.parametrize(
+    ("after", "last_attempt"),
+    [
+        (LLMRejectedError(400), False),
+        (LLMUnavailableError("down"), True),
+        (said("see http://x"), False),
+    ],
+    ids=["rejected", "unavailable", "link"],
+)
+async def test_sharing_is_confirmed_even_when_the_reply_falls_back(
+    db: Database,
+    owner_conn: Any,
+    onboarding_settings: Settings,
+    group: UUID,
+    after: Any,
+    last_attempt: bool,
+) -> None:
+    """Sharing was saved before the model failed: they still hear that it was."""
+    await _member(db, group, DANA, "Dana", "ca_dana", sharing=False)
+    llm = ScriptedLLM(said("", call("share_my_calendar", on=True)), after)
+
+    channel, _ = await _say(
+        db,
+        owner_conn,
+        onboarding_settings,
+        llm,
+        body="Remi, you can share my calendar here",
+        last_attempt=last_attempt,
+    )
+
+    assert [message.body for message in channel.sent] == [
+        f"{t('agent_unavailable', 'en')}\n\n{t('group_shared_on', 'en')}"
+    ]
 
 
 async def test_stranger_cannot_share(

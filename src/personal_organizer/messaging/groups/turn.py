@@ -392,9 +392,6 @@ async def group_turn(
             if "http" in reply.lower():
                 log.info("group.reply_dropped")
                 reply = t("agent_unavailable", language)
-            elif shared:
-                confirmed = t("group_shared_on" if shared[-1] else "group_shared_off", language)
-                reply = f"{reply}\n\n{confirmed}".strip()
         except LLMUnavailableError, CalendarProviderUnavailableError:
             if not last_attempt:
                 raise
@@ -403,6 +400,10 @@ async def group_turn(
         except LLMRejectedError:
             log.warning("group.fallback", reason="rejected")
             reply = t("agent_unavailable", language)
+    # Sharing is saved by now, whatever the model did after: they hear that it was.
+    if shared:
+        confirmed = t("group_shared_on" if shared[-1] else "group_shared_off", language)
+        reply = f"{reply}\n\n{confirmed}".strip()
     # Details first: a retry runs the turn again until the group reply is out, and the
     # details' own key keeps them to one send.
     if windows and turn.tenant_id is not None:

@@ -272,6 +272,9 @@ class Granted:
         self.stopped.append(name)
         return f"ok: {name} no longer sees your event details"
 
+    async def stop_sharing(self) -> str:
+        return "ok: stopped sharing in 1 group"
+
 
 @pytest.mark.parametrize(
     ("text", "language"),

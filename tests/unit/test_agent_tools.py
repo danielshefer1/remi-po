@@ -537,6 +537,25 @@ class _FakeGrants:
         self.asked.append(("stop", name))
         return "ok"
 
+    async def stop_sharing(self) -> str:
+        self.asked.append(("stop_sharing", ""))
+        return "ok"
+
+
+async def test_stop_sharing_calendar_reaches_the_grants_port() -> None:
+    grants = _FakeGrants()
+    llm = ScriptedLLM(said("", ToolCall("c1", "stop_sharing_calendar", {})), said("Done."))
+    await respond(
+        [], "hi", TENANT, llm=llm, calendar=InMemoryCalendar(), account=None, now=NOW, grants=grants
+    )
+    assert grants.asked == [("stop_sharing", "")]
+
+
+async def test_without_grants_stop_sharing_calendar_says_so() -> None:
+    llm = ScriptedLLM(said("", ToolCall("c1", "stop_sharing_calendar", {})), said("ok"))
+    await respond([], "hi", TENANT, llm=llm, calendar=InMemoryCalendar(), account=None, now=NOW)
+    assert llm.calls[1][-1].content == "error: sharing details is not available here"
+
 
 async def test_the_sharing_tools_reach_the_grants_port() -> None:
     grants = _FakeGrants()

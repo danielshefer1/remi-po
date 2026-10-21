@@ -13,6 +13,8 @@ from typing import Any
 import pytest
 
 from personal_organizer.interfaces.channel import DeliveryStatus, SenderRef
+from personal_organizer.messaging.groups import gate
+from personal_organizer.providers.channel.gowa import parser
 from personal_organizer.providers.channel.gowa.parser import jid_user, parse_webhook, phone_jid
 from tests.fixtures.gowa_payloads import load
 from tests.fixtures.payloads import SENDER_PHONE
@@ -248,3 +250,8 @@ def _garbage_variants() -> list[Any]:
 def test_garbage_at_any_level_never_raises(payload: Any) -> None:
     batch = _parse(payload)
     assert len(batch.messages) + len(batch.updates) + batch.skipped >= 1
+
+
+def test_the_gate_matches_the_parsers_poll_vote() -> None:
+    """messaging may not import providers, so the gate keeps its own copy: kept equal here."""
+    assert gate.POLL_VOTE == parser.POLL_VOTE

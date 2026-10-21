@@ -119,7 +119,7 @@ _SCHEDULE_TOOLS: Final = frozenset(
 NO_NOTES: Final = "error: notes are not available here"
 _NOTES_TOOLS: Final = frozenset({"remember", "list_notes", "forget"})
 NO_GRANTS: Final = "error: sharing details is not available here"
-_GRANT_TOOLS: Final = frozenset({"let_see_details", "stop_details"})
+_GRANT_TOOLS: Final = frozenset({"let_see_details", "stop_details", "stop_sharing_calendar"})
 NO_OUTINGS: Final = "error: outings are not available here"
 #: The most of the profile the prompt carries; the newest notes are kept.
 PROFILE_CHARS: Final = 3000
@@ -295,6 +295,14 @@ TOOLS: Final[tuple[Mapping[str, Any], ...]] = (
         },
     },
     {
+        "name": "stop_sharing_calendar",
+        "description": (
+            "Stop showing when they're busy or free in every WhatsApp group they okayed it in, "
+            "including groups they have left. It can't pick one group."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
         "name": "answer_outing",
         "description": (
             "Record whether they're coming to one of the outings waiting for their answer, by "
@@ -374,7 +382,10 @@ know naturally; don't recite it unless asked.
 - Sharing: they can let someone they share a group with see what their events are \
 (let_see_details), and take it back (stop_details). Use what you know about them to work out who \
 "Mom" is. Those details are only ever sent to that person privately, never in a group. Say who \
-you understood, and never say it is done unless the tool returned ok.{outings}
+you understood, and never say it is done unless the tool returned ok. If they want their groups \
+to stop seeing when they're busy or free (they left a group, say), call stop_sharing_calendar: \
+it stops it in all their groups at once, so tell them that, and that they can okay it again \
+from inside any group.{outings}
 - They can type or send voice notes. You hear a voice note as its transcript, so you do \
 understand voice notes; never say you can't listen to audio. A transcript can be misheard: if one \
 makes no sense from them, say in a few words what you heard and check what they meant, instead of \
@@ -798,7 +809,7 @@ async def respond(
     its confirm question; the caller stores it, or nothing confirms it. With ``schedule``
     ``None``, the reminder and morning-message tools answer that they are not available.
     With ``notes`` ``None``, the memory tools answer that they are not available and the profile
-    is empty. With ``grants`` ``None``, the two sharing tools answer that they are not available.
+    is empty. With ``grants`` ``None``, the three sharing tools answer that they are not available.
     With ``outings`` ``None``, no outings are listed and ``answer_outing`` answers the same.
     """
     # Every active tenant has a zone; UTC only keeps a broken row answerable.
@@ -822,6 +833,8 @@ async def respond(
         if name in _GRANT_TOOLS:
             if grants is None:
                 return NO_GRANTS
+            if name == "stop_sharing_calendar":
+                return await grants.stop_sharing()
             who = arguments.get("name")
             if not isinstance(who, str) or not who.strip():
                 return "error: name is required"

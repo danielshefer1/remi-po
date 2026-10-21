@@ -28,6 +28,7 @@ import structlog
 from personal_organizer.core.errors import LLMRejectedError, LLMUnavailableError
 from personal_organizer.core.types import TenantId
 from personal_organizer.db.engine import Database
+from personal_organizer.db.repositories.groups import sharing_in
 from personal_organizer.db.repositories.messages import record_outbound
 from personal_organizer.db.repositories.notes import list_notes
 from personal_organizer.db.repositories.outings import answer_of, get_poll, mark_nudged
@@ -113,7 +114,8 @@ async def send_nudge(
     """Send today's follow-up on the outing at most once.
 
     Returns the outbox status, or ``None`` when nothing was sent: the poll is gone, closed or
-    started, they answered, they had one in the last 20 hours, or there is nowhere to send.
+    started, they no longer share in its group, they answered, they had one in the last 20
+    hours, or there is nowhere to send.
     Re-raises ``TransientChannelError``, and, before the last attempt, ``LLMUnavailableError``,
     for the task's retry strategy.
     """
@@ -124,7 +126,9 @@ async def send_nudge(
     async with db.tenant_session(TenantId(tenant_id)) as session:
         given = await answer_of(session, tenant_id, poll_id)
         gendered = gender(await list_notes(session, tenant_id))
-    if not unanswered(given):
+        # The scan saw them sharing; they may have stopped before this job ran.
+        sharing = poll.group_id in await sharing_in(session, tenant_id)
+    if not sharing or not unanswered(given):
         return None
     nudged_at = given.nudged_at if given is not None else None
     if nudged_at is not None and nudged_at > now - _SPACING:

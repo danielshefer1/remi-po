@@ -247,6 +247,25 @@ async def test_cleared_vote_clears_the_answer(db: Database, family: Group, group
     assert family.calendar.created_in == []
 
 
+async def test_cleared_vote_keeps_a_reason_given_in_chat(
+    db: Database, owner_conn: Any, family: Group, group: UUID
+) -> None:
+    await _member(db, group, DANA, "Dana", "ca_dana")
+    noa = await _member(db, group, NOA, "Noa", "ca_noa")
+    await family.set_up()
+    await family.say(ScriptedLLM(said("OUT 1: working")), phone=NOA, body="I'm working Friday")
+    await family.vote(NOA, "Can't make it")
+
+    await family.vote(NOA, None)
+
+    answer = await _answer(db, noa)
+    assert answer is not None
+    assert (answer.answer, answer.reason) == (None, "working")
+    poll = await owner_conn.fetchval("SELECT id FROM group_polls")
+    async with db.system_session() as session:
+        assert (poll, noa) not in await groups.due_nudges(session, NOW + timedelta(hours=3))
+
+
 async def test_vote_after_the_outing_is_ignored(
     db: Database, owner_conn: Any, family: Group, group: UUID
 ) -> None:

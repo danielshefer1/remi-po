@@ -165,8 +165,8 @@ async def handle_vote(
     tenant_id = TenantId(turn.tenant_id)
     async with db.tenant_session(tenant_id) as session:
         earlier = await answer_of(session, tenant_id, poll.id)
-        # A reason said in the chat stays with a vote "out".
-        reason = earlier.reason if earlier is not None and answer == "out" else None
+        # A reason said in the chat stays with a vote "out", and with a cleared vote.
+        reason = earlier.reason if earlier is not None and answer != "in" else None
         await set_answer(session, tenant_id, poll.id, answer=answer, reason=reason)
         tenant = await get_tenant(session, tenant_id)
         account = await active_connection(session, tenant_id)

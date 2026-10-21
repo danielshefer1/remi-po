@@ -150,6 +150,22 @@ async def test_nudge_skipped_after_answer(db: Database, owner_conn: Any) -> None
     assert gowa.sent == []
 
 
+async def test_nudge_skipped_once_they_stop_sharing(db: Database, owner_conn: Any) -> None:
+    """Due when the tick scanned, but they stopped sharing before the job ran."""
+    poll, noa = await _outing(db, owner_conn)
+    async with db.tenant_session(TenantId(noa)) as session:
+        [group] = await groups.groups_of(session, noa)
+        await groups.set_sharing(session, noa, group, False)
+    gowa = FakeOutbound(name="gowa")
+
+    status = await send_nudge(
+        poll, noa, db=db, channels=resolver(gowa), llm=NoLLM(), now=NOW, last_attempt=False
+    )
+
+    assert status is None
+    assert gowa.sent == []
+
+
 async def test_nudge_skipped_after_event_start(db: Database, owner_conn: Any) -> None:
     poll, noa = await _outing(db, owner_conn)
     gowa = FakeOutbound(name="gowa")

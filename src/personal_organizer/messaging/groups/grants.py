@@ -1,6 +1,6 @@
 """Letting someone you share a group with see your event details (Iteration 07).
 
-The agent's two tools go through the ``Grants`` port, like ``Notes``. ``TenantGrants`` is the
+The agent's three tools go through the ``Grants`` port, like ``Notes``. ``TenantGrants`` is the
 worker's. The details themselves are only ever sent to that person privately.
 """
 
@@ -18,6 +18,7 @@ from personal_organizer.db.repositories.tenants import get_tenant
 class Grants(Protocol):
     async def let_see(self, name: str) -> str: ...
     async def stop(self, name: str) -> str: ...
+    async def stop_sharing(self) -> str: ...
 
 
 async def resolve_peer(db: Database, owner: UUID, name: str) -> tuple[UUID, str] | list[str]:
@@ -72,6 +73,17 @@ class TenantGrants:
         if changed:
             return f"ok: {who} can no longer see your event details"
         return f"ok: {who} couldn't see your event details anyway"
+
+    async def stop_sharing(self) -> str:
+        """Stop showing busy/free in every group they okayed it in: groups have no name to
+        pick one by, and one they left can't be reached from inside."""
+        async with self._db.tenant_session(TenantId(self._tenant_id)) as session:
+            shared = await groups.sharing_in(session, self._tenant_id)
+            for group in shared:
+                await groups.set_sharing(session, self._tenant_id, group, False)
+        if not shared:
+            return "ok: they weren't sharing in any group"
+        return f"ok: stopped sharing in {len(shared)} group{'s' if len(shared) > 1 else ''}"
 
 
 __all__ = ["Grants", "TenantGrants", "resolve_peer"]

@@ -101,3 +101,20 @@ async def test_let_see_details_then_stop(db: Database) -> None:
         "ok: Rina Cohen couldn't see your event details anyway"
     )
     assert (await grants.let_see("Yossi")).startswith("error: who do they mean?")
+
+
+async def test_stop_sharing_turns_it_off_in_every_group_they_share_in(db: Database) -> None:
+    """From the private chat, e.g. after leaving a group: only their own rows change."""
+    a, b, _, _ = await _family(db)
+    g1, g3 = await _group(db, 1), await _group(db, 3)
+    for tenant, group in ((a, g1), (a, g3), (b, g1)):
+        async with db.tenant_session(TenantId(tenant)) as session:
+            await groups.set_sharing(session, tenant, group, True)
+
+    assert await TenantGrants(db, a).stop_sharing() == "ok: stopped sharing in 2 groups"
+
+    async with db.tenant_session(TenantId(a)) as session:
+        assert await groups.sharing_in(session, a) == []
+    async with db.tenant_session(TenantId(b)) as session:
+        assert await groups.sharing_in(session, b) == [g1]
+    assert await TenantGrants(db, a).stop_sharing() == "ok: they weren't sharing in any group"
