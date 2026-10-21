@@ -3,9 +3,11 @@
 Three kinds of call, each in its own session:
 
 * The group and its context (:func:`ensure_group`, :func:`mark_served`, :func:`add_context`,
-  :func:`recent_context`) are not tenant data: ``Database.system_session()``.
+  :func:`sweep_context`, :func:`recent_context`) are not tenant data:
+  ``Database.system_session()``.
 * A person's own membership, grants and name (:func:`touch_member`, :func:`set_sharing`,
-  :func:`groups_of`, :func:`grant`, :func:`revoke`, :func:`set_display_name`): their
+  :func:`groups_of`, :func:`sharing_in`, :func:`grant`, :func:`revoke`,
+  :func:`set_display_name`): their
   ``Database.tenant_session(tenant_id)``. A grant row belongs to its owner.
 * Reading across people (:func:`group_tenants`, :func:`peers_of`, :func:`detail_grantors`,
   :func:`due_nudges`): ``system_session``, through the ``SECURITY DEFINER`` functions of
@@ -84,6 +86,12 @@ async def add_context(
     )
 
 
+async def sweep_context(session: AsyncSession, now: datetime) -> None:
+    """Delete every group's messages older than ``CONTEXT_AGE``: a quiet group gets no new
+    message to trim it."""
+    await session.execute(delete(GroupContext).where(GroupContext.sent_at < now - CONTEXT_AGE))
+
+
 async def recent_context(session: AsyncSession, group_id: UUID) -> list[GroupContext]:
     """The group's kept messages, oldest first."""
     stmt = (
@@ -119,6 +127,12 @@ async def set_sharing(
 async def groups_of(session: AsyncSession, tenant_id: UUID) -> list[UUID]:
     """The groups the tenant is a member of."""
     stmt = scoped(select(GroupMember.group_id), GroupMember, tenant_id)
+    return list(await session.scalars(stmt))
+
+
+async def sharing_in(session: AsyncSession, tenant_id: UUID) -> list[UUID]:
+    """The groups the tenant okayed sharing in."""
+    stmt = scoped(select(GroupMember.group_id), GroupMember, tenant_id).where(GroupMember.sharing)
     return list(await session.scalars(stmt))
 
 
@@ -195,5 +209,7 @@ __all__ = [
     "revoke",
     "set_display_name",
     "set_sharing",
+    "sharing_in",
+    "sweep_context",
     "touch_member",
 ]

@@ -9,8 +9,12 @@ two never run at once, and only when no job with that lock is waiting or running
 would make retrying the first (its worker died) fail, leaving it ``doing`` and the second stuck
 behind its lock. Two near-simultaneous ticks can still both queue one; the bodies are safe to
 run twice, and the send itself is keyed (ADR 0003), so a re-run sends nothing new. Kwargs are
-ids only (ADR 0001). A follow-up's lock takes the UTC day, as the scan gives no time zone; its
-send is keyed by the person's own day.
+ids only (ADR 0001). A follow-up's lock is ``nudge:<poll_id>:<tenant_id>``, with no day, so
+two never run around UTC midnight; its send is keyed by the person's own day, and the job's
+20-hour spacing makes a later re-run a no-op.
+
+The tick also deletes group chatter older than ``CONTEXT_AGE``: a quiet group gets no new
+message to trim it.
 """
 
 from __future__ import annotations
@@ -23,10 +27,10 @@ import procrastinate
 import structlog
 
 from personal_organizer.db.engine import get_database
-from personal_organizer.db.repositories.groups import due_nudges
+from personal_organizer.db.repositories.groups import due_nudges, sweep_context
 from personal_organizer.db.repositories.reminders import due_briefings, due_reminders
 from personal_organizer.messaging.briefing import briefing_key, send_briefing
-from personal_organizer.messaging.groups.nudge import nudge_key, send_nudge
+from personal_organizer.messaging.groups.nudge import send_nudge
 from personal_organizer.messaging.reminders import reminder_key, send_reminder
 from personal_organizer.messaging.runtime import get_outbound_channel
 from personal_organizer.settings import get_settings
@@ -58,11 +62,11 @@ async def _defer(app: procrastinate.App, task: str, key: str, **kwargs: str) -> 
 async def run_tick(
     app: procrastinate.App, now: datetime, *, briefings: bool
 ) -> tuple[int, int, int]:
-    """Defer what is due at ``now``. Returns how many reminder, briefing and follow-up jobs
-    were new.
+    """Defer what is due at ``now``, and delete group chatter past its age. Returns how many
+    reminder, briefing and follow-up jobs were new.
 
-    Reminders are scanned and deferred first, on their own, so a failing briefing scan never
-    holds them back. Follow-ups come last: they need no calendar, so not ``briefings``.
+    Reminders, then follow-ups, are scanned and deferred first, each on its own, so a failing
+    briefing scan never holds them back. Follow-ups need no calendar, so not ``briefings``.
     """
     async with get_database().system_session() as session:
         reminders = await due_reminders(session, now)
@@ -75,6 +79,19 @@ async def run_tick(
             reminder_id=str(reminder_id),
             tenant_id=str(tenant_id),
         )
+    async with get_database().system_session() as session:
+        nudges = await due_nudges(session, now)
+    sent_nudges = 0
+    for poll_id, tenant_id in nudges:
+        sent_nudges += await _defer(
+            app,
+            NUDGE_TASK,
+            f"nudge:{poll_id}:{tenant_id}",
+            poll_id=str(poll_id),
+            tenant_id=str(tenant_id),
+        )
+    async with get_database().system_session() as session:
+        await sweep_context(session, now)
     days = []
     if briefings:
         async with get_database().system_session() as session:
@@ -87,17 +104,6 @@ async def run_tick(
             briefing_key(tenant_id, day),
             tenant_id=str(tenant_id),
             day=day.isoformat(),
-        )
-    async with get_database().system_session() as session:
-        nudges = await due_nudges(session, now)
-    sent_nudges = 0
-    for poll_id, tenant_id in nudges:
-        sent_nudges += await _defer(
-            app,
-            NUDGE_TASK,
-            nudge_key(poll_id, tenant_id, now.date()),
-            poll_id=str(poll_id),
-            tenant_id=str(tenant_id),
         )
     if sent_reminders or sent_briefings or sent_nudges:
         log.info(
