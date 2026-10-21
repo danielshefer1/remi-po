@@ -58,6 +58,8 @@ pytestmark = [
 PHONES = {"a": "+972500000001", "b": "+972500000002", "x": "+972500000009"}
 CHANNELS = {"a": "gowa", "b": "whatsapp", "x": "gowa"}
 NOW = datetime(2026, 10, 8, 9, 0, tzinfo=UTC)
+#: A third tenant, only ever a viewer: A and B each grant it their details.
+X = UUID("00000000-0000-0000-0000-0000000000a9")
 
 Seed = Callable[[Any, UUID, str], Awaitable[None]]
 
@@ -172,9 +174,9 @@ async def _seed_group_member(conn: Any, tenant: UUID, tag: str) -> None:
 
 
 async def _seed_detail_grant(conn: Any, tenant: UUID, tag: str) -> None:
-    # To itself: the only other tenant that surely exists when A is seeded.
+    # To X, the viewer the ``seeded`` fixture creates first: a grant made to someone else.
     await conn.execute(
-        "INSERT INTO detail_grants (tenant_id, viewer_tenant_id) VALUES ($1, $1)", tenant
+        "INSERT INTO detail_grants (tenant_id, viewer_tenant_id) VALUES ($1, $2)", tenant, X
     )
 
 
@@ -223,6 +225,8 @@ class Seeded:
 async def seeded(app_conn: Any) -> Seeded:
     assert set(SEEDS) == set(TABLES), "every tenant table needs a seed factory"
     pair = Seeded(a=uuid4(), b=uuid4())
+    async with as_tenant(app_conn, X):
+        await _seed_tenant(app_conn, X, "x")
     for tenant, tag in ((pair.a, "a"), (pair.b, "b")):
         async with as_tenant(app_conn, tenant):
             for seed in SEEDS.values():
@@ -286,6 +290,19 @@ async def test_a_sees_only_its_own_rows(app_conn: Any, seeded: Seeded, table: st
     assert [row["owner"] for row in owners] == [seeded.a]
 
 
+async def test_a_viewer_cannot_read_the_grants_made_to_them(app_conn: Any, seeded: Seeded) -> None:
+    """X is the viewer of A's and B's grants; a grant belongs to its owner alone."""
+    async with as_tenant(app_conn, X):
+        assert await app_conn.fetchval("SELECT count(*) FROM detail_grants") == 0
+    async with as_tenant(app_conn, seeded.a):
+        assert (
+            await app_conn.fetchval(
+                "SELECT count(*) FROM detail_grants WHERE viewer_tenant_id = $1", X
+            )
+            == 1
+        )
+
+
 async def test_the_app_filter_is_really_off_in_rls_only_mode(
     database: Database, seeded: Seeded, mode: str
 ) -> None:
@@ -324,7 +341,8 @@ async def test_updates_through_every_repository_function_leave_b_alone(
         await links.consume_link(session, seeded.b, nonce="nonce-b", now=NOW)
         await groups.set_sharing(session, seeded.b, group, False)
         await groups.set_display_name(session, seeded.b, "Mallory")
-        assert await groups.revoke(session, seeded.b, seeded.b) is False
+        # B's real grant to X. In rls-only mode this removes A's own grant to X; never B's.
+        await groups.revoke(session, seeded.b, X)
     assert await _snapshot(app_conn, seeded.b) == before
 
 

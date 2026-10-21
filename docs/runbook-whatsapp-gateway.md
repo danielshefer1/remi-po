@@ -179,8 +179,13 @@ never titles), posts outings as polls, and follows up on unanswered ones. Before
    channels and statuses: `WHATSAPP_WEBHOOK_IGNORE_JIDS=@newsletter,status@broadcast`. Already
    changed on staging on 2026-10-21; set it on any other gateway, then redeploy it.
 2. **Migration first.** Run `alembic upgrade head` (0009_groups) *before* deploying the api and
-   the worker, or the first group message fails on missing tables.
-3. **Day-1 payload checks (Task 0).** The group fixtures are provisional until this is done.
+   the worker. Without it the api's inbox insert, which now writes `group_id` and
+   `sender_name`, fails for **every** inbound message, private ones included, not only groups:
+   nothing reaches Remi until the migration runs.
+3. **Worker variables.** On `worker`, set `ONBOARDING__BOT_PHONE` to the bot's number (how
+   Remi tells it was @-tagged in a group) and `AGENT__ENABLED=true` (with its key): without
+   the agent, group messages are dropped unanswered and follow-ups go out as the fixed line.
+4. **Day-1 payload checks (Task 0).** The group fixtures are provisional until this is done.
    - Pause the worker, so inbox rows keep their `raw` body.
    - In the family group, send: a plain text, a message that mentions the bot, a reply to one of
      the bot's messages, a vote on a group poll, and a vote on a poll in a direct chat.
@@ -188,7 +193,7 @@ never titles), posts outings as polls, and follows up on unanswered ones. Before
      whether senders arrive as phone numbers or LIDs; the mention's shape.
    - Replace the provisional fixtures in `tests/fixtures/gowa/` with those payloads (numbers
      replaced), run the tests, then **resume the worker**.
-4. **Staging script, with the family group** (the Done-When). Add the bot's number to the group,
+5. **Staging script, with the family group** (the Done-When). Add the bot's number to the group,
    then:
    - A member says "Remi, I'm okay sharing my calendar here". Remi replies and confirms.
    - "Remi, who's free Friday evening?" gets names and times, no event titles, and names the
@@ -202,5 +207,5 @@ never titles), posts outings as polls, and follows up on unanswered ones. Before
    - A message to someone named Rami gets no reply.
    - A member writes "can't make it, working" in the chat: they get no follow-up the next day.
      Another who hasn't answered gets one warm follow-up per day until the outing ends.
-5. **Live checks.** `PYTHONPATH=src AGENT__API_KEY=… uv run pytest -m eval tests/evals/test_group_evals.py`
+6. **Live checks.** `PYTHONPATH=src AGENT__API_KEY=… uv run pytest -m eval tests/evals/test_group_evals.py`
    before merging and on every model change.
