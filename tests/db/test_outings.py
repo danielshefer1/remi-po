@@ -135,8 +135,10 @@ class Group:
             now=lambda: NOW,
         )
 
-    async def set_up(self) -> None:
-        await self.say(ScriptedLLM(said("", DINNER), said("Done, the poll's up.")))
+    async def set_up(
+        self, plan: Any = DINNER, body: str = "Remi, set up dinner on Friday at 7"
+    ) -> None:
+        await self.say(ScriptedLLM(said("", plan), said("Done, the poll's up.")), body=body)
 
     async def vote(self, phone: str, option: str | None) -> None:
         await self.say(
@@ -243,6 +245,66 @@ async def test_cleared_vote_clears_the_answer(db: Database, family: Group, group
     assert answer is not None
     assert answer.answer is None
     assert family.calendar.created_in == []
+
+
+async def test_vote_after_the_outing_is_ignored(
+    db: Database, owner_conn: Any, family: Group, group: UUID
+) -> None:
+    await _member(db, group, DANA, "Dana", "ca_dana")
+    noa = await _member(db, group, NOA, "Noa", "ca_noa")
+    await family.set_up()
+    await owner_conn.execute(
+        "UPDATE group_polls SET starts_at = $1, ends_at = $2",
+        NOW - timedelta(hours=3),
+        NOW,
+    )
+    sent = len(family.channel.sent)
+
+    await family.vote(NOA, "I'm in")
+
+    assert family.calendar.created_in == []
+    assert len(family.channel.sent) == sent
+    assert await _answer(db, noa) is None
+
+
+async def test_all_day_outing_today_is_posted(
+    db: Database, owner_conn: Any, family: Group, group: UUID
+) -> None:
+    await _member(db, group, DANA, "Dana", "ca_dana")
+    noa = await _member(db, group, NOA, "Noa", "ca_noa")
+    beach = call(
+        "set_up_outing", title="Beach day", start="2026-10-21", end="2026-10-21", all_day=True
+    )
+
+    await family.set_up(beach, body="Remi, set up a beach day today")
+
+    poll, _ = family.channel.sent
+    assert poll.poll_options == ("I'm in", "Can't make it")
+    assert "Beach day" in poll.body
+    # And it still counts on its day: a vote adds it.
+    await family.vote(NOA, "I'm in")
+    assert family.calendar.created_in == ["ca_noa"]
+    answer = await _answer(db, noa)
+    assert answer is not None
+    assert answer.answer == "in"
+
+
+async def test_hebrew_outing(db: Database, family: Group, group: UUID) -> None:
+    await _member(db, group, DANA, "Dana", "ca_dana")
+    await _member(db, group, NOA, "Noa", "ca_noa")
+    dinner = call(
+        "set_up_outing", title="ארוחה משפחתית", start="2026-10-23T19:00", end="2026-10-23T21:00"
+    )
+
+    await family.set_up(dinner, body="רמי, תארגן לנו ארוחה ביום שישי בשבע")
+
+    poll, _ = family.channel.sent
+    assert poll.recipient == JID
+    assert poll.poll_options == ("אני בפנים", "לא מסתדר לי")
+    assert "ארוחה משפחתית" in poll.body
+    await family.vote(NOA, "אני בפנים")
+    assert family.calendar.created_in == ["ca_noa"]
+    assert family.channel.sent[-1].recipient == NOA
 
 
 async def test_vote_from_stranger_is_ignored(db: Database, family: Group, group: UUID) -> None:

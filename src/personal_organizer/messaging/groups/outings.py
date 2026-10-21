@@ -106,7 +106,8 @@ async def set_up_outing(
     event = check_event(arguments, zone)
     if isinstance(event, str):
         return event
-    if event.start <= turn.now:
+    # An all-day outing starts at local midnight: today's still counts until the day ends.
+    if (event.end if event.all_day else event.start) <= turn.now:
         return "error: that time has passed"
     in_option, out_option = OUTING_OPTIONS[language]
     async with db.system_session() as session:
@@ -161,7 +162,8 @@ async def handle_vote(
         return
     async with db.system_session() as session:
         poll = await poll_by_message(session, turn.group_id, row.reply_id)
-    if poll is None or poll.status != "open":
+    # By its end, not its start: an all-day outing still counts on its day.
+    if poll is None or poll.status != "open" or poll.ends_at <= turn.now:
         return
     options = {poll.in_option: "in", poll.out_option: "out", None: None}
     if row.body not in options:
