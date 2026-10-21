@@ -61,8 +61,19 @@ async def _family(db: Database) -> tuple[UUID, UUID, UUID, UUID]:
 
 async def test_resolve_peer_by_first_name(db: Database) -> None:
     a, b, _, _ = await _family(db)
-    assert await resolve_peer(db, a, " rina cohen ") == b
-    assert await resolve_peer(db, a, "Cohen") != b  # first word only, not any word
+    assert await resolve_peer(db, a, " rina cohen ") == (b, "Rina Cohen")
+    surname = await resolve_peer(db, a, "Cohen")  # first word only, not any word
+    assert isinstance(surname, list)
+    assert sorted(surname) == ["Rina Cohen", "Rina Levi"]
+
+
+async def test_resolve_peer_by_unique_first_word(db: Database) -> None:
+    a, _, _, _ = await _family(db)
+    g = await _group(db, 4)
+    e = await _person(db, "+972500000005", "Yossi Levi", g)
+    async with db.tenant_session(TenantId(a)) as session:
+        await groups.touch_member(session, a, g, NOW)
+    assert await resolve_peer(db, a, "yossi") == (e, "Yossi Levi")
 
 
 async def test_resolve_peer_ambiguous_lists_names(db: Database) -> None:
@@ -85,7 +96,7 @@ async def test_let_see_details_then_stop(db: Database) -> None:
     assert await grants.let_see("Rina Cohen") == "ok: Rina Cohen can now see your event details"
     async with db.tenant_session(TenantId(a)) as session:
         assert await groups.grant(session, a, b) is False  # already there
-    assert await grants.stop("rina cohen") == "ok: rina cohen can no longer see your event details"
+    assert await grants.stop("rina cohen") == "ok: Rina Cohen can no longer see your event details"
     assert await grants.stop("Rina Cohen") == (
         "ok: Rina Cohen couldn't see your event details anyway"
     )
