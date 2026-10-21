@@ -169,3 +169,38 @@ re-link: open the gateway's UI (C4), log out the stale device if it is listed, a
 new QR code. No variable changes.
 
 Then resolve the `gowa.unhealthy` issue in Sentry, so the next logout raises it again.
+
+## Iteration 07: groups
+
+Remi answers in the family's WhatsApp group when addressed, shows who is free (names and times,
+never titles), posts outings as polls, and follows up on unanswered ones. Before it goes live:
+
+1. **Gateway variable.** The gateway must stop dropping group messages but keep ignoring
+   channels and statuses: `WHATSAPP_WEBHOOK_IGNORE_JIDS=@newsletter,status@broadcast`. Already
+   changed on staging on 2026-10-21; set it on any other gateway, then redeploy it.
+2. **Migration first.** Run `alembic upgrade head` (0009_groups) *before* deploying the api and
+   the worker, or the first group message fails on missing tables.
+3. **Day-1 payload checks (Task 0).** The group fixtures are provisional until this is done.
+   - Pause the worker, so inbox rows keep their `raw` body.
+   - In the family group, send: a plain text, a message that mentions the bot, a reply to one of
+     the bot's messages, a vote on a group poll, and a vote on a poll in a direct chat.
+   - From the inbox rows' `raw`, confirm: `selected_options` carries the voted option's text;
+     whether senders arrive as phone numbers or LIDs; the mention's shape.
+   - Replace the provisional fixtures in `tests/fixtures/gowa/` with those payloads (numbers
+     replaced), run the tests, then resume the worker.
+4. **Staging script, with the family group** (the Done-When). Add the bot's number to the group,
+   then:
+   - A member says "Remi, I'm okay sharing my calendar here". Remi replies and confirms.
+   - "Remi, who's free Friday evening?" gets names and times, no event titles, and names the
+     members whose calendars it can't see.
+   - "Is Daniel at the dentist on Friday?" neither confirms nor denies it.
+   - A member granted details (tell Remi privately "Mom can see my events") asks again and
+     gets the details privately, never in the group.
+   - "Remi, let's do dinner at 7, set it up" posts one poll. Vote "I'm in": a private line says
+     it was added, and the event is in the voter's calendar once. Vote again or switch to out and
+     back: no second event.
+   - A message to someone named Rami gets no reply.
+   - A member writes "can't make it, working" in the chat: they get no follow-up the next day.
+     Another who hasn't answered gets one warm follow-up per day until the outing ends.
+5. **Live checks.** `PYTHONPATH=src AGENT__API_KEY=… uv run pytest -m eval tests/evals/test_group_evals.py`
+   before merging and on every model change.
