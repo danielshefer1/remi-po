@@ -65,14 +65,18 @@ async def insert_inbox(
     message_type: str = "text",
     channel: str = "gowa",
     sent_at: datetime | None = None,
+    group_id: str | None = None,
+    sender_name: str | None = None,
+    context_message_id: str | None = None,
 ) -> UUID:
     """A row as ingress would store it. The sender key follows ``SenderRef.key``: BSUID first."""
     key = f"uid:{user_id}" if user_id else f"tel:{phone}"
     raw = json.dumps({"body": body}) if body is not None else None
     inbox_id: UUID = await conn.fetchval(
         "INSERT INTO channel_inbox (channel, provider_message_id, sender_key, sender_user_id, "
-        "sender_phone, message_type, body, reply_id, raw, sent_at) "
-        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10) RETURNING id",
+        "sender_phone, message_type, body, reply_id, raw, sent_at, group_id, sender_name, "
+        "context_message_id) "
+        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12, $13) RETURNING id",
         channel,
         f"wamid.{uuid4().hex}",
         key,
@@ -83,5 +87,8 @@ async def insert_inbox(
         reply_id,
         raw,
         sent_at or datetime.now(UTC),
+        group_id,
+        sender_name,
+        context_message_id,
     )
     return inbox_id

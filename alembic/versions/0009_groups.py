@@ -1,7 +1,7 @@
 """Family groups (Iteration 07): groups, who is in them, detail grants, outings and answers.
 
 * ``channel_inbox.group_id`` and ``channel_inbox.sender_name``: where a message was sent, and
-  who by name.
+  who by name. The group gate's four dispositions.
 * ``wa_groups``, ``group_context`` and ``group_polls``: not tenant-scoped, like
   ``channel_inbox``. A group exists before anyone in it is known.
 * ``group_members``, ``detail_grants`` and ``poll_answers`` under the tenant RLS policy, and
@@ -35,6 +35,14 @@ depends_on: str | Sequence[str] | None = None
 _TZ = sa.DateTime(timezone=True)
 _GEN_UUID = sa.text("gen_random_uuid()")
 _TENANT_TABLES = ("group_members", "detail_grants", "poll_answers")
+
+_DISPOSITIONS_0004 = (
+    "disposition IN ('allowed', 'stranger', 'stranger_muted', 'stale', 'onboarding')"
+)
+_DISPOSITIONS_0009 = (
+    "disposition IN ('allowed', 'stranger', 'stranger_muted', 'stale', 'onboarding', "
+    "'group', 'group_unserved', 'group_stale', 'group_off')"
+)
 
 _GROUP_TENANTS = """
 CREATE FUNCTION group_tenants(p_group uuid)
@@ -242,8 +250,20 @@ def upgrade() -> None:
         op.execute(f"REVOKE ALL ON FUNCTION {signature} FROM PUBLIC")
         op.execute(f'ALTER FUNCTION {signature} OWNER TO "{DEFINER_ROLE_NAME}"')
 
+    op.drop_constraint("ck_channel_inbox_disposition", "channel_inbox", type_="check")
+    op.create_check_constraint("ck_channel_inbox_disposition", "channel_inbox", _DISPOSITIONS_0009)
+
 
 def downgrade() -> None:
+    # 0004's check knows no group dispositions. Every group row was purged unanswered, which is
+    # what 'stranger' records.
+    op.execute(
+        "UPDATE channel_inbox SET disposition = 'stranger' "
+        "WHERE disposition IN ('group', 'group_unserved', 'group_stale', 'group_off')"
+    )
+    op.drop_constraint("ck_channel_inbox_disposition", "channel_inbox", type_="check")
+    op.create_check_constraint("ck_channel_inbox_disposition", "channel_inbox", _DISPOSITIONS_0004)
+
     for signature, _ in reversed(_FUNCTIONS):
         op.execute(f"DROP FUNCTION {signature}")
     for table in reversed(_TENANT_TABLES):

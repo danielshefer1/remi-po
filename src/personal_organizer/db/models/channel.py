@@ -39,8 +39,19 @@ OUTBOX_STATUS_ORDER: Final = (
 
 #: What the worker decided about an inbound row. ``onboarding`` (Iteration 03) is a message
 #: from a tenant still onboarding, answered by its current step; ``allowed`` is one from an
-#: active tenant, handed to ``on_allowed``.
-DISPOSITIONS: Final = ("allowed", "stranger", "stranger_muted", "stale", "onboarding")
+#: active tenant, handed to ``on_allowed``. The ``group`` ones are the group gate's
+#: (Iteration 07, ``messaging.groups.gate``).
+DISPOSITIONS: Final = (
+    "allowed",
+    "stranger",
+    "stranger_muted",
+    "stale",
+    "onboarding",
+    "group",
+    "group_unserved",
+    "group_stale",
+    "group_off",
+)
 
 _GEN_UUID = text("gen_random_uuid()")
 
