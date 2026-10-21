@@ -74,8 +74,9 @@ async def owner_conn(db_settings: Settings) -> AsyncIterator[Any]:
 
 
 #: Everything a messaging test writes. The queue is included because ingress defers into it,
-#: and ``invites`` because the gate reads it.
-_CHANNEL_TABLES = "channel_outbox, channel_inbox, procrastinate_jobs, invites"
+#: ``invites`` because the gate reads it, and ``wa_groups`` because CASCADE from it empties
+#: every group table.
+_CHANNEL_TABLES = "channel_outbox, channel_inbox, procrastinate_jobs, invites, wa_groups"
 
 
 @pytest.fixture

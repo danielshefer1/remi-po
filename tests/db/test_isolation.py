@@ -39,7 +39,7 @@ from personal_organizer.core.types import TenantId
 from personal_organizer.db import repositories
 from personal_organizer.db.engine import Database
 from personal_organizer.db.models.tenant import NETWORK_WHATSAPP
-from personal_organizer.db.repositories import connections, links, messages, tenants
+from personal_organizer.db.repositories import connections, groups, links, messages, tenants
 from tests.db.tenant_tables import tenant_tables
 
 pytestmark = [
@@ -129,6 +129,57 @@ async def _seed_note(conn: Any, tenant: UUID, tag: str) -> None:
     )
 
 
+#: The one poll every tenant answers. ``wa_groups`` and ``group_polls`` are not tenant tables,
+#: so a seed creates or reuses them under any GUC, or none.
+_POLL_INBOX_ID = UUID("00000000-0000-0000-0000-00000000e7e7")
+
+
+async def _group(conn: Any) -> UUID:
+    group_id: UUID = await conn.fetchval(
+        "INSERT INTO wa_groups (channel, jid) VALUES ('gowa', 'iso@g.us') "
+        "ON CONFLICT (channel, jid) DO UPDATE SET jid = EXCLUDED.jid RETURNING id"
+    )
+    return group_id
+
+
+async def _poll(conn: Any) -> UUID:
+    poll_id: UUID = await conn.fetchval(
+        "INSERT INTO group_polls (group_id, inbox_id, title, starts_at, ends_at, all_day, "
+        "language, in_option, out_option) VALUES ($1, $2, 'Dinner', $3, $3, false, 'en', "
+        "'In', 'Out') ON CONFLICT (inbox_id) DO UPDATE SET title = EXCLUDED.title RETURNING id",
+        await _group(conn),
+        _POLL_INBOX_ID,
+        NOW + timedelta(days=1),
+    )
+    return poll_id
+
+
+async def _seed_group_member(conn: Any, tenant: UUID, tag: str) -> None:
+    await conn.execute(
+        "INSERT INTO group_members (tenant_id, group_id, sharing, seen_at) "
+        "VALUES ($1, $2, true, $3)",
+        tenant,
+        await _group(conn),
+        NOW,
+    )
+
+
+async def _seed_detail_grant(conn: Any, tenant: UUID, tag: str) -> None:
+    # To itself: the only other tenant that surely exists when A is seeded.
+    await conn.execute(
+        "INSERT INTO detail_grants (tenant_id, viewer_tenant_id) VALUES ($1, $1)", tenant
+    )
+
+
+async def _seed_poll_answer(conn: Any, tenant: UUID, tag: str) -> None:
+    await conn.execute(
+        "INSERT INTO poll_answers (tenant_id, poll_id, answer, reason) VALUES ($1, $2, 'out', $3)",
+        tenant,
+        await _poll(conn),
+        f"secret reason of {tag}",
+    )
+
+
 #: ``tenants`` first: every other table references it.
 SEEDS: dict[str, Seed] = {
     "tenants": _seed_tenant,
@@ -138,6 +189,9 @@ SEEDS: dict[str, Seed] = {
     "messages": _seed_message,
     "reminders": _seed_reminder,
     "notes": _seed_note,
+    "group_members": _seed_group_member,
+    "detail_grants": _seed_detail_grant,
+    "poll_answers": _seed_poll_answer,
 }
 
 TABLES = sorted(tenant_tables())
@@ -252,11 +306,15 @@ async def test_updates_through_every_repository_function_leave_b_alone(
     database: Database, app_conn: Any, seeded: Seeded
 ) -> None:
     before = await _snapshot(app_conn, seeded.b)
+    group = await _group(app_conn)
     async with database.tenant_session(TenantId(seeded.a)) as session:
         await tenants.set_timezone(session, seeded.b, "Europe/London")
         await tenants.set_onboarding_step(session, seeded.b, "connect")
         await tenants.activate(session, seeded.b)
         await links.consume_link(session, seeded.b, nonce="nonce-b", now=NOW)
+        await groups.set_sharing(session, seeded.b, group, False)
+        await groups.set_display_name(session, seeded.b, "Mallory")
+        assert await groups.revoke(session, seeded.b, seeded.b) is False
     assert await _snapshot(app_conn, seeded.b) == before
 
 
@@ -377,13 +435,19 @@ async def test_no_guc_means_no_writes(app_conn: Any, seeded: Seeded, table: str)
 # --- 4. the definer functions -------------------------------------------------------------
 
 
-async def test_the_definer_functions_return_a_single_uuid(app_conn: Any) -> None:
+async def test_the_definer_functions_return_ids_only(app_conn: Any) -> None:
+    """Ids, and the one boolean a group answer needs: never a name, a body or a reason."""
     rows = await app_conn.fetch(
         "SELECT proname, proretset, pg_get_function_result(oid) AS result FROM pg_proc "
-        "WHERE proname IN ('resolve_tenant', 'create_tenant') ORDER BY proname"
+        "WHERE proname IN ('resolve_tenant', 'create_tenant', 'group_tenants', 'peers_of', "
+        "'detail_grantors', 'due_nudges') ORDER BY proname"
     )
     assert [(row["proname"], row["proretset"], row["result"]) for row in rows] == [
         ("create_tenant", False, "uuid"),
+        ("detail_grantors", True, "TABLE(tenant_id uuid)"),
+        ("due_nudges", True, "TABLE(poll_id uuid, tenant_id uuid)"),
+        ("group_tenants", True, "TABLE(tenant_id uuid, sharing boolean)"),
+        ("peers_of", True, "TABLE(tenant_id uuid)"),
         ("resolve_tenant", False, "uuid"),
     ]
 
