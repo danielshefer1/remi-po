@@ -9,7 +9,8 @@ their names come back, in ``not_shared``.
 **Details, privately.** After a turn in which ``who_is_free`` ran, an asker who is a member
 gets the events of the people who granted them details, read then from ``detail_grantors``
 in the same windows, each in its owner's own session. Code writes that message, never the
-model, and sends it to the asker's phone, not the group.
+model, and sends it to the asker's phone, not the group, before the group reply: until that
+reply is out a retry runs the turn again, and the details' own key keeps them to one send.
 
 **Silence.** The model may reply with nothing (the message was for someone else, or for a
 person named Rami): nothing is sent. Not-addressed messages cost no model call. An unavailable
@@ -209,8 +210,10 @@ async def _send_details(
     calendar: CalendarProvider,
     zone: ZoneInfo,
     language: str,
+    last_attempt: bool,
 ) -> None:
-    """The granted people's events in ``windows``, privately to ``asker``, if there are any."""
+    """The granted people's events in ``windows``, privately to ``asker``, if there are any.
+    A calendar that is down raises for the job to retry, except on the last attempt."""
     async with db.system_session() as session:
         grantors = await detail_grantors(session, asker, group_id)
     lines: list[str] = []
@@ -223,7 +226,8 @@ async def _send_details(
             try:
                 events = await _events(calendar, account, start, end)
             except CalendarProviderUnavailableError:
-                # The group answer is out: a retry would not come back here.
+                if not last_attempt:
+                    raise  # nothing is sent yet: the retry runs the whole turn again
                 log.warning("group.details_unavailable", inbox_id=str(row.id))
                 events = ()
             if not isinstance(events, str):
@@ -352,6 +356,21 @@ async def group_turn(
         except LLMRejectedError:
             log.warning("group.fallback", reason="rejected")
             reply = t("agent_unavailable", language)
+    # Details first: a retry runs the turn again until the group reply is out, and the
+    # details' own key keeps them to one send.
+    if windows and turn.tenant_id is not None:
+        await _send_details(
+            db,
+            channel,
+            row,
+            turn.group_id,
+            turn.tenant_id,
+            windows,
+            calendar=calendar,
+            zone=zone,
+            language=language,
+            last_attempt=last_attempt,
+        )
     if reply:
         sent = fit_message(reply)
         await send_once(
@@ -365,18 +384,6 @@ async def group_turn(
         )
         async with db.system_session() as session:
             await add_context(session, turn.group_id, sender_name=REMI, body=sent, sent_at=turn.now)
-    if windows and turn.tenant_id is not None:
-        await _send_details(
-            db,
-            channel,
-            row,
-            turn.group_id,
-            turn.tenant_id,
-            windows,
-            calendar=calendar,
-            zone=zone,
-            language=language,
-        )
 
 
 __all__ = [

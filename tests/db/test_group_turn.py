@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from personal_organizer.core.errors import CalendarProviderUnavailableError, TransientChannelError
 from personal_organizer.core.types import TenantId
 from personal_organizer.db.engine import Database
 from personal_organizer.db.repositories import groups
@@ -112,12 +113,17 @@ async def _say(
     phone: str = DANA,
     body: str = "Remi, who's free on Friday?",
     calendar: InMemoryCalendar | None = None,
+    channel: FakeOutbound | None = None,
+    inbox_id: UUID | None = None,
+    last_attempt: bool = False,
 ) -> tuple[FakeOutbound, InMemoryCalendar]:
+    """Run one message through the gate; pass ``channel`` and ``inbox_id`` to retry it."""
     calendar = calendar or Calendars(CALENDARS)
-    channel = FakeOutbound(name="gowa")
-    inbox_id = await insert_inbox(
-        conn, phone=phone, body=body, group_id=JID, sender_name="WhatsApp name", sent_at=NOW
-    )
+    channel = channel or FakeOutbound(name="gowa")
+    if inbox_id is None:
+        inbox_id = await insert_inbox(
+            conn, phone=phone, body=body, group_id=JID, sender_name="WhatsApp name", sent_at=NOW
+        )
     await handle_inbound(
         inbox_id,
         db=db,
@@ -126,7 +132,7 @@ async def _say(
         on_allowed=Spy(),
         settings=settings,
         on_group=functools.partial(
-            group_turn, db=db, llm=llm, calendar=calendar, last_attempt=False
+            group_turn, db=db, llm=llm, calendar=calendar, last_attempt=last_attempt
         ),
         now=lambda: NOW,
     )
@@ -238,7 +244,7 @@ async def test_details_sent_privately_to_grantee(
 
     channel, _ = await _say(db, owner_conn, onboarding_settings, llm)
 
-    in_group, private = channel.sent
+    private, in_group = channel.sent
     assert in_group.recipient == JID
     assert "Board meeting" not in in_group.body
     assert private.recipient == DANA
@@ -246,6 +252,68 @@ async def test_details_sent_privately_to_grantee(
     assert "Noa: Board meeting, Friday 2026-10-23 14:00–16:00" in private.body  # noqa: RUF001
     assert "Dentist" not in private.body  # her own events are not a detail she was granted
     assert "Board meeting" not in _seen(llm)
+
+
+async def test_details_survive_a_failed_send(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    """The details send fails for now: the retry sends them, then the group reply."""
+    await _granted(db, group)
+    channel = FakeOutbound(TransientChannelError("gateway down"), name="gowa")
+    answer = said("Noa's busy 2 to 4 on Friday.")
+    llm = ScriptedLLM(said("", FRIDAY), answer, said("", FRIDAY), answer)
+
+    with pytest.raises(TransientChannelError):
+        await _say(db, owner_conn, onboarding_settings, llm, channel=channel)
+    assert channel.sent == []
+    [inbox_id] = await owner_conn.fetchval("SELECT array_agg(id) FROM channel_inbox")
+    await _say(db, owner_conn, onboarding_settings, llm, channel=channel, inbox_id=inbox_id)
+
+    assert [message.recipient for message in channel.sent] == [DANA, JID]
+    assert "Board meeting" in channel.sent[0].body
+
+
+class NoaDown(Calendars):
+    """Noa's calendar answers who_is_free, then is down when her details are read."""
+
+    async def list_events(
+        self, account_id: str, user_id: str, *, start: datetime, end: datetime
+    ) -> Sequence[CalendarEvent]:
+        if account_id == "ca_noa" and any(call[0] == "ca_noa" for call in self.calls):
+            raise CalendarProviderUnavailableError("composio down")
+        return await super().list_events(account_id, user_id, start=start, end=end)
+
+
+async def test_grantor_outage_retries_until_the_last_attempt(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    await _granted(db, group)
+    reply = said("Noa's busy 2 to 4 on Friday.")
+    channel = FakeOutbound(name="gowa")
+
+    with pytest.raises(CalendarProviderUnavailableError):
+        await _say(
+            db,
+            owner_conn,
+            onboarding_settings,
+            ScriptedLLM(said("", FRIDAY), reply),
+            calendar=NoaDown(CALENDARS),
+            channel=channel,
+        )
+    assert channel.sent == []
+
+    [inbox_id] = await owner_conn.fetchval("SELECT array_agg(id) FROM channel_inbox")
+    await _say(
+        db,
+        owner_conn,
+        onboarding_settings,
+        ScriptedLLM(said("", FRIDAY), reply),
+        calendar=NoaDown(CALENDARS),
+        channel=channel,
+        inbox_id=inbox_id,
+        last_attempt=True,
+    )
+    assert [message.recipient for message in channel.sent] == [JID]
 
 
 async def test_details_follow_current_grants(
