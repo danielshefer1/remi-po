@@ -130,10 +130,52 @@ class TestReceipts:
         assert batch.skipped == 1
 
 
+class TestGroups:
+    def test_group_text_keeps_group_and_sender(self) -> None:
+        message = _only_message("group_text")
+        assert message.group_id == "120363402106000001@g.us"
+        assert message.sender.phone == "+972500000002"
+        assert message.sender_name == "Noa"
+        assert message.text == "hi all"
+
+    def test_direct_message_has_no_group(self) -> None:
+        assert _only_message("text").group_id is None
+
+    def test_group_poll_vote(self) -> None:
+        message = _only_message("group_poll_vote")
+        assert message.message_type == "poll_vote"
+        assert message.reply_id == load("group_poll_vote")["payload"]["poll"]["poll_id"]
+        assert message.text == "Yes"
+        assert message.group_id == "120363402106000001@g.us"
+
+    def test_direct_poll_vote(self) -> None:
+        message = _only_message("direct_poll_vote")
+        assert message.message_type == "poll_vote"
+        assert message.group_id is None
+
+    def test_cleared_vote_has_no_text(self) -> None:
+        payload = load("group_poll_vote")
+        payload["payload"]["poll"]["selected_options"] = []
+        payload["payload"]["poll"]["selected_option_hashes"] = []
+        message = _parse(payload).messages[0]
+        assert message.message_type == "poll_vote"
+        assert message.text is None
+
+    def test_undecryptable_vote_is_plain_poll(self) -> None:
+        payload = load("group_poll_vote")
+        payload["payload"]["poll"]["resolution_status"] = "decrypt_failed"
+        assert _parse(payload).messages[0].message_type == "poll"
+
+    def test_a_poll_creation_is_a_plain_poll(self) -> None:
+        payload = load("group_poll_vote")
+        payload["payload"]["poll"]["type"] = "creation"
+        assert _parse(payload).messages[0].message_type == "poll"
+
+
 class TestSkipped:
-    @pytest.mark.parametrize("name", ["from_me", "group", "reaction"])
+    @pytest.mark.parametrize("name", ["from_me", "reaction"])
     def test_events_the_bot_does_not_answer(self, name: str) -> None:
-        """Our own sends echoed back would loop; groups and reactions are not requests."""
+        """Our own sends echoed back would loop; reactions are not requests."""
         batch = _parse(load(name))
         assert batch.messages == ()
         assert batch.skipped == 1
@@ -142,6 +184,11 @@ class TestSkipped:
     def test_broadcasts_and_newsletters(self, chat_id: str) -> None:
         payload = load("text")
         payload["payload"]["chat_id"] = chat_id
+        assert _parse(payload).skipped == 1
+
+    def test_newsletter_still_skipped(self) -> None:
+        payload = load("group_text")
+        payload["payload"]["chat_id"] = "120363000000@newsletter"
         assert _parse(payload).skipped == 1
 
     def test_another_device_is_skipped(self) -> None:

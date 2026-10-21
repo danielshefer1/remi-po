@@ -110,7 +110,7 @@ _SERVED: Final = frozenset({"active", "onboarding"})
 
 #: What a purge nulls: the message's content, leaving what deduplication and the mute need.
 _PURGED: Final = MappingProxyType(
-    {"body": None, "raw": None, "media_id": None, "media_mime_type": None}
+    {"body": None, "raw": None, "media_id": None, "media_mime_type": None, "sender_name": None}
 )
 
 

@@ -1,0 +1,16 @@
+{
+  "event": "message",
+  "device_id": "972552640741@s.whatsapp.net",
+  "payload": {
+    "id": "3EB0GROUPREPLY000001",
+    "chat_id": "120363402106000001@g.us",
+    "from": "972500000001@s.whatsapp.net",
+    "sender_display_name": "Dana",
+    "from_name": "Dana",
+    "timestamp": "2026-10-21T10:02:00Z",
+    "is_from_me": false,
+    "body": "yes please",
+    "replied_to_id": "3EB0BOTREPLY0000001",
+    "quoted_body": "Want me to set that reminder?"
+  }
+}

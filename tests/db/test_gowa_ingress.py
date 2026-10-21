@@ -88,6 +88,19 @@ class TestReplayCreatesOneJob:
         )
 
 
+class TestGroups:
+    async def test_group_message_stored_with_group(
+        self, http: AsyncClient, owner_conn: Any
+    ) -> None:
+        body, headers = gowa.signed(gowa.load("group_text"))
+        assert (await http.post(URL, content=body, headers=headers)).status_code == 200
+
+        row = await owner_conn.fetchrow("SELECT * FROM channel_inbox")
+        assert row["group_id"] == "120363402106000001@g.us"
+        assert row["sender_name"] == "Noa"
+        assert row["sender_phone"] == "+972500000002"
+
+
 class TestTwoChannels:
     async def test_one_id_on_both_channels_is_two_messages(
         self, http: AsyncClient, owner_conn: Any

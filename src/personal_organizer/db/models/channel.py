@@ -69,6 +69,10 @@ class ChannelInbox(Base):
     media_mime_type: Mapped[str | None] = mapped_column(Text)
     reply_id: Mapped[str | None] = mapped_column(Text)
     context_message_id: Mapped[str | None] = mapped_column(Text)
+    #: Set for a message sent in a group: the provider's group id.
+    group_id: Mapped[str | None] = mapped_column(Text)
+    #: The sender's display name; purged with the body, since a name is personal data too.
+    sender_name: Mapped[str | None] = mapped_column(Text)
     #: The single message object as received, so a type this version does not understand can
     #: be re-parsed later. Not the envelope, which repeats other users' contact details.
     #: ``none_as_null``: without it SQLAlchemy writes Python ``None`` as the JSON value

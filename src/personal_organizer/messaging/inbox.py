@@ -31,6 +31,8 @@ class InboxRow:
     sent_at: datetime
     processed_at: datetime | None
     disposition: str | None
+    group_id: str | None = None
+    sender_name: str | None = None
 
     @classmethod
     def of(cls, row: ChannelInbox) -> InboxRow:
@@ -47,6 +49,8 @@ class InboxRow:
             sent_at=row.sent_at,
             processed_at=row.processed_at,
             disposition=row.disposition,
+            group_id=row.group_id,
+            sender_name=row.sender_name,
         )
 
 

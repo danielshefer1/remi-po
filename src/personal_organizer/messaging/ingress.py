@@ -34,11 +34,12 @@ from personal_organizer.worker.tasks.channel import HANDLE_INBOUND_TASK
 _INSERT_INBOX: Final[LiteralString] = """
 INSERT INTO channel_inbox (
     channel, provider_message_id, sender_key, sender_user_id, sender_phone, message_type,
-    body, media_id, media_mime_type, reply_id, context_message_id, raw, sent_at
+    body, media_id, media_mime_type, reply_id, context_message_id, group_id, sender_name,
+    raw, sent_at
 ) VALUES (
     %(channel)s, %(provider_message_id)s, %(sender_key)s, %(sender_user_id)s, %(sender_phone)s,
     %(message_type)s, %(body)s, %(media_id)s, %(media_mime_type)s, %(reply_id)s,
-    %(context_message_id)s, %(raw)s, %(sent_at)s
+    %(context_message_id)s, %(group_id)s, %(sender_name)s, %(raw)s, %(sent_at)s
 )
 ON CONFLICT (channel, provider_message_id) DO NOTHING
 RETURNING id
@@ -105,6 +106,8 @@ def _inbox_params(channel: str, message: InboundMessage) -> dict[str, Any]:
             "media_mime_type": message.media_mime_type,
             "reply_id": message.reply_id,
             "context_message_id": message.context_message_id,
+            "group_id": message.group_id,
+            "sender_name": message.sender_name,
             "raw": dict(message.raw),
         }
     )
