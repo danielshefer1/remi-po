@@ -119,6 +119,21 @@ class TestRequests:
         assert TOKEN not in repr(channel)
 
 
+class TestNoGroups:
+    @pytest.mark.parametrize(
+        "message",
+        [
+            OutboundMessage(recipient="120363025246125486@g.us", body="hi"),
+            OutboundMessage(recipient="+31612345678", body="Q", poll_options=("a", "b")),
+        ],
+    )
+    async def test_groups_and_polls_are_rejected(self, message: OutboundMessage) -> None:
+        channel, recorder = _channel(_json(200, OK_SEND))
+        with pytest.raises(RejectedChannelError):
+            await channel.send_text(message)
+        assert recorder.requests == []
+
+
 class TestClassification:
     @pytest.mark.parametrize(
         "respond",

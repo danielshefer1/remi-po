@@ -118,6 +118,34 @@ class TestRequests:
         assert request.headers["authorization"].startswith("Basic ")
         assert "x-device-id" not in request.headers
 
+    async def test_send_to_group_jid_posts_jid_unchanged(self) -> None:
+        jid = "120363025246125486@g.us"
+        channel, recorder = _channel(_json(200, OK_SEND))
+        await channel.send_text(OutboundMessage(recipient=jid, body="hi all"))
+        assert json.loads(recorder.requests[0].content)["phone"] == jid
+
+    async def test_send_poll_posts_to_send_poll(self) -> None:
+        jid = "120363025246125486@g.us"
+        channel, recorder = _channel(_json(200, OK_SEND), typing_delay_s=1.0)
+        message = OutboundMessage(recipient=jid, body="Where to?", poll_options=("Beach", "Park"))
+        assert await channel.send_text(message) == "3EB0B430B6F8F1D0E053AC"
+        (request,) = recorder.requests  # no typing indicator for a poll
+        assert request.url.path == "/send/poll"
+        assert json.loads(request.content) == {
+            "phone": jid,
+            "question": "Where to?",
+            "options": ["Beach", "Park"],
+            "max_answer": 1,
+        }
+
+    async def test_poll_without_id_is_ambiguous(self) -> None:
+        channel, _ = _channel(_json(200, {"code": "SUCCESS", "results": {}}))
+        message = OutboundMessage(
+            recipient="120363025246125486@g.us", body="Q", poll_options=("a", "b")
+        )
+        with pytest.raises(AmbiguousDeliveryError):
+            await channel.send_text(message)
+
     async def test_the_device_is_named_when_configured(self) -> None:
         channel, recorder = _channel(_json(200, OK_SEND), device_id="po-bot")
         await channel.send_text(MESSAGE)

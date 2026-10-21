@@ -19,7 +19,7 @@ from personal_organizer.core.errors import (
 )
 from personal_organizer.db.engine import Database
 from personal_organizer.interfaces.channel import OutboundMessage
-from personal_organizer.messaging.outbox import already_sent, send_once
+from personal_organizer.messaging.outbox import already_sent, send_once, sent_message_id
 from personal_organizer.settings import Settings
 from tests.fixtures.channels import FakeOutbound, insert_inbox
 from tests.fixtures.payloads import SENDER_PHONE
@@ -60,6 +60,26 @@ async def _outbox(conn: Any) -> list[dict[str, Any]]:
         "ORDER BY created_at"
     )
     return [dict(row) for row in rows]
+
+
+class TestSentMessageId:
+    async def test_sent_message_id_after_accept(self, db: Database, owner_conn: Any) -> None:
+        inbox_id = await insert_inbox(owner_conn)
+        channel = FakeOutbound()
+        assert await sent_message_id(db, inbox_id, "poll") is None
+        await send_once(
+            db,
+            channel,
+            inbox_id=inbox_id,
+            kind="poll",
+            recipient_key="group:120363@g.us",
+            to="120363@g.us",
+            text="Where to?",
+            poll_options=("Beach", "Park"),
+        )
+        assert channel.sent[0].poll_options == ("Beach", "Park")
+        assert await sent_message_id(db, inbox_id, "poll") == "whatsapp.OUT1"
+        assert await sent_message_id(db, inbox_id, "other") is None
 
 
 class TestIdempotencyKey:

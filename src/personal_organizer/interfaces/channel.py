@@ -93,6 +93,8 @@ class WebhookBatch:
 class OutboundMessage:
     recipient: str
     body: str
+    #: Send ``body`` as a single-choice poll with these options (a group JID recipient).
+    poll_options: tuple[str, ...] = ()
 
 
 @runtime_checkable
