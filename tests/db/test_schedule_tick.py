@@ -10,7 +10,7 @@ import json
 from collections.abc import AsyncIterator
 from datetime import timedelta
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import procrastinate
 import pytest
@@ -18,14 +18,22 @@ import pytest
 from personal_organizer.core.types import TenantId
 from personal_organizer.db import engine
 from personal_organizer.db.engine import Database
-from personal_organizer.db.repositories import reminders
+from personal_organizer.db.repositories import groups, reminders
+from personal_organizer.db.repositories.outings import create_poll
+from personal_organizer.interfaces.calendar import CalendarEvent
 from personal_organizer.messaging.briefing import briefing_key
+from personal_organizer.messaging.groups.nudge import nudge_key
 from personal_organizer.messaging.reminders import reminder_key
 from personal_organizer.settings import Settings
 from personal_organizer.worker.app import build_procrastinate_app
 from personal_organizer.worker.queues import Queue
 from personal_organizer.worker.tasks import schedule
-from personal_organizer.worker.tasks.schedule import BRIEFING_TASK, REMINDER_TASK, run_tick
+from personal_organizer.worker.tasks.schedule import (
+    BRIEFING_TASK,
+    NUDGE_TASK,
+    REMINDER_TASK,
+    run_tick,
+)
 from tests.db.test_reminders_repository import NOW, TODAY, _tenant
 from tests.fixtures.connect import TRUNCATE_CONNECT_TABLES
 
@@ -76,7 +84,7 @@ async def test_the_tick_defers_one_job_per_due_reminder_and_briefing(
 ) -> None:
     tenant_id, reminder_id = await _due_work(db)
 
-    assert await run_tick(app, NOW, briefings=True) == (1, 1)
+    assert await run_tick(app, NOW, briefings=True) == (1, 1, 0)
 
     briefing, reminder = briefing_key(tenant_id, TODAY), reminder_key(reminder_id)
     assert await _jobs(owner_conn) == [
@@ -103,7 +111,7 @@ async def test_a_second_tick_in_the_same_minute_defers_nothing_new(
     await _due_work(db)
     await run_tick(app, NOW, briefings=True)
 
-    assert await run_tick(app, NOW, briefings=True) == (0, 0)
+    assert await run_tick(app, NOW, briefings=True) == (0, 0, 0)
     assert len(await _jobs(owner_conn)) == 2
 
 
@@ -118,7 +126,7 @@ async def test_a_running_job_is_not_deferred_again_and_can_still_be_retried(
         "UPDATE procrastinate_jobs SET status = 'doing' WHERE task_name = $1", REMINDER_TASK
     )
 
-    assert await run_tick(app, NOW + timedelta(minutes=1), briefings=True) == (0, 0)
+    assert await run_tick(app, NOW + timedelta(minutes=1), briefings=True) == (0, 0, 0)
     assert len(await _jobs(owner_conn)) == 2
 
     [job] = await app.job_manager.list_jobs_async(lock=reminder_key(reminder_id))
@@ -147,13 +155,51 @@ async def test_without_composio_there_is_no_briefing(
 ) -> None:
     await _due_work(db)
 
-    assert await run_tick(app, NOW, briefings=False) == (1, 0)
+    assert await run_tick(app, NOW, briefings=False) == (1, 0, 0)
     assert [job[0] for job in await _jobs(owner_conn)] == [REMINDER_TASK]
+
+
+@pytest.mark.usefixtures("clean_channel_tables")
+async def test_tick_defers_due_nudges(
+    db: Database, app: procrastinate.App, owner_conn: Any
+) -> None:
+    """A member sharing in a group with an outing posted three hours ago, at 13:30 local."""
+    now = NOW + timedelta(hours=6)
+    tenant_id = await _tenant(db, "+972500000002")
+    async with db.system_session() as session:
+        group = await groups.ensure_group(session, channel="gowa", jid="1203@g.us")
+        poll = await create_poll(
+            session,
+            group_id=group.id,
+            inbox_id=uuid4(),
+            event=CalendarEvent(
+                "", "Dinner", now + timedelta(days=2), now + timedelta(days=2, hours=2)
+            ),
+            language="en",
+            in_option="I'm in",
+            out_option="Can't make it",
+        )
+    await owner_conn.execute("UPDATE group_polls SET created_at = $1", now - timedelta(hours=3))
+    async with db.tenant_session(TenantId(tenant_id)) as session:
+        await groups.touch_member(session, tenant_id, group.id, now)
+        await groups.set_sharing(session, tenant_id, group.id, True)
+
+    assert await run_tick(app, now, briefings=False) == (0, 0, 1)
+    assert await _jobs(owner_conn) == [
+        (
+            NUDGE_TASK,
+            Queue.WEBHOOKS.value,
+            nudge_key(poll.id, tenant_id, now.date()),
+            None,
+            {"poll_id": str(poll.id), "tenant_id": str(tenant_id)},
+        )
+    ]
+    assert await run_tick(app, now, briefings=False) == (0, 0, 0)
 
 
 async def test_nothing_due_defers_nothing(
     db: Database, app: procrastinate.App, owner_conn: Any
 ) -> None:
     await _due_work(db)
-    assert await run_tick(app, NOW - timedelta(hours=1), briefings=True) == (0, 0)
+    assert await run_tick(app, NOW - timedelta(hours=1), briefings=True) == (0, 0, 0)
     assert await _jobs(owner_conn) == []

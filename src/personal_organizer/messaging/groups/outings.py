@@ -42,18 +42,20 @@ from personal_organizer.db.repositories.outings import (
     set_poll_message,
 )
 from personal_organizer.db.repositories.tenants import get_tenant
-from personal_organizer.interfaces.calendar import CalendarEvent, CalendarProvider
+from personal_organizer.interfaces.calendar import CalendarProvider
 from personal_organizer.interfaces.channel import OutboundChannel
 from personal_organizer.interfaces.llm import LLMProvider, Message
 from personal_organizer.messaging.agent import (
     MAX_FIELD,
     add_event,
     check_event,
-    event_summary,
     fit_message,
+    outing_event,
+    outing_line,
 )
 from personal_organizer.messaging.conversation import MAX_TOKENS
 from personal_organizer.messaging.groups.addressing import group_key
+from personal_organizer.messaging.groups.answers import unanswered
 from personal_organizer.messaging.groups.gate import REMI, GroupTurn
 from personal_organizer.messaging.inbox import InboxRow
 from personal_organizer.messaging.onboarding_text import t
@@ -81,15 +83,6 @@ few of their own words> if they say they can't come to outing n (just OUT n if t
 reason); or OTHER if the message is about something else, or you are not sure."""
 
 _ANSWER: Final = re.compile(r"(IN|OUT)\s+(\d+)\.?(?::\s*(.*))?", re.IGNORECASE | re.DOTALL)
-
-
-def _event(poll: GroupPoll, zone: ZoneInfo) -> CalendarEvent:
-    start, end = poll.starts_at.astimezone(zone), poll.ends_at.astimezone(zone)
-    return CalendarEvent("", poll.title, start, end, poll.all_day, poll.location)
-
-
-def _one_line(poll: GroupPoll, zone: ZoneInfo) -> str:
-    return event_summary(_event(poll, zone), zone, poll.language).replace("\n", ", ")
 
 
 async def set_up_outing(
@@ -123,7 +116,7 @@ async def set_up_outing(
     if poll.provider_message_id is not None:
         return POSTED  # a re-run of this message: the poll is out
     # Built from the stored poll, so a re-run posts the plan that was stored.
-    question = _one_line(poll, zone)
+    question = outing_line(poll, zone)
     await send_once(
         db,
         channel,
@@ -191,7 +184,7 @@ async def handle_vote(
             return
         zone = ZoneInfo(tenant.timezone or "UTC")
         text = await add_event(
-            _event(poll, zone),
+            outing_event(poll, zone),
             calendar=calendar,
             account=account,
             zone=zone,
@@ -227,11 +220,7 @@ async def read_answer(row: InboxRow, turn: GroupTurn, *, db: Database, llm: LLMP
     async with db.tenant_session(tenant_id) as session:
         tenant = await get_tenant(session, tenant_id)
         answers = [await answer_of(session, tenant_id, poll.id) for poll in polls]
-    waiting = [
-        poll
-        for poll, given in zip(polls, answers, strict=True)
-        if given is None or (given.answer is None and given.reason is None)
-    ]
+    waiting = [poll for poll, given in zip(polls, answers, strict=True) if unanswered(given)]
     if not waiting or tenant is None:
         return
     found = await classify(waiting, row.body, llm=llm, zone=ZoneInfo(tenant.timezone or "UTC"))
@@ -247,7 +236,7 @@ async def classify(
 ) -> tuple[UUID, str, str | None] | None:
     """``(poll_id, 'in', None)``, ``(poll_id, 'out', reason)``, or ``None`` when ``text``
     answers none of ``polls``. Provider errors pass through, as in ``confirm.decide``."""
-    outings = "\n".join(f"{n}. {_one_line(poll, zone)}" for n, poll in enumerate(polls, 1))
+    outings = "\n".join(f"{n}. {outing_line(poll, zone)}" for n, poll in enumerate(polls, 1))
     messages = [Message("system", _CLASSIFY.format(outings=outings)), Message("user", text)]
     completion = await llm.complete(messages, max_tokens=MAX_TOKENS)
     if completion.finish_reason == "max_tokens":

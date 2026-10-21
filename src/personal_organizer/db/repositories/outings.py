@@ -1,7 +1,8 @@
 """Outing polls and each person's answer to them (Iteration 07).
 
-A poll is the group's, not a person's: :func:`create_poll`, :func:`set_poll_message`,
-:func:`poll_by_message` and :func:`open_polls` run in ``Database.system_session()``. An answer
+A poll is the group's, not a person's: :func:`create_poll`, :func:`get_poll`,
+:func:`set_poll_message`, :func:`poll_by_message` and :func:`open_polls` run in
+``Database.system_session()``. An answer
 is its person's: :func:`answer_of`, :func:`set_answer`, :func:`claim_event` and
 :func:`mark_nudged` run in their ``Database.tenant_session(tenant_id)``.
 """
@@ -71,6 +72,10 @@ async def poll_by_message(
     return (await session.scalars(stmt)).one_or_none()
 
 
+async def get_poll(session: AsyncSession, poll_id: UUID) -> GroupPoll | None:
+    return await session.get(GroupPoll, poll_id)
+
+
 async def open_polls(session: AsyncSession, group_id: UUID, now: datetime) -> list[GroupPoll]:
     """The group's open polls whose event hasn't started, soonest first."""
     stmt = (
@@ -124,6 +129,7 @@ __all__ = [
     "answer_of",
     "claim_event",
     "create_poll",
+    "get_poll",
     "mark_nudged",
     "open_polls",
     "poll_by_message",

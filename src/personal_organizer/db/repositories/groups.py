@@ -5,7 +5,7 @@ Three kinds of call, each in its own session:
 * The group and its context (:func:`ensure_group`, :func:`mark_served`, :func:`add_context`,
   :func:`recent_context`) are not tenant data: ``Database.system_session()``.
 * A person's own membership, grants and name (:func:`touch_member`, :func:`set_sharing`,
-  :func:`grant`, :func:`revoke`, :func:`set_display_name`): their
+  :func:`groups_of`, :func:`grant`, :func:`revoke`, :func:`set_display_name`): their
   ``Database.tenant_session(tenant_id)``. A grant row belongs to its owner.
 * Reading across people (:func:`group_tenants`, :func:`peers_of`, :func:`detail_grantors`,
   :func:`due_nudges`): ``system_session``, through the ``SECURITY DEFINER`` functions of
@@ -116,6 +116,12 @@ async def set_sharing(
     )
 
 
+async def groups_of(session: AsyncSession, tenant_id: UUID) -> list[UUID]:
+    """The groups the tenant is a member of."""
+    stmt = scoped(select(GroupMember.group_id), GroupMember, tenant_id)
+    return list(await session.scalars(stmt))
+
+
 async def group_tenants(session: AsyncSession, group_id: UUID) -> list[tuple[UUID, bool]]:
     """``(tenant_id, sharing)`` of the group's active members. In ``system_session``."""
     rows = func.group_tenants(group_id).table_valued(
@@ -182,6 +188,7 @@ __all__ = [
     "ensure_group",
     "grant",
     "group_tenants",
+    "groups_of",
     "mark_served",
     "peers_of",
     "recent_context",
