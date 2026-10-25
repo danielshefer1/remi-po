@@ -51,10 +51,13 @@ from personal_organizer.settings import GowaSettings
 log = structlog.get_logger(__name__)
 
 SEND_PATH: Final = "send/message"
+POLL_PATH: Final = "send/poll"
 PRESENCE_PATH: Final = "send/chat-presence"
 DOWNLOAD_PATH: Final = "message/{message_id}/download"
 #: The gateway fetches from WhatsApp's CDN before it answers: slower than a send.
 DOWNLOAD_TIMEOUT: Final = httpx.Timeout(30.0, connect=5.0)
+#: A group chat's JID ends so; it is sent to as given, not as a phone number.
+GROUP_SUFFIX: Final = "@g.us"
 #: Statuses where the gateway itself is not ready: worth another attempt.
 _RETRY_STATUSES: Final = frozenset({401, 408, 429})
 DEVICE_HEADER: Final = "X-Device-Id"
@@ -115,12 +118,26 @@ class GowaOutbound:
     async def send_text(self, message: OutboundMessage) -> str:
         if len(message.body) > WHATSAPP_TEXT_LIMIT:
             raise MessageTooLongError(len(message.body), WHATSAPP_TEXT_LIMIT)
-        phone = normalise_e164(message.recipient)
-        if phone is None:
-            raise RejectedChannelError(None)
-        jid = phone_jid(phone)
-        await self._typing(jid)
-        data = await self._post(SEND_PATH, {"phone": jid, "message": message.body})
+        if message.recipient.endswith(GROUP_SUFFIX):
+            jid = message.recipient
+        else:
+            phone = normalise_e164(message.recipient)
+            if phone is None:
+                raise RejectedChannelError(None)
+            jid = phone_jid(phone)
+        if message.poll_options:  # no typing indicator for a poll
+            data = await self._post(
+                POLL_PATH,
+                {
+                    "phone": jid,
+                    "question": message.body,
+                    "options": list(message.poll_options),
+                    "max_answer": 1,
+                },
+            )
+        else:
+            await self._typing(jid)
+            data = await self._post(SEND_PATH, {"phone": jid, "message": message.body})
         results = data.get("results")
         provider_message_id = results.get("message_id") if isinstance(results, dict) else None
         if not isinstance(provider_message_id, str) or not provider_message_id:

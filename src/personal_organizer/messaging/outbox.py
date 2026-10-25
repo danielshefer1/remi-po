@@ -109,6 +109,16 @@ async def already_sent(db: Database, inbox_id: UUID, kind: str) -> bool:
     return status is not None and status != "pending"
 
 
+async def sent_message_id(db: Database, inbox_id: UUID, kind: str) -> str | None:
+    """The provider's id for the ``kind`` send to ``inbox_id``, if it was accepted."""
+    async with db.system_session() as session:
+        return await session.scalar(
+            select(ChannelOutbox.provider_message_id).where(
+                ChannelOutbox.inbox_id == inbox_id, ChannelOutbox.kind == kind
+            )
+        )
+
+
 async def send_once(
     db: Database,
     channel: OutboundChannel,
@@ -119,6 +129,7 @@ async def send_once(
     to: str,
     text: str,
     idempotency_key: str | None = None,
+    poll_options: tuple[str, ...] = (),
 ) -> str:
     """Send ``text`` to ``to`` at most once: as the ``kind`` reply to ``inbox_id``, or as the
     send named by ``idempotency_key``. Exactly one of the two is given.
@@ -141,7 +152,9 @@ async def send_once(
         return status
 
     try:
-        provider_message_id = await channel.send_text(OutboundMessage(recipient=to, body=text))
+        provider_message_id = await channel.send_text(
+            OutboundMessage(recipient=to, body=text, poll_options=poll_options)
+        )
     except TransientChannelError:
         await _set(db, outbox_id, status="pending")
         raise
@@ -159,4 +172,4 @@ async def send_once(
     return "accepted"
 
 
-__all__ = ["SETTLED", "already_sent", "send_once"]
+__all__ = ["SETTLED", "already_sent", "send_once", "sent_message_id"]

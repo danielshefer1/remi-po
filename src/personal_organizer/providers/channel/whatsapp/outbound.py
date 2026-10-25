@@ -76,6 +76,8 @@ class WhatsAppOutbound:
     async def send_text(self, message: OutboundMessage) -> str:
         if len(message.body) > WHATSAPP_TEXT_LIMIT:
             raise MessageTooLongError(len(message.body), WHATSAPP_TEXT_LIMIT)
+        if message.recipient.endswith("@g.us") or message.poll_options:
+            raise RejectedChannelError(None)  # groups and polls are GOWA-only
         data = await self._post(
             {
                 "messaging_product": "whatsapp",

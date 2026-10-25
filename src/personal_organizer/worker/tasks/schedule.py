@@ -1,14 +1,20 @@
-"""Reminders and the morning briefing (Iteration 05): the tick and the two jobs it defers.
+"""Reminders, the morning briefing (Iteration 05) and outing follow-ups (Iteration 07): the
+tick and the three jobs it defers.
 
-``schedule:tick`` runs every minute. It reads the two ``SECURITY DEFINER`` scans, which return
-ids only, and defers one job per due reminder or briefing on ``webhooks``, the queue that
-already sends. Each job is deferred with its idempotency key as its ``lock``, so two never run
-at once, and only when no job with that lock is waiting or running. Not a ``queueing_lock``:
-it is unique over waiting jobs only, so a job queued while the first runs would make retrying
-the first (its worker died) fail, leaving it ``doing`` and the second stuck behind its lock.
-Two near-simultaneous ticks can still both queue one; the bodies are safe to run twice, and
-the send itself is keyed (ADR 0003), so a re-run sends nothing new. Kwargs are ids only
-(ADR 0001).
+``schedule:tick`` runs every minute. It reads the three ``SECURITY DEFINER`` scans, which
+return ids only, and defers one job per due reminder, briefing or follow-up on ``webhooks``,
+the queue that already sends. Each job is deferred with its idempotency key as its ``lock``, so
+two never run at once, and only when no job with that lock is waiting or running. Not a
+``queueing_lock``: it is unique over waiting jobs only, so a job queued while the first runs
+would make retrying the first (its worker died) fail, leaving it ``doing`` and the second stuck
+behind its lock. Two near-simultaneous ticks can still both queue one; the bodies are safe to
+run twice, and the send itself is keyed (ADR 0003), so a re-run sends nothing new. Kwargs are
+ids only (ADR 0001). A follow-up's lock is ``nudge:<poll_id>:<tenant_id>``, with no day, so
+two never run around UTC midnight; its send is keyed by the person's own day, and the job's
+20-hour spacing makes a later re-run a no-op.
+
+The tick also deletes group chatter older than ``CONTEXT_AGE``: a quiet group gets no new
+message to trim it.
 """
 
 from __future__ import annotations
@@ -21,8 +27,10 @@ import procrastinate
 import structlog
 
 from personal_organizer.db.engine import get_database
+from personal_organizer.db.repositories.groups import due_nudges, sweep_context
 from personal_organizer.db.repositories.reminders import due_briefings, due_reminders
 from personal_organizer.messaging.briefing import briefing_key, send_briefing
+from personal_organizer.messaging.groups.nudge import send_nudge
 from personal_organizer.messaging.reminders import reminder_key, send_reminder
 from personal_organizer.messaging.runtime import get_outbound_channel
 from personal_organizer.settings import get_settings
@@ -39,6 +47,7 @@ log = structlog.get_logger(__name__)
 TICK_TASK: Final = "schedule:tick"
 REMINDER_TASK: Final = "schedule:reminder"
 BRIEFING_TASK: Final = "schedule:briefing"
+NUDGE_TASK: Final = "schedule:nudge"
 
 
 async def _defer(app: procrastinate.App, task: str, key: str, **kwargs: str) -> int:
@@ -50,11 +59,14 @@ async def _defer(app: procrastinate.App, task: str, key: str, **kwargs: str) -> 
     return 1
 
 
-async def run_tick(app: procrastinate.App, now: datetime, *, briefings: bool) -> tuple[int, int]:
-    """Defer what is due at ``now``. Returns how many reminder and briefing jobs were new.
+async def run_tick(
+    app: procrastinate.App, now: datetime, *, briefings: bool
+) -> tuple[int, int, int]:
+    """Defer what is due at ``now``, and delete group chatter past its age. Returns how many
+    reminder, briefing and follow-up jobs were new.
 
-    Reminders are scanned and deferred first, on their own, so a failing briefing scan never
-    holds them back.
+    Reminders, then follow-ups, are scanned and deferred first, each on its own, so a failing
+    briefing scan never holds them back. Follow-ups need no calendar, so not ``briefings``.
     """
     async with get_database().system_session() as session:
         reminders = await due_reminders(session, now)
@@ -67,6 +79,19 @@ async def run_tick(app: procrastinate.App, now: datetime, *, briefings: bool) ->
             reminder_id=str(reminder_id),
             tenant_id=str(tenant_id),
         )
+    async with get_database().system_session() as session:
+        nudges = await due_nudges(session, now)
+    sent_nudges = 0
+    for poll_id, tenant_id in nudges:
+        sent_nudges += await _defer(
+            app,
+            NUDGE_TASK,
+            f"nudge:{poll_id}:{tenant_id}",
+            poll_id=str(poll_id),
+            tenant_id=str(tenant_id),
+        )
+    async with get_database().system_session() as session:
+        await sweep_context(session, now)
     days = []
     if briefings:
         async with get_database().system_session() as session:
@@ -80,9 +105,11 @@ async def run_tick(app: procrastinate.App, now: datetime, *, briefings: bool) ->
             tenant_id=str(tenant_id),
             day=day.isoformat(),
         )
-    if sent_reminders or sent_briefings:
-        log.info("schedule.tick", reminders=sent_reminders, briefings=sent_briefings)
-    return sent_reminders, sent_briefings
+    if sent_reminders or sent_briefings or sent_nudges:
+        log.info(
+            "schedule.tick", reminders=sent_reminders, briefings=sent_briefings, nudges=sent_nudges
+        )
+    return sent_reminders, sent_briefings, sent_nudges
 
 
 def register(app: procrastinate.App) -> None:
@@ -122,5 +149,17 @@ def register(app: procrastinate.App) -> None:
             last_attempt=is_last_attempt(context.job.attempts),
         )
 
+    @app.task(queue=Queue.WEBHOOKS.value, name=NUDGE_TASK, retry=INBOUND_RETRY, pass_context=True)
+    async def nudge(context: procrastinate.JobContext, poll_id: str, tenant_id: str) -> None:
+        await send_nudge(
+            UUID(poll_id),
+            UUID(tenant_id),
+            db=get_database(),
+            channels=get_outbound_channel,
+            llm=agent_llm(),
+            now=datetime.now(UTC),
+            last_attempt=is_last_attempt(context.job.attempts),
+        )
 
-__all__ = ["BRIEFING_TASK", "REMINDER_TASK", "TICK_TASK", "register", "run_tick"]
+
+__all__ = ["BRIEFING_TASK", "NUDGE_TASK", "REMINDER_TASK", "TICK_TASK", "register", "run_tick"]

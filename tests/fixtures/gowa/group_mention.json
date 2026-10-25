@@ -1,0 +1,14 @@
+{
+  "event": "message",
+  "device_id": "972552640741@s.whatsapp.net",
+  "payload": {
+    "id": "3EB0GROUPMENTION0001",
+    "chat_id": "120363402106000001@g.us",
+    "from": "972500000001@s.whatsapp.net",
+    "sender_display_name": "Dana",
+    "from_name": "Dana",
+    "timestamp": "2026-10-21T10:01:00Z",
+    "is_from_me": false,
+    "body": "@972552640741 remind us about the dentist on Sunday"
+  }
+}

@@ -54,6 +54,10 @@ class InboundMessage:
     reply_id: str | None = None
     #: The provider id of the message this one replies to, if any.
     context_message_id: str | None = None
+    #: The provider's group id (``120363...@g.us``) when the message was sent in a group.
+    group_id: str | None = None
+    #: The sender's display name as the provider gave it, if any.
+    sender_name: str | None = None
     raw: Mapping[str, Any] = field(default_factory=dict)
 
 
@@ -89,6 +93,8 @@ class WebhookBatch:
 class OutboundMessage:
     recipient: str
     body: str
+    #: Send ``body`` as a single-choice poll with these options (a group JID recipient).
+    poll_options: tuple[str, ...] = ()
 
 
 @runtime_checkable

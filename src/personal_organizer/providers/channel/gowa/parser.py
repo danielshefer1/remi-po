@@ -18,6 +18,10 @@ The envelope, one event per POST (``docs/webhook-payload.md`` in the gateway's r
     {"event": "message.ack", "device_id": "...", "timestamp": "2026-10-04T10:31:00Z",
      "payload": {"ids": ["3EB0..."], "from": "...", "receipt_type": "delivered"}}
 
+**Groups.** A message in a group (``chat_id`` ending ``@g.us``) keeps ``group_id``; the
+sender is still ``from``, and ``from_name`` is their push name. A resolved poll vote becomes
+``poll_vote`` with the poll id as ``reply_id`` and the first chosen option as text.
+
 **Identity is the phone number.** GOWA normalises ``from`` to the phone JID when it can and
 keeps WhatsApp's linked id (LID) in ``from_lid``. The LID becomes the sender's ``user_id``
 only when no phone is known: ``SenderRef.key`` prefers ``user_id``, and a person must have
@@ -42,11 +46,15 @@ from personal_organizer.interfaces.channel import (
 MESSAGE_EVENT: Final = "message"
 ACK_EVENT: Final = "message.ack"
 
-#: A one-to-one chat with a phone-identified or LID-identified user. Groups (``@g.us``),
-#: status broadcasts and newsletters are skipped: the bot answers people, one at a time.
+#: A one-to-one chat with a phone-identified or LID-identified user, or a group
+#: (``@g.us``). Status broadcasts and newsletters are skipped.
 PHONE_SERVER: Final = "@s.whatsapp.net"
 LID_SERVER: Final = "@lid"
+GROUP_SERVER: Final = "@g.us"
 _DIRECT_SERVERS: Final = (PHONE_SERVER, LID_SERVER)
+POLL_VOTE: Final = "poll_vote"
+#: A vote whose selection names we can trust; ``decrypt_failed`` and the rest carry none.
+_READABLE_VOTES: Final = frozenset({"resolved", "partially_resolved"})
 
 #: The key a non-text message's content arrives under, which also names its type. Checked
 #: before ``body``: GOWA fills ``body`` with a caption or a summary ("Poll: Lunch?") too.
@@ -128,6 +136,15 @@ def _content(payload: Mapping[str, Any]) -> _Content:
                 "reply_id": _text(selection.get("selected_id")),
                 "text": _text(selection.get("text")) or body,
             }
+        if kind == "poll":
+            poll = _mapping(payload.get("poll"))
+            if poll.get("type") == "vote" and poll.get("resolution_status") in _READABLE_VOTES:
+                chosen = poll.get("selected_options")
+                return {
+                    "message_type": POLL_VOTE,
+                    "reply_id": _text(poll.get("poll_id")),
+                    "text": _text(chosen[0]) if isinstance(chosen, list) and chosen else None,
+                }
         # A poll, a location, a contact card: GOWA's ``body`` is its own summary, not words
         # the user typed, so it is not passed on as text.
         return {"message_type": kind}
@@ -138,7 +155,7 @@ def _message(payload: Mapping[str, Any]) -> InboundMessage | None:
     if payload.get("is_from_me") is True:
         return None  # our own sends, echoed back: answering them would loop
     chat_id = _text(payload.get("chat_id"))
-    if chat_id is not None and not chat_id.endswith(_DIRECT_SERVERS):
+    if chat_id is not None and not chat_id.endswith((*_DIRECT_SERVERS, GROUP_SERVER)):
         return None
     provider_message_id = _text(payload.get("id"))
     if provider_message_id is None:
@@ -151,6 +168,8 @@ def _message(payload: Mapping[str, Any]) -> InboundMessage | None:
         sender=sender,
         sent_at=_timestamp(payload.get("timestamp")),
         context_message_id=_text(payload.get("replied_to_id")),
+        group_id=chat_id if chat_id is not None and chat_id.endswith(GROUP_SERVER) else None,
+        sender_name=_text(payload.get("from_name")),
         raw=dict(payload),
         **_content(payload),
     )
@@ -194,9 +213,11 @@ def parse_webhook(payload: object, *, device_id: str | None) -> WebhookBatch:
 
 __all__ = [
     "ACK_EVENT",
+    "GROUP_SERVER",
     "LID_SERVER",
     "MESSAGE_EVENT",
     "PHONE_SERVER",
+    "POLL_VOTE",
     "jid_user",
     "parse_webhook",
     "phone_jid",

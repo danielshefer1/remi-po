@@ -100,8 +100,18 @@ async def test_the_definer_owns_no_tables(app_conn: Any) -> None:
 
 
 #: Exactly what app_definer may own. Another function here is another door past RLS: the
-#: two resolution functions (Iteration 03) and the tick's two id-only scans (Iteration 05).
-DEFINER_FUNCTIONS = {"resolve_tenant", "create_tenant", "due_reminders", "due_briefings"}
+#: two resolution functions (Iteration 03), the tick's two id-only scans (Iteration 05), and
+#: the four group lookups (Iteration 07).
+DEFINER_FUNCTIONS = {
+    "resolve_tenant",
+    "create_tenant",
+    "due_reminders",
+    "due_briefings",
+    "group_tenants",
+    "peers_of",
+    "detail_grantors",
+    "due_nudges",
+}
 
 
 async def test_the_definer_owns_exactly_the_definer_functions(app_conn: Any) -> None:

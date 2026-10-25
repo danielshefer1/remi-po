@@ -39,7 +39,14 @@ from personal_organizer.core.types import TenantId
 from personal_organizer.db import repositories
 from personal_organizer.db.engine import Database
 from personal_organizer.db.models.tenant import NETWORK_WHATSAPP
-from personal_organizer.db.repositories import connections, links, messages, tenants
+from personal_organizer.db.repositories import (
+    connections,
+    groups,
+    links,
+    messages,
+    outings,
+    tenants,
+)
 from tests.db.tenant_tables import tenant_tables
 
 pytestmark = [
@@ -51,6 +58,8 @@ pytestmark = [
 PHONES = {"a": "+972500000001", "b": "+972500000002", "x": "+972500000009"}
 CHANNELS = {"a": "gowa", "b": "whatsapp", "x": "gowa"}
 NOW = datetime(2026, 10, 8, 9, 0, tzinfo=UTC)
+#: A third tenant, only ever a viewer: A and B each grant it their details.
+X = UUID("00000000-0000-0000-0000-0000000000a9")
 
 Seed = Callable[[Any, UUID, str], Awaitable[None]]
 
@@ -129,6 +138,57 @@ async def _seed_note(conn: Any, tenant: UUID, tag: str) -> None:
     )
 
 
+#: The one poll every tenant answers. ``wa_groups`` and ``group_polls`` are not tenant tables,
+#: so a seed creates or reuses them under any GUC, or none.
+_POLL_INBOX_ID = UUID("00000000-0000-0000-0000-00000000e7e7")
+
+
+async def _group(conn: Any) -> UUID:
+    group_id: UUID = await conn.fetchval(
+        "INSERT INTO wa_groups (channel, jid) VALUES ('gowa', 'iso@g.us') "
+        "ON CONFLICT (channel, jid) DO UPDATE SET jid = EXCLUDED.jid RETURNING id"
+    )
+    return group_id
+
+
+async def _poll(conn: Any) -> UUID:
+    poll_id: UUID = await conn.fetchval(
+        "INSERT INTO group_polls (group_id, inbox_id, title, starts_at, ends_at, all_day, "
+        "language, in_option, out_option) VALUES ($1, $2, 'Dinner', $3, $3, false, 'en', "
+        "'In', 'Out') ON CONFLICT (inbox_id) DO UPDATE SET title = EXCLUDED.title RETURNING id",
+        await _group(conn),
+        _POLL_INBOX_ID,
+        NOW + timedelta(days=1),
+    )
+    return poll_id
+
+
+async def _seed_group_member(conn: Any, tenant: UUID, tag: str) -> None:
+    await conn.execute(
+        "INSERT INTO group_members (tenant_id, group_id, sharing, seen_at) "
+        "VALUES ($1, $2, true, $3)",
+        tenant,
+        await _group(conn),
+        NOW,
+    )
+
+
+async def _seed_detail_grant(conn: Any, tenant: UUID, tag: str) -> None:
+    # To X, the viewer the ``seeded`` fixture creates first: a grant made to someone else.
+    await conn.execute(
+        "INSERT INTO detail_grants (tenant_id, viewer_tenant_id) VALUES ($1, $2)", tenant, X
+    )
+
+
+async def _seed_poll_answer(conn: Any, tenant: UUID, tag: str) -> None:
+    await conn.execute(
+        "INSERT INTO poll_answers (tenant_id, poll_id, answer, reason) VALUES ($1, $2, 'out', $3)",
+        tenant,
+        await _poll(conn),
+        f"secret reason of {tag}",
+    )
+
+
 #: ``tenants`` first: every other table references it.
 SEEDS: dict[str, Seed] = {
     "tenants": _seed_tenant,
@@ -138,6 +198,9 @@ SEEDS: dict[str, Seed] = {
     "messages": _seed_message,
     "reminders": _seed_reminder,
     "notes": _seed_note,
+    "group_members": _seed_group_member,
+    "detail_grants": _seed_detail_grant,
+    "poll_answers": _seed_poll_answer,
 }
 
 TABLES = sorted(tenant_tables())
@@ -162,6 +225,8 @@ class Seeded:
 async def seeded(app_conn: Any) -> Seeded:
     assert set(SEEDS) == set(TABLES), "every tenant table needs a seed factory"
     pair = Seeded(a=uuid4(), b=uuid4())
+    async with as_tenant(app_conn, X):
+        await _seed_tenant(app_conn, X, "x")
     for tenant, tag in ((pair.a, "a"), (pair.b, "b")):
         async with as_tenant(app_conn, tenant):
             for seed in SEEDS.values():
@@ -225,6 +290,19 @@ async def test_a_sees_only_its_own_rows(app_conn: Any, seeded: Seeded, table: st
     assert [row["owner"] for row in owners] == [seeded.a]
 
 
+async def test_a_viewer_cannot_read_the_grants_made_to_them(app_conn: Any, seeded: Seeded) -> None:
+    """X is the viewer of A's and B's grants; a grant belongs to its owner alone."""
+    async with as_tenant(app_conn, X):
+        assert await app_conn.fetchval("SELECT count(*) FROM detail_grants") == 0
+    async with as_tenant(app_conn, seeded.a):
+        assert (
+            await app_conn.fetchval(
+                "SELECT count(*) FROM detail_grants WHERE viewer_tenant_id = $1", X
+            )
+            == 1
+        )
+
+
 async def test_the_app_filter_is_really_off_in_rls_only_mode(
     database: Database, seeded: Seeded, mode: str
 ) -> None:
@@ -252,11 +330,19 @@ async def test_updates_through_every_repository_function_leave_b_alone(
     database: Database, app_conn: Any, seeded: Seeded
 ) -> None:
     before = await _snapshot(app_conn, seeded.b)
+    group, poll = await _group(app_conn), await _poll(app_conn)
     async with database.tenant_session(TenantId(seeded.a)) as session:
+        answer = await outings.answer_of(session, seeded.b, poll)
+        assert answer is None or answer.tenant_id == seeded.a
+        await outings.claim_event(session, seeded.b, poll, NOW)
         await tenants.set_timezone(session, seeded.b, "Europe/London")
         await tenants.set_onboarding_step(session, seeded.b, "connect")
         await tenants.activate(session, seeded.b)
         await links.consume_link(session, seeded.b, nonce="nonce-b", now=NOW)
+        await groups.set_sharing(session, seeded.b, group, False)
+        await groups.set_display_name(session, seeded.b, "Mallory")
+        # B's real grant to X. In rls-only mode this removes A's own grant to X; never B's.
+        await groups.revoke(session, seeded.b, X)
     assert await _snapshot(app_conn, seeded.b) == before
 
 
@@ -286,6 +372,28 @@ async def test_inserts_for_b_under_a_are_refused(
     with pytest.raises(DBAPIError, match="row-level security"):
         async with database.tenant_session(TenantId(seeded.a)) as session:
             await write(session, seeded.b)
+    assert await _snapshot(app_conn, seeded.b) == before
+
+
+@pytest.mark.parametrize(
+    "write",
+    [
+        lambda s, b, poll: outings.set_answer(s, b, poll, answer="in", reason=None),
+        lambda s, b, poll: outings.mark_nudged(s, b, poll, NOW),
+    ],
+    ids=["set_answer", "mark_nudged"],
+)
+async def test_answers_for_b_under_a_are_refused(
+    database: Database,
+    app_conn: Any,
+    seeded: Seeded,
+    write: Callable[[Any, UUID, UUID], Awaitable[object]],
+) -> None:
+    before = await _snapshot(app_conn, seeded.b)
+    poll = await _poll(app_conn)
+    with pytest.raises(DBAPIError, match="row-level security"):
+        async with database.tenant_session(TenantId(seeded.a)) as session:
+            await write(session, seeded.b, poll)
     assert await _snapshot(app_conn, seeded.b) == before
 
 
@@ -377,13 +485,19 @@ async def test_no_guc_means_no_writes(app_conn: Any, seeded: Seeded, table: str)
 # --- 4. the definer functions -------------------------------------------------------------
 
 
-async def test_the_definer_functions_return_a_single_uuid(app_conn: Any) -> None:
+async def test_the_definer_functions_return_ids_only(app_conn: Any) -> None:
+    """Ids, and the one boolean a group answer needs: never a name, a body or a reason."""
     rows = await app_conn.fetch(
         "SELECT proname, proretset, pg_get_function_result(oid) AS result FROM pg_proc "
-        "WHERE proname IN ('resolve_tenant', 'create_tenant') ORDER BY proname"
+        "WHERE proname IN ('resolve_tenant', 'create_tenant', 'group_tenants', 'peers_of', "
+        "'detail_grantors', 'due_nudges') ORDER BY proname"
     )
     assert [(row["proname"], row["proretset"], row["result"]) for row in rows] == [
         ("create_tenant", False, "uuid"),
+        ("detail_grantors", True, "TABLE(tenant_id uuid)"),
+        ("due_nudges", True, "TABLE(poll_id uuid, tenant_id uuid)"),
+        ("group_tenants", True, "TABLE(tenant_id uuid, sharing boolean)"),
+        ("peers_of", True, "TABLE(tenant_id uuid)"),
         ("resolve_tenant", False, "uuid"),
     ]
 

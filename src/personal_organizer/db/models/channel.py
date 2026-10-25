@@ -39,8 +39,19 @@ OUTBOX_STATUS_ORDER: Final = (
 
 #: What the worker decided about an inbound row. ``onboarding`` (Iteration 03) is a message
 #: from a tenant still onboarding, answered by its current step; ``allowed`` is one from an
-#: active tenant, handed to ``on_allowed``.
-DISPOSITIONS: Final = ("allowed", "stranger", "stranger_muted", "stale", "onboarding")
+#: active tenant, handed to ``on_allowed``. The ``group`` ones are the group gate's
+#: (Iteration 07, ``messaging.groups.gate``).
+DISPOSITIONS: Final = (
+    "allowed",
+    "stranger",
+    "stranger_muted",
+    "stale",
+    "onboarding",
+    "group",
+    "group_unserved",
+    "group_stale",
+    "group_off",
+)
 
 _GEN_UUID = text("gen_random_uuid()")
 
@@ -69,6 +80,10 @@ class ChannelInbox(Base):
     media_mime_type: Mapped[str | None] = mapped_column(Text)
     reply_id: Mapped[str | None] = mapped_column(Text)
     context_message_id: Mapped[str | None] = mapped_column(Text)
+    #: Set for a message sent in a group: the provider's group id.
+    group_id: Mapped[str | None] = mapped_column(Text)
+    #: The sender's display name; purged with the body, since a name is personal data too.
+    sender_name: Mapped[str | None] = mapped_column(Text)
     #: The single message object as received, so a type this version does not understand can
     #: be re-parsed later. Not the envelope, which repeats other users' contact details.
     #: ``none_as_null``: without it SQLAlchemy writes Python ``None`` as the JSON value

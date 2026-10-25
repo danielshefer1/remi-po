@@ -18,6 +18,7 @@ from personal_organizer.core.errors import (
 )
 from personal_organizer.db.engine import Database
 from personal_organizer.messaging.agent import agent_turn
+from personal_organizer.messaging.groups.turn import group_turn
 from personal_organizer.settings import Settings
 from personal_organizer.worker.app import build_procrastinate_app
 from personal_organizer.worker.queues import Queue
@@ -196,3 +197,24 @@ class TestOnAllowed:
         row: Any = object()
         assert await handoff(row, cast(Any, None), cast(Any, None), datetime.now(UTC)) is None
         assert acked == [row]
+
+
+class TestOnGroup:
+    def test_the_group_turn_when_enabled(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        llm, calendar = object(), object()
+        monkeypatch.setattr(channel_tasks, "agent_llm", lambda: llm)
+        monkeypatch.setattr(channel_tasks, "agent_calendar", lambda: calendar)
+        db = cast(Database, object())
+        handoff = channel_tasks._on_group(db, last_attempt=True)
+        assert isinstance(handoff, functools.partial)
+        assert handoff.func is group_turn
+        assert handoff.keywords == {
+            "db": db,
+            "llm": llm,
+            "calendar": calendar,
+            "last_attempt": True,
+        }
+
+    def test_none_when_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(channel_tasks, "agent_llm", lambda: None)
+        assert channel_tasks._on_group(cast(Database, object()), last_attempt=False) is None

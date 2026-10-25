@@ -45,7 +45,7 @@ On the **gateway**:
 | `WHATSAPP_WEBHOOK` | `https://<api's public domain>/webhooks/gowa` | where messages go |
 | `WHATSAPP_WEBHOOK_SECRET` | the secret above | signs every webhook |
 | `WHATSAPP_WEBHOOK_EVENTS` | `message,message.ack` | nothing else is used |
-| `WHATSAPP_WEBHOOK_IGNORE_JIDS` | `@g.us,@newsletter,status@broadcast` | groups, channels, statuses |
+| `WHATSAPP_WEBHOOK_IGNORE_JIDS` | `@g.us,@newsletter,status@broadcast` | groups, channels, statuses; for groups use the Iteration 07 value (see "Iteration 07: groups") |
 | `WHATSAPP_AUTO_DOWNLOAD_MEDIA` | `false` | on by default: would keep every photo on its volume |
 | `MCP_ENABLED` | `false` | on by default: an MCP server that can send as the number |
 
@@ -169,3 +169,43 @@ re-link: open the gateway's UI (C4), log out the stale device if it is listed, a
 new QR code. No variable changes.
 
 Then resolve the `gowa.unhealthy` issue in Sentry, so the next logout raises it again.
+
+## Iteration 07: groups
+
+Remi answers in the family's WhatsApp group when addressed, shows who is free (names and times,
+never titles), posts outings as polls, and follows up on unanswered ones. Before it goes live:
+
+1. **Gateway variable.** The gateway must stop dropping group messages but keep ignoring
+   channels and statuses: `WHATSAPP_WEBHOOK_IGNORE_JIDS=@newsletter,status@broadcast`. Already
+   changed on staging on 2026-10-21; set it on any other gateway, then redeploy it.
+2. **Migration first.** Run `alembic upgrade head` (0009_groups) *before* deploying the api and
+   the worker. Without it the api's inbox insert, which now writes `group_id` and
+   `sender_name`, fails for **every** inbound message, private ones included, not only groups:
+   nothing reaches Remi until the migration runs.
+3. **Worker variables.** On `worker`, set `ONBOARDING__BOT_PHONE` to the bot's number (how
+   Remi tells it was @-tagged in a group) and `AGENT__ENABLED=true` (with its key): without
+   the agent, group messages are dropped unanswered and follow-ups go out as the fixed line.
+4. **Day-1 payload checks (Task 0).** The group fixtures are provisional until this is done.
+   - Pause the worker, so inbox rows keep their `raw` body.
+   - In the family group, send: a plain text, a message that mentions the bot, a reply to one of
+     the bot's messages, a vote on a group poll, and a vote on a poll in a direct chat.
+   - From the inbox rows' `raw`, confirm: `selected_options` carries the voted option's text;
+     whether senders arrive as phone numbers or LIDs; the mention's shape.
+   - Replace the provisional fixtures in `tests/fixtures/gowa/` with those payloads (numbers
+     replaced), run the tests, then **resume the worker**.
+5. **Staging script, with the family group** (the Done-When). Add the bot's number to the group,
+   then:
+   - A member says "Remi, I'm okay sharing my calendar here". Remi replies and confirms.
+   - "Remi, who's free Friday evening?" gets names and times, no event titles, and names the
+     members whose calendars it can't see.
+   - "Is Daniel at the dentist on Friday?" neither confirms nor denies it.
+   - A member granted details (tell Remi privately "Mom can see my events") asks again and
+     gets the details privately, never in the group.
+   - "Remi, let's do dinner at 7, set it up" posts one poll. Vote "I'm in": a private line says
+     it was added, and the event is in the voter's calendar once. Vote again or switch to out and
+     back: no second event.
+   - A message to someone named Rami gets no reply.
+   - A member writes "can't make it, working" in the chat: they get no follow-up the next day.
+     Another who hasn't answered gets one warm follow-up per day until the outing ends.
+6. **Live checks.** `PYTHONPATH=src AGENT__API_KEY=… uv run pytest -m eval tests/evals/test_group_evals.py`
+   before merging and on every model change.

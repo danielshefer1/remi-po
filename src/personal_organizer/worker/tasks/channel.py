@@ -37,6 +37,8 @@ from personal_organizer.core.errors import (
 from personal_organizer.db.engine import Database, get_database
 from personal_organizer.interfaces.channel import OutboundChannel
 from personal_organizer.messaging.agent import agent_turn
+from personal_organizer.messaging.groups.gate import OnGroup
+from personal_organizer.messaging.groups.turn import group_turn
 from personal_organizer.messaging.inbound import InboxRow, OnAllowed, acknowledge, handle_inbound
 from personal_organizer.messaging.onboarding import Advance
 from personal_organizer.messaging.runtime import get_outbound_channel
@@ -110,6 +112,16 @@ def _on_allowed(db: Database, *, last_attempt: bool) -> OnAllowed:
     return ack
 
 
+def _on_group(db: Database, *, last_attempt: bool) -> OnGroup | None:
+    """The group turn when the agent is enabled; else group messages are purged unanswered."""
+    llm = agent_llm()
+    if llm is None:
+        return None
+    return functools.partial(
+        group_turn, db=db, llm=llm, calendar=agent_calendar(), last_attempt=last_attempt
+    )
+
+
 def register(app: procrastinate.App) -> None:
     @app.task(
         queue=Queue.WEBHOOKS.value,
@@ -133,6 +145,7 @@ def register(app: procrastinate.App) -> None:
             llm=agent_llm(),
             transcriber=voice_transcriber(),
             last_attempt=last_attempt,
+            on_group=_on_group(db, last_attempt=last_attempt),
         )
 
 

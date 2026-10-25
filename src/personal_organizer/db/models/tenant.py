@@ -37,6 +37,7 @@ NETWORK_WHATSAPP: Final = "whatsapp"
 CONNECTION_STATUSES: Final = ("active", "revoked", "failed")
 DIRECTIONS: Final = ("in", "out")
 REMINDER_STATUSES: Final = ("pending", "sent", "cancelled", "failed")
+POLL_ANSWERS: Final = ("in", "out")
 
 _GEN_UUID = text("gen_random_uuid()")
 
@@ -64,6 +65,8 @@ class Tenant(Base, TenantRoot):
     briefing_at: Mapped[time | None] = mapped_column(server_default=text("'07:30'"))
     #: The tenant's last local day a briefing went out, so a re-run or a later tick skips it.
     briefed_on: Mapped[date | None]
+    #: What the person asked to be called ("call me Dani"); how groups name them. Iteration 07.
+    display_name: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
@@ -171,18 +174,72 @@ class Note(Base, TenantMixin):
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
 
+class GroupMember(Base, TenantMixin):
+    """A tenant seen in a group, and whether they okayed sharing busy/free there (Iteration 07).
+
+    The only path from a group to its people. Per person, per group.
+    """
+
+    __tablename__ = "group_members"
+    __table_args__ = (UniqueConstraint("tenant_id", "group_id"),)
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=_GEN_UUID)
+    group_id: Mapped[UUID] = mapped_column(ForeignKey("wa_groups.id", ondelete="CASCADE"))
+    sharing: Mapped[bool] = mapped_column(server_default=text("false"))
+    seen_at: Mapped[datetime]
+
+
+class DetailGrant(Base, TenantMixin):
+    """The owner (``tenant_id``) lets ``viewer_tenant_id`` see their events' details, in every
+    group where the owner is sharing (Iteration 07)."""
+
+    __tablename__ = "detail_grants"
+    __table_args__ = (UniqueConstraint("tenant_id", "viewer_tenant_id"),)
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=_GEN_UUID)
+    viewer_tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"))
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class PollAnswer(Base, TenantMixin):
+    """One person's answer to an outing poll, and the follow-ups it stops (Iteration 07).
+
+    ``claimed_at`` set means the event was, or may have been, added to their calendar: it is
+    claimed at most once, before the write, as with ``pending.claim``.
+    """
+
+    __tablename__ = "poll_answers"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "poll_id"),
+        CheckConstraint(check_in("answer", POLL_ANSWERS), name="answer"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=_GEN_UUID)
+    poll_id: Mapped[UUID] = mapped_column(ForeignKey("group_polls.id", ondelete="CASCADE"))
+    answer: Mapped[str | None] = mapped_column(Text)
+    #: Why they can't come, in their own words: "Eden can't, she's at work".
+    reason: Mapped[str | None] = mapped_column(Text)
+    claimed_at: Mapped[datetime | None]
+    nudged_at: Mapped[datetime | None]
+    updated_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
 __all__ = [
     "CONNECTION_STATUSES",
     "DIRECTIONS",
     "LANGUAGES",
     "NETWORK_WHATSAPP",
     "ONBOARDING_STEPS",
+    "POLL_ANSWERS",
     "REMINDER_STATUSES",
     "TENANT_STATUSES",
     "CalendarConnection",
+    "DetailGrant",
+    "GroupMember",
     "Message",
     "Note",
     "OnboardingLink",
+    "PollAnswer",
     "Reminder",
     "Tenant",
     "TenantIdentity",

@@ -45,13 +45,16 @@ who writes to two of our numbers is told once.
 
 **Voice notes (Iteration 06).** A served sender's voice note is transcribed by
 ``messaging.voice.hear`` before anything reads its body.
+
+**Groups (Iteration 07).** A group message never reaches either gate above: it goes to
+``messaging.groups.gate``, which purges it in every case, or, with Composio off or no group
+turn, is purged here unanswered (``group_off``).
 """
 
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
-from types import MappingProxyType
 from typing import Final
 from uuid import UUID
 
@@ -72,19 +75,14 @@ from personal_organizer.interfaces.channel import OutboundChannel
 from personal_organizer.interfaces.llm import LLMProvider
 from personal_organizer.interfaces.voice import Transcriber
 from personal_organizer.messaging.agent import AGENT_REPLY
-from personal_organizer.messaging.inbox import InboxRow, load_row
+from personal_organizer.messaging.groups.gate import OnGroup, handle_group
+from personal_organizer.messaging.inbox import PURGED, InboxRow, finish_row, is_stale, load_row
 from personal_organizer.messaging.invites import is_invited
 from personal_organizer.messaging.language import detect_language
 from personal_organizer.messaging.onboarding import Advance, onboarding_step
 from personal_organizer.messaging.onboarding_text import t
 from personal_organizer.messaging.outbox import already_sent, send_once
-from personal_organizer.messaging.replies import (
-    ACK_TEXT,
-    INVITE_ONLY_MUTE,
-    INVITE_ONLY_TEXT,
-    SERVICE_WINDOW,
-    SERVICE_WINDOW_MARGIN,
-)
+from personal_organizer.messaging.replies import ACK_TEXT, INVITE_ONLY_MUTE, INVITE_ONLY_TEXT
 from personal_organizer.messaging.tenancy import (
     TenantState,
     enrol,
@@ -107,12 +105,6 @@ _MUTING_STATUSES: Final = ("sending", "unknown", "accepted", "sent", "delivered"
 
 #: Tenant statuses the gate serves. ``suspended`` (and anything newer) is turned away.
 _SERVED: Final = frozenset({"active", "onboarding"})
-
-#: What a purge nulls: the message's content, leaving what deduplication and the mute need.
-_PURGED: Final = MappingProxyType(
-    {"body": None, "raw": None, "media_id": None, "media_mime_type": None}
-)
-
 
 #: The tenant gate's handoff for an active tenant: ``(row, channel, tenant, now)``, answering
 #: on ``channel``. It returns what it decided, for ``_finish_known`` to commit with the row:
@@ -144,15 +136,6 @@ async def _already_told(db: Database, row: InboxRow, now: datetime) -> bool:
     return bool(told)
 
 
-async def _finish(db: Database, row: InboxRow, disposition: str, *, purge: bool) -> None:
-    values: dict[str, object] = {"processed_at": func.now(), "disposition": disposition}
-    if purge:
-        # A stranger's words have no reason to be kept, and every reason not to be.
-        values |= _PURGED
-    async with db.system_session() as session:
-        await session.execute(update(ChannelInbox).where(ChannelInbox.id == row.id).values(values))
-
-
 async def _finish_known(
     db: Database,
     row: InboxRow,
@@ -169,7 +152,7 @@ async def _finish_known(
         finished = await session.scalar(
             update(ChannelInbox)
             .where(ChannelInbox.id == row.id, ChannelInbox.processed_at.is_(None))
-            .values(processed_at=func.now(), disposition=disposition, **_PURGED)
+            .values(processed_at=func.now(), disposition=disposition, **PURGED)
             .returning(ChannelInbox.id)
         )
         if finished is None:
@@ -242,12 +225,6 @@ async def _mark_read(channel: OutboundChannel, row: InboxRow) -> None:
         log.warning("inbound.mark_read_failed", inbox_id=str(row.id), error_type=type(exc).__name__)
 
 
-def _is_stale(row: InboxRow, current: datetime) -> bool:
-    # Redelivered after an outage. The reply window has closed, so any send would be
-    # refused -- and replying to a day-old message out of the blue is worse than silence.
-    return current - row.sent_at >= SERVICE_WINDOW - SERVICE_WINDOW_MARGIN
-
-
 async def _allowlist_gate(
     db: Database,
     channel: OutboundChannel,
@@ -258,7 +235,7 @@ async def _allowlist_gate(
 ) -> str:
     """Iteration 02's gate, kept exactly for environments without Composio."""
     allowed = await is_invited(db, row.sender_phone, allowlist)
-    if _is_stale(row, current):
+    if is_stale(row, current):
         disposition = "stale"
     elif allowed:
         await _mark_read(channel, row)
@@ -266,7 +243,7 @@ async def _allowlist_gate(
         disposition = "allowed"
     else:
         disposition = await _turn_away(db, channel, row, current)
-    await _finish(db, row, disposition, purge=not allowed)
+    await finish_row(db, row, disposition, purge=not allowed)
     return disposition
 
 
@@ -306,7 +283,7 @@ async def _tenant_gate(
     last_attempt: bool,
 ) -> str:
     """D2: serve, onboard, enrol or turn away. See the module docstring's table."""
-    stale = _is_stale(row, current)
+    stale = is_stale(row, current)
     tenant_id = await resolve_sender(db, row)
     # Asked only for a sender with no tenant: identity wins over invites.
     invited = tenant_id is None and not stale and await is_invited(db, row.sender_phone, allowlist)
@@ -324,7 +301,7 @@ async def _tenant_gate(
 
     if tenant is None or tenant.status not in _SERVED:
         disposition = "stale" if stale else await _turn_away(db, channel, row, current)
-        await _finish(db, row, disposition, purge=True)
+        await finish_row(db, row, disposition, purge=True)
         return disposition
     if stale:
         await _finish_known(db, row, tenant.id, "stale")
@@ -374,6 +351,7 @@ async def handle_inbound(
     llm: LLMProvider | None = None,
     transcriber: Transcriber | None = None,
     last_attempt: bool = False,
+    on_group: OnGroup | None = None,
     now: Callable[[], datetime] = _utcnow,
 ) -> str | None:
     """Process one inbox row. Returns its disposition, or ``None`` if the row is gone.
@@ -382,6 +360,8 @@ async def handle_inbound(
     off, is Iteration 02's allowlist gate exactly. ``llm`` talks onboarding through (D10);
     ``last_attempt`` is the job's last, when an unavailable model falls back instead (D3).
     ``transcriber`` hears voice notes (Iteration 06); ``None`` answers them with the fixed line.
+    A group message goes to the group gate (Iteration 07) and ``on_group``; with Composio off
+    or no ``on_group`` it is purged unanswered (``group_off``).
     """
     row = await load_row(db, inbox_id)
     if row is None:
@@ -394,7 +374,21 @@ async def handle_inbound(
     channel = channels(row.channel)
 
     current = now()
-    if settings is not None and settings.composio.enabled:
+    if row.group_id is not None:
+        if settings is None or not settings.composio.enabled or on_group is None:
+            # No group turn here; and the allowlist gate must never acknowledge a group.
+            disposition = "group_off"
+            await finish_row(db, row, disposition, purge=True)
+        else:
+            disposition = await handle_group(
+                db,
+                channel,
+                row,
+                current,
+                on_group=on_group,
+                bot_phone=settings.onboarding.bot_phone,
+            )
+    elif settings is not None and settings.composio.enabled:
         disposition = await _tenant_gate(
             db,
             channel,
