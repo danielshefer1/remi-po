@@ -75,7 +75,7 @@ from personal_organizer.interfaces.channel import OutboundChannel
 from personal_organizer.interfaces.llm import LLMProvider
 from personal_organizer.interfaces.voice import Transcriber
 from personal_organizer.messaging.agent import AGENT_REPLY
-from personal_organizer.messaging.groups.gate import OnGroup, handle_group
+from personal_organizer.messaging.groups.gate import POLL_VOTE, OnGroup, handle_group
 from personal_organizer.messaging.inbox import PURGED, InboxRow, finish_row, is_stale, load_row
 from personal_organizer.messaging.invites import is_invited
 from personal_organizer.messaging.language import detect_language
@@ -308,6 +308,10 @@ async def _tenant_gate(
         return "stale"
     await _mark_read(channel, row)
     if tenant.status == "active":
+        if row.message_type == POLL_VOTE:
+            # Remi posts polls only in groups: a private vote answers nothing it asked.
+            await _finish_known(db, row, tenant.id, "allowed")
+            return "allowed"
         if heard is None:
             unheard = await _unheard(db, channel, row, tenant)
             await _finish_known(db, row, tenant.id, "allowed", unheard)
