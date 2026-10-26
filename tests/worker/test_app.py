@@ -171,9 +171,10 @@ class TestLastAttempt:
 
 class TestOnAllowed:
     def test_the_agent_when_enabled(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        llm, calendar = object(), object()
+        llm, calendar, settings = object(), object(), object()
         monkeypatch.setattr(channel_tasks, "agent_llm", lambda: llm)
         monkeypatch.setattr(channel_tasks, "agent_calendar", lambda: calendar)
+        monkeypatch.setattr(channel_tasks, "get_settings", lambda: settings)
         db = cast(Database, object())
         handoff = channel_tasks._on_allowed(db, last_attempt=True)
         assert isinstance(handoff, functools.partial)
@@ -182,6 +183,7 @@ class TestOnAllowed:
             "db": db,
             "llm": llm,
             "calendar": calendar,
+            "settings": settings,
             "last_attempt": True,
         }
 

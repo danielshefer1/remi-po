@@ -30,7 +30,7 @@ from personal_organizer.interfaces.llm import Message
 from personal_organizer.messaging.agent import AGENT_REPLY, agent_turn
 from personal_organizer.messaging.inbound import handle_inbound
 from personal_organizer.messaging.inbox import load_row
-from personal_organizer.messaging.onboarding import Advance
+from personal_organizer.messaging.onboarding import LINK_PLACEHOLDER, Advance
 from personal_organizer.messaging.onboarding_text import t
 from personal_organizer.messaging.tenancy import TenantState, load_state
 from personal_organizer.messaging.text import WHATSAPP_TEXT_LIMIT
@@ -38,7 +38,7 @@ from personal_organizer.providers.calendar.memory import InMemoryCalendar
 from personal_organizer.settings import Settings
 from tests.fixtures.channels import FakeOutbound, insert_inbox
 from tests.fixtures.llm import NoLLM, ScriptedLLM, call, said
-from tests.fixtures.tenants import IL_PHONE, messages_of, new_tenant
+from tests.fixtures.tenants import IL_PHONE, link_payload, messages_of, new_tenant
 
 pytestmark = [
     pytest.mark.db,
@@ -90,6 +90,7 @@ async def _turn(
     inbox_id: UUID | None = None,
     phone: str | None = IL_PHONE,
     last_attempt: bool = False,
+    settings: Settings | None = None,
 ) -> tuple[Advance, FakeOutbound, UUID]:
     channel = FakeOutbound(name="gowa")
     if inbox_id is None:
@@ -106,6 +107,7 @@ async def _turn(
         db=db,
         llm=llm,
         calendar=calendar or InMemoryCalendar(),
+        settings=settings,
         last_attempt=last_attempt,
     )
     return advance, channel, inbox_id
@@ -239,23 +241,42 @@ class TestFallbacks:
 
 
 class TestNoCalendar:
-    async def test_no_connection_gets_the_fixed_line(self, db: Database, owner_conn: Any) -> None:
+    async def test_no_connection_gets_a_link_to_connect(
+        self, db: Database, owner_conn: Any, onboarding_settings: Settings
+    ) -> None:
         tenant = await _active(db, connected=False)
         calendar = InMemoryCalendar()
-        llm = ScriptedLLM(said("", TOMORROW), said("לא הצלחתי לקרוא את היומן."))
-        _, channel, _ = await _turn(db, owner_conn, tenant, llm, calendar)
-        assert [m.body for m in channel.sent] == [
-            f"לא הצלחתי לקרוא את היומן.\n\n{t('calendar_disconnected', 'he')}"
-        ]
+        llm = ScriptedLLM(said("", TOMORROW), said("אני עוד לא רואה את היומן שלך."))
+        advance, channel, _ = await _turn(
+            db, owner_conn, tenant, llm, calendar, settings=onboarding_settings
+        )
+        [text] = [m.body for m in channel.sent]
+        url = text.rsplit("\n", 1)[-1]
+        line = t("calendar_not_connected", "he", url=url)
+        assert text == f"אני עוד לא רואה את היומן שלך.\n\n{line}"
+        assert link_payload(text).tenant_id == tenant.id
         assert calendar.calls == []
+        # The link is a bearer credential: the history keeps a placeholder.
+        assert advance.reply == text.replace(url, LINK_PLACEHOLDER)
 
-    async def test_an_account_that_stopped_working_gets_the_fixed_line(
-        self, db: Database, owner_conn: Any
+    async def test_an_account_that_stopped_working_gets_a_link_to_reconnect(
+        self, db: Database, owner_conn: Any, onboarding_settings: Settings
     ) -> None:
         tenant = await _active(db)
         calendar = Failing(CalendarNotConnectedError(401))
         llm = ScriptedLLM(said("", TOMORROW), said(""))
-        _, channel, _ = await _turn(db, owner_conn, tenant, llm, calendar)
+        _, channel, _ = await _turn(
+            db, owner_conn, tenant, llm, calendar, settings=onboarding_settings
+        )
+        [text] = [m.body for m in channel.sent]
+        assert text == t("calendar_not_connected", "he", url=text.rsplit("\n", 1)[-1])
+
+    async def test_without_settings_the_line_says_to_ask(
+        self, db: Database, owner_conn: Any
+    ) -> None:
+        tenant = await _active(db, connected=False)
+        llm = ScriptedLLM(said("", TOMORROW), said(""))
+        _, channel, _ = await _turn(db, owner_conn, tenant, llm)
         assert [m.body for m in channel.sent] == [t("calendar_disconnected", "he")]
 
 

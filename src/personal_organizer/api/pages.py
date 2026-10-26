@@ -58,6 +58,12 @@ PAGE_CSS: Final = (
     "button:focus-visible{outline:3px solid var(--accent);outline-offset:3px}"
     ".note{margin-top:1rem;font-size:.9rem;color:var(--muted)}"
     "section+section{margin-top:2.5rem;border-top:1px solid var(--rule);padding-top:2rem}"
+    "details{margin-top:2.5rem;border-top:1px solid var(--rule);padding-top:1.5rem}"
+    "summary{cursor:pointer;font-weight:700;color:var(--accent)}"
+    "summary:focus-visible{outline:3px solid var(--accent);outline-offset:3px}"
+    "details[open] summary{margin-bottom:1rem}"
+    "ol{margin:0 0 1rem;padding-inline-start:1.25rem}"
+    "li{margin-bottom:.5rem}"
 )
 
 

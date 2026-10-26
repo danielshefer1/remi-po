@@ -1,4 +1,10 @@
-"""The onboarding conversation: the ``zone`` and ``connect`` steps (D10).
+"""The onboarding conversation: the ``zone`` step (D10).
+
+Setup is the time zone only. The calendar is optional: the reply that sets the zone also
+activates the tenant and offers the connect link, which works for an active tenant too
+(``onboarding/connect.py``). The ``connect`` step is only for tenants who reached it before
+the calendar became optional: their next message answers them, offers the link and activates
+them.
 
 The tenant gate calls this for every message from an ``onboarding`` tenant. It decides from
 four things only: the tenant's stored step, whether this is their first recorded message,
@@ -10,13 +16,13 @@ per decision, and *returns* an :class:`Advance` rather than writing it. The gate
 advance together with the finished inbox row and its copy into ``messages`` (D7), in one
 transaction. Consider a job that dies after a send and before that commit. It re-runs into a
 send that is already claimed and an advance that has not happened, and the step moves once.
-The reverse order, writing the step first, would make the re-run treat the same message as
-a ``connect``-step message and send the link a second time.
+The reverse order, writing the step first, would make the re-run hand the same message to
+the agent, which would answer it a second time.
 
 **The guess is taken, not asked.** When the number's country has one zone, the first message
-sets it and goes straight to the connect link, saying which zone was set. Without a guess the
-user is asked for a city. A city is accepted whenever it is sent, in either step, so a wrong
-guess is fixed by naming one. Nothing offers numbered options.
+sets it and finishes setup, saying which zone was set. Without a guess the user is asked for
+a city. A wrong guess is fixed afterwards by telling the agent. Nothing offers numbered
+options.
 
 **The model writes the words, code keeps the rails (D10 of docs/plan-iteration-04.md).** With
 an LLM, the branches that send a fixed, context-free text -- the welcome, the guessed zone, an
@@ -31,8 +37,7 @@ conversation exactly; so is a model that refuses, or is down on the job's last a
 
 *shortcut: a crash between the send and the commit loses what the model decided with that
 reply, a ``set_timezone`` say, and the reply is not recorded for the history either. The next
-message asks again, and a link already sent keeps working, because connecting depends on
-status, not step. Store the decision with the send if that ever shows up in the logs.*
+message asks again. Store the decision with the send if that ever shows up in the logs.*
 """
 
 from __future__ import annotations
@@ -69,6 +74,7 @@ CONNECT: Final = "onboarding:connect"
 REPLY: Final = "onboarding:reply"
 
 ZONE_STEP: Final = "zone"
+#: Only tenants who reached it before the calendar became optional are in it.
 CONNECT_STEP: Final = "connect"
 
 #: Stands in for the connect link in a recorded reply: the link is a bearer credential, and a
@@ -104,10 +110,11 @@ TOOLS: Final[tuple[Mapping[str, Any], ...]] = (
 @dataclass(frozen=True, slots=True)
 class Advance:
     """The state change a step decided, for the gate to commit with the finished row.
-    ``None`` leaves a field as it is. ``reply`` is the text sent, to record (D4)."""
+    ``None`` leaves a field as it is. ``activate`` ends onboarding. ``reply`` is the text
+    sent, to record (D4)."""
 
     timezone: str | None = None
-    next_step: str | None = None
+    activate: bool = False
     language: str | None = None
     reply: str | None = None
 
@@ -127,7 +134,7 @@ def welcome_text(language: str) -> str:
 
 
 def guessed_text(language: str, zone: str, url: str, *, welcome: bool = False) -> str:
-    """The zone taken from the number, how to change it, and the link."""
+    """The zone taken from the number, how to change it, and the offer of the link."""
     guessed = t("zone_guessed", language, zone=zone_label(zone, language))
     text = f"{guessed}\n\n{t('connect_link', language, url=url)}"
     return f"{t('welcome', language)}\n\n{text}" if welcome else text
@@ -166,7 +173,7 @@ async def next_reply(
 
     async def confirm(zone: str) -> Reply:
         text = connect_text(language, zone, await link())
-        return Reply(CONNECT, text, Advance(timezone=zone, next_step=CONNECT_STEP))
+        return Reply(CONNECT, text, Advance(timezone=zone, activate=True))
 
     async def talk(
         model: LLMProvider,
@@ -177,9 +184,9 @@ async def next_reply(
     ) -> Reply:
         """The model's answer over the suffix: the guessed zone ``preset`` and the link, the
         link alone when ``url`` is given, else the city question. ``fixed`` is the text sent
-        without a model for this branch, in a given language."""
+        without a model for this branch, in a given language. Offering the link ends setup."""
         decided: dict[str, str] = {}
-        taken = Advance() if preset is None else Advance(timezone=preset, next_step=CONNECT_STEP)
+        taken = Advance(timezone=preset, activate=url is not None)
 
         async def run_tool(name: str, arguments: Mapping[str, Any]) -> str:
             if name == "set_timezone":
@@ -216,13 +223,13 @@ async def next_reply(
         zone = decided.get("timezone")
         if zone is not None:
             suffix = connect_text(lang, zone, url or await link())
-            advance = Advance(timezone=zone, next_step=CONNECT_STEP, language=switched)
-        elif preset is not None and url is not None:
-            suffix = guessed_text(lang, preset, url)
-            advance = replace(taken, language=switched)
+            advance = Advance(timezone=zone, activate=True, language=switched)
         else:
-            suffix = t("connect_link", lang, url=url) if url else t("zone_ask_city", lang)
-            advance = Advance(language=switched)
+            if preset is not None and url is not None:
+                suffix = guessed_text(lang, preset, url)
+            else:
+                suffix = t("connect_link", lang, url=url) if url else t("zone_ask_city", lang)
+            advance = replace(taken, language=switched)
         said = said.strip()
         text = f"{said}\n\n{suffix}"
         echoed = "http" in said.lower() or LINK_PLACEHOLDER in said
@@ -234,14 +241,14 @@ async def next_reply(
     async def decide() -> Reply:
         zone = match_zone(row.body) if row.body else None
         if tenant.step != ZONE_STEP:
-            # ``connect``, and defensively anything else: connecting is the only way out. A
-            # city still replaces the zone set before.
+            # ``connect`` from before the calendar was optional, and defensively anything else:
+            # answer, offer the link and finish. A city still replaces the zone set before.
             if zone is not None:
                 return await confirm(zone)
             url = await link()
             if llm is not None:
                 return await talk(llm, lambda lang: t("connect_link", lang, url=url), url=url)
-            return Reply(REPLY, t("connect_link", language, url=url), Advance())
+            return Reply(REPLY, t("connect_link", language, url=url), Advance(activate=True))
         # A first message is never read as an answer to a question not yet asked.
         if zone is not None and not tenant.first_message:
             return await confirm(zone)
@@ -254,7 +261,7 @@ async def next_reply(
 
             if llm is not None:
                 return await talk(llm, fixed, url=url, preset=guess)
-            return Reply(REPLY, fixed(language), Advance(timezone=guess, next_step=CONNECT_STEP))
+            return Reply(REPLY, fixed(language), Advance(timezone=guess, activate=True))
         if tenant.first_message:
             if llm is not None:
                 return await talk(llm, welcome_text)
@@ -303,11 +310,12 @@ async def onboarding_step(
         # shortcut: the sent text then isn't in the history, and what the first run decided
         # is lost (the next message asks again); store both with the send if that bites.
         log.info("onboarding.reply_already_sent", inbox_id=str(row.id))
-        # In the zone step with a guess, that branch took the guess, which needs no model.
+        # In the zone step with a guess, that branch took the guess, which needs no model; any
+        # REPLY outside the zone step offered the link. Both finished setup.
+        if tenant.step != ZONE_STEP:
+            return Advance(activate=True)
         guess = guess_zone(address)
-        if tenant.step == ZONE_STEP and guess is not None:
-            return Advance(timezone=guess, next_step=CONNECT_STEP)
-        return Advance()
+        return Advance(timezone=guess, activate=True) if guess is not None else Advance()
     reply = await next_reply(
         db,
         row,

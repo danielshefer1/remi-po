@@ -23,6 +23,15 @@ PAGE_TEXT: Final[dict[str, dict[str, dict[str, str]]]] = {
             "number_hint": "עבור מספר הוואטסאפ שמסתיים בספרות",
             "button": "המשך ל-Google",
             "revoke": "אפשר לבטל את הגישה בכל עת בחשבון Google.",
+            "apple": "משתמשים ביומן של Apple?",
+            "apple_body": "הכי פשוט לנהל את האירועים ביומן Google ולראות אותם גם באייפון. "
+            "ככה מסנכרנים:",
+            "apple_step_1": "באייפון: הגדרות ← אפליקציות ← לוח שנה ← חשבונות לוח שנה ← "
+            "הוספת חשבון ← Google.",
+            "apple_step_2": "מתחברים עם חשבון Google, ומוודאים ש'לוחות שנה' מופעל.",
+            "apple_step_3": "באפליקציית לוח השנה של Apple יופיעו מעכשיו גם האירועים מ-Google, "
+            "כולל מה שאני מוסיף.",
+            "apple_after": "ואז מחברים כאן את אותו חשבון Google:",
         },
         "en": {
             "title": "Connect Google Calendar",
@@ -30,6 +39,15 @@ PAGE_TEXT: Final[dict[str, dict[str, dict[str, str]]]] = {
             "number_hint": "For the WhatsApp number ending in",
             "button": "Continue to Google",
             "revoke": "You can remove access at any time in your Google Account.",
+            "apple": "Use Apple Calendar?",
+            "apple_body": "The easiest way is to keep your events in Google Calendar and see "
+            "them on your iPhone too. Here's how to sync them:",
+            "apple_step_1": "On your iPhone, go to Settings, Apps, Calendar, Calendar Accounts, "
+            "Add Account, then Google.",
+            "apple_step_2": "Sign in with your Google account and make sure Calendars is on.",
+            "apple_step_3": "Your Google events, including the ones I add, now show up in "
+            "Apple Calendar.",
+            "apple_after": "Then connect that same Google account here:",
         },
     },
     "connected": {

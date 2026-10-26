@@ -1,8 +1,9 @@
 """``schedule:briefing``'s logic: one morning message a local day, and its fallbacks.
 
 The model writes it from today's events and still-pending reminders. Code sends a fixed list
-when the model is down on the last attempt, refuses, or writes something unusable, and the
-reminders alone with the ``calendar_disconnected`` line when the calendar is gone.
+when the model is down on the last attempt, refuses, or writes something unusable; the
+reminders alone when there is no calendar; and with the ``calendar_disconnected`` line when the
+connection stopped working.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from personal_organizer.core.errors import (
+    CalendarNotConnectedError,
     CalendarProviderRejectedError,
     CalendarProviderUnavailableError,
     LLMRejectedError,
@@ -287,21 +289,29 @@ class TestSendBriefing:
         fallback = fallback_briefing([DENTIST], [], zone=ZONE, language="he")
         assert [m.body for m in gowa.sent] == [fallback]
 
-    async def test_a_disconnected_calendar_sends_reminders_and_the_disconnected_line(
-        self, db: Database
-    ) -> None:
+    async def test_no_calendar_sends_the_reminders_alone(self, db: Database) -> None:
+        """The calendar is optional: no nagging line, and no model to call an unread day empty."""
         tenant_id = await _tenant(db, connected=False)
         await _remind(db, tenant_id, datetime(2026, 10, 15, 18, tzinfo=ZONE))
         _, gowa = await _brief(db, tenant_id, NoLLM())
         listed = fallback_briefing([], await _pending(db, tenant_id), zone=ZONE, language="he")
-        assert [m.body for m in gowa.sent] == [f"{listed}\n\n{t('calendar_disconnected', 'he')}"]
+        assert [m.body for m in gowa.sent] == [listed]
 
-    async def test_a_disconnected_calendar_and_no_reminders_is_just_the_line(
+    async def test_no_calendar_and_no_reminders_sends_nothing(self, db: Database) -> None:
+        tenant_id = await _tenant(db, connected=False)
+        status, gowa = await _brief(db, tenant_id, NoLLM())
+        assert status is None
+        assert gowa.attempts == []
+        assert await _briefed_on(db, tenant_id) == DAY
+
+    async def test_a_connection_that_stopped_working_sends_reminders_and_says_so(
         self, db: Database
     ) -> None:
-        tenant_id = await _tenant(db, connected=False)
-        _, gowa = await _brief(db, tenant_id, NoLLM())
-        assert [m.body for m in gowa.sent] == [t("calendar_disconnected", "he")]
+        tenant_id = await _tenant(db)
+        await _remind(db, tenant_id, datetime(2026, 10, 15, 18, tzinfo=ZONE))
+        _, gowa = await _brief(db, tenant_id, NoLLM(), Failing(CalendarNotConnectedError(422)))
+        listed = fallback_briefing([], await _pending(db, tenant_id), zone=ZONE, language="he")
+        assert [m.body for m in gowa.sent] == [f"{listed}\n\n{t('calendar_disconnected', 'he')}"]
 
     async def test_a_calendar_outage_retries_then_sends_reminders_and_says_so(
         self, db: Database

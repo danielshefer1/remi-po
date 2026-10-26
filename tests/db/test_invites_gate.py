@@ -89,7 +89,8 @@ class TestTenantGate:
         assert disposition == "onboarding"
         tenant = await tenant_by_phone(db, IL_PHONE)
         assert tenant is not None
-        assert tenant.status == "onboarding"
+        # An Israeli number's zone is guessed, which is all setup needs: the calendar is optional.
+        assert tenant.status == "active"
         assert await _invite_state(owner_conn) == [(True, False)]
 
     async def test_a_revoked_invite_is_turned_away(

@@ -6,14 +6,17 @@ conversation. The templates hold no braces besides their placeholders, and value
 or system-supplied strings (a zone name, a URL) inserted with ``format_map``. A value is
 never itself parsed as a template.
 
-``connect_link`` ends with the URL on a line of its own. WhatsApp linkifies a bare URL
+``connect_link`` ends setup: the calendar is optional, so it offers the link rather than
+asking for it, and ends with the URL on a line of its own. WhatsApp linkifies a bare URL
 reliably, but not one with a character glued to it. ``all_set`` is sent by the
-``onboarding:connected`` task (PR 4). ``agent_unavailable``, ``calendar_disconnected`` and
-the confirm outcomes (``event_*``, ``proposal_closed``) are the agent's
-(``messaging.agent``). ``reminder`` is sent by the reminder job, and the ``briefing_*``
-lines by the morning briefing (Iteration 05). ``voice_unheard`` answers a voice note that
-couldn't be heard (Iteration 06). The ``group_*`` and ``outing_*`` lines are the family
-groups' (Iteration 07). ``{zone}`` is a ``timezones.zone_label``
+``onboarding:connected`` task once a calendar connects, whenever that is. ``agent_unavailable``,
+``calendar_not_connected`` (with a fresh link), ``calendar_disconnected`` (no link: the
+briefing and a failed add send it) and the confirm outcomes (``event_*``,
+``proposal_closed``) are the agent's (``messaging.agent``). ``reminder`` is sent by the
+reminder job, and the ``briefing_*`` lines by the morning briefing (Iteration 05).
+``voice_unheard`` answers a voice note that couldn't be heard (Iteration 06). The ``group_*``
+and ``outing_*`` lines are the family groups' (Iteration 07). ``{zone}`` is a
+``timezones.zone_label``
 ("Jerusalem"), never an IANA name. No line offers numbered options: people answer in words.
 """
 
@@ -27,8 +30,8 @@ from personal_organizer.messaging.language import ENGLISH
 
 _EN: Final = {
     "welcome": (
-        "Hi! I'm your personal organizer. I can check your Google Calendar and add things to "
-        "it, right here in WhatsApp."
+        "Hi! I'm your personal organizer, right here in WhatsApp. I can remind you of things, "
+        "remember what matters to you and, if you connect it, keep an eye on your Google Calendar."
     ),
     "zone_guessed": (
         "I've set your clock to {zone} time, going by your number. If you're somewhere else, "
@@ -38,19 +41,23 @@ _EN: Final = {
     "zone_retry": "Hmm, I don't know that one. What's the nearest big city?",
     "zone_set": "Got it, you're on {zone} time.",
     "connect_link": (
-        "Now let's connect your Google Calendar. Open this link and sign in with Google. "
-        "It works once and expires soon:\n{url}"
+        "That's it, you're all set! Every morning at 7:30 I'll send you a quick look at your "
+        "day; just tell me if you'd like another time, or none. Want me to see your Google "
+        "Calendar too? Connect it here whenever you like. The link works once and expires "
+        "soon, but I can always send you a new one:\n{url}"
     ),
     "all_set": (
-        "You're all set, your Google Calendar is connected! Ask me things like "
-        '"what do I have tomorrow?" or "add the dentist on Thursday at 9". '
-        "I'll also send you a quick look at your day every morning at 7:30. Just tell me if "
-        "you'd like another time, or none."
+        "Your Google Calendar is connected! Ask me things like "
+        '"what do I have tomorrow?" or "add the dentist on Thursday at 9", and your morning '
+        "message will show your day's events too."
     ),
     "agent_unavailable": "Sorry, I couldn't answer just now. Try me again in a minute.",
+    "calendar_not_connected": (
+        "Your calendar isn't connected, so I can't see it. You can connect it here:\n{url}"
+    ),
     "calendar_disconnected": (
-        "Your Google Calendar connection has stopped working. Please ask the person who "
-        "invited you to reconnect it."
+        "Your Google Calendar connection has stopped working. Just ask me and I'll send you a "
+        "link to reconnect it."
     ),
     "event_added": "Done, it's in your calendar:\n{summary}",
     "event_cancelled": "No problem, I didn't add it.",
@@ -85,8 +92,8 @@ _EN: Final = {
 
 _HE: Final = {
     "welcome": (
-        "היי! אני העוזר האישי שלך. אפשר לשאול אותי מה יש ביומן Google שלך ולבקש ממני להוסיף "
-        "אליו דברים, ישר מכאן בוואטסאפ."
+        "היי! אני העוזר האישי שלך, ישר כאן בוואטסאפ. אפשר לבקש ממני תזכורות, לספר לי דברים "
+        "שכדאי שאזכור, ואם מחברים את יומן Google, גם לשאול מה יש בו ולהוסיף אליו דברים."
     ),
     "zone_guessed": (
         "כיוונתי לך את השעון לשעון {zone}, לפי המספר שלך. ואם זה לא נכון, "
@@ -96,18 +103,21 @@ _HE: Final = {
     "zone_retry": "לא הכרתי את המקום הזה. מה העיר הגדולה הכי קרובה?",
     "zone_set": "מעולה, כיוונתי לשעון {zone}.",
     "connect_link": (
-        "עכשיו נחבר את יומן Google שלך. צריך לפתוח את הקישור ולהתחבר עם Google. "
-        "הוא עובד פעם אחת ותוקפו קצר:\n{url}"
+        "זהו, הכול מוכן! כל בוקר ב-7:30 אשלח לך הצצה קצרה ליום שלך, ואם נוח לך שעה אחרת, "
+        "או שעדיף בלי, אפשר פשוט לכתוב לי. רוצה שאראה גם את יומן Google שלך? אפשר לחבר אותו "
+        "כאן מתי שנוח. הקישור עובד פעם אחת ותוקפו קצר, אבל תמיד אפשר לבקש ממני חדש:\n{url}"
     ),
     "all_set": (
-        'הכול מוכן, יומן Google שלך מחובר! אפשר לשאול אותי למשל "מה יש לי מחר?" '
-        'או "תוסיף רופא שיניים ביום חמישי בתשע". '
-        "וכל בוקר ב-7:30 אשלח לך הצצה קצרה ליום שלך. אם נוח לך שעה אחרת, או שעדיף בלי, "
-        "אפשר פשוט לכתוב לי."
+        'יומן Google שלך מחובר! אפשר לשאול אותי למשל "מה יש לי מחר?" '
+        'או "תוסיף רופא שיניים ביום חמישי בתשע", ומעכשיו גם ההודעה של הבוקר תראה '
+        "את האירועים של היום."
     ),
     "agent_unavailable": "סליחה, לא הצלחתי לענות כרגע. אפשר לנסות שוב בעוד דקה.",
+    "calendar_not_connected": (
+        "היומן שלך לא מחובר, אז אני לא רואה אותו. אפשר לחבר אותו כאן:\n{url}"
+    ),
     "calendar_disconnected": (
-        "החיבור ליומן Google שלך הפסיק לעבוד. כדאי לבקש ממי שהזמין אותך לחבר אותו מחדש."
+        "החיבור ליומן Google שלך הפסיק לעבוד. אפשר לבקש ממני ואשלח קישור לחבר אותו מחדש."
     ),
     "event_added": "בוצע, זה ביומן:\n{summary}",
     "event_cancelled": "אין בעיה, לא הוספתי.",

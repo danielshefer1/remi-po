@@ -302,6 +302,51 @@ class TestRespond:
     async def test_no_tool_call_no_fixed_line(self) -> None:
         assert await self._respond(ScriptedLLM(said("שלום!")), account=None) == "שלום!"
 
+    @staticmethod
+    async def _with_link(llm: ScriptedLLM, account: CalendarConnection | None) -> str:
+        async def connect_link() -> str:
+            return "https://po.example/connect/TOKEN"
+
+        return await respond(
+            [],
+            "מה יש לי מחר?",
+            TENANT,
+            llm=llm,
+            calendar=InMemoryCalendar(),
+            account=account,
+            now=datetime(2026, 10, 12, 9, 0, tzinfo=UTC),
+            connect_link=connect_link,
+        )
+
+    async def test_not_connected_says_so_with_a_link_to_connect(self) -> None:
+        llm = ScriptedLLM(
+            said("", call("list_events", start="2026-10-13T00:00", end="2026-10-14T00:00")),
+            said("אני עוד לא רואה את היומן שלך."),
+        )
+        line = t("calendar_not_connected", "he", url="https://po.example/connect/TOKEN")
+        assert await self._with_link(llm, None) == f"אני עוד לא רואה את היומן שלך.\n\n{line}"
+
+    @pytest.mark.parametrize("account", [None, ACCOUNT])
+    async def test_connect_calendar_sends_the_link(
+        self, account: CalendarConnection | None
+    ) -> None:
+        """Asked for, it is sent even to a connected tenant: reconnecting is how a calendar
+        that stopped working comes back."""
+        llm = ScriptedLLM(said("", call("connect_calendar")), said("בשמחה."))
+        line = t("calendar_not_connected", "he", url="https://po.example/connect/TOKEN")
+        assert await self._with_link(llm, account) == f"בשמחה.\n\n{line}"
+        assert llm.calls[1][-1].content.startswith("ok:")
+
+    async def test_an_overlong_answer_gives_way_to_the_link(self) -> None:
+        llm = ScriptedLLM(said("", call("connect_calendar")), said("x" * 5000))
+        line = t("calendar_not_connected", "he", url="https://po.example/connect/TOKEN")
+        assert await self._with_link(llm, None) == line
+
+    def test_the_prompt_says_whether_the_calendar_is_connected(self) -> None:
+        now = datetime(2026, 10, 12, 12, 0, tzinfo=JERUSALEM)
+        assert "Calendar is connected." in agent_prompt("he", now)
+        assert "Calendar isn't connected yet." in agent_prompt("he", now, connected=False)
+
     @pytest.mark.parametrize("text", ["see https://evil.example", "open [link]"])
     async def test_a_url_or_the_link_placeholder_drops_the_reply(self, text: str) -> None:
         assert await self._respond(ScriptedLLM(said(text))) == ""

@@ -115,7 +115,7 @@ class TestZoneStep:
         advance, channel = await _step(
             db, owner_conn, onboarding_settings, _state(tenant_id, first=first), body="hi"
         )
-        assert advance == Advance(timezone=AMSTERDAM, next_step="connect")
+        assert advance == Advance(timezone=AMSTERDAM, activate=True)
         [message] = channel.sent
         assert message.recipient == NL_PHONE
         url = message.body.rsplit("\n", 1)[-1]
@@ -130,7 +130,7 @@ class TestZoneStep:
         advance, _ = await _step(
             db, owner_conn, onboarding_settings, _state(tenant_id, first=True), body="London"
         )
-        assert advance == Advance(timezone=AMSTERDAM, next_step="connect")
+        assert advance == Advance(timezone=AMSTERDAM, activate=True)
 
     async def test_no_guess_welcome_asks_for_a_city(
         self, db: Database, owner_conn: Any, onboarding_settings: Settings
@@ -169,7 +169,7 @@ class TestZoneStep:
         advance, channel = await _step(
             db, owner_conn, onboarding_settings, _state(tenant_id), body=body, phone=phone
         )
-        assert advance == Advance(timezone=zone, next_step="connect")
+        assert advance == Advance(timezone=zone, activate=True)
         url = channel.sent[0].body.rsplit("\n", 1)[-1]
         assert channel.sent[0].body == connect_text("en", zone, url)
         assert await _kinds(owner_conn) == [CONNECT]
@@ -217,15 +217,17 @@ class TestZoneStep:
 
 
 class TestConnectStep:
+    """Only tenants who reached it before the calendar became optional are in this step."""
+
     @pytest.mark.parametrize("step", ["connect", None])
-    async def test_any_message_resends_the_link(
+    async def test_any_message_offers_the_link_and_finishes_setup(
         self, db: Database, owner_conn: Any, onboarding_settings: Settings, step: str | None
     ) -> None:
         tenant_id = await new_tenant(db, step="connect")
         advance, channel = await _step(
             db, owner_conn, onboarding_settings, _state(tenant_id, step=step), body="hello?"
         )
-        assert advance == Advance()
+        assert advance == Advance(activate=True)
         [message] = channel.sent
         url = message.body.rsplit("\n", 1)[-1]
         assert message.body == t("connect_link", "en", url=url)
@@ -239,7 +241,7 @@ class TestConnectStep:
         advance, channel = await _step(
             db, owner_conn, onboarding_settings, _state(tenant_id, step="connect"), body="London"
         )
-        assert advance == Advance(timezone="Europe/London", next_step="connect")
+        assert advance == Advance(timezone="Europe/London", activate=True)
         url = channel.sent[0].body.rsplit("\n", 1)[-1]
         assert channel.sent[0].body == connect_text("en", "Europe/London", url)
 

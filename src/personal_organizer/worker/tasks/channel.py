@@ -100,7 +100,12 @@ def _on_allowed(db: Database, *, last_attempt: bool) -> OnAllowed:
     llm = agent_llm()
     if llm is not None:
         return functools.partial(
-            agent_turn, db=db, llm=llm, calendar=agent_calendar(), last_attempt=last_attempt
+            agent_turn,
+            db=db,
+            llm=llm,
+            calendar=agent_calendar(),
+            settings=get_settings(),
+            last_attempt=last_attempt,
         )
 
     async def ack(
