@@ -100,6 +100,19 @@ class TestGroups:
         assert row["sender_name"] == "Noa"
         assert row["sender_phone"] == "+972500000002"
 
+    @pytest.mark.parametrize(
+        "order", [("group_key_stub", "group_text"), ("group_text", "group_key_stub")]
+    )
+    async def test_the_real_message_survives_its_key_stub(
+        self, http: AsyncClient, owner_conn: Any, order: tuple[str, str]
+    ) -> None:
+        for name in order:
+            body, headers = gowa.signed(gowa.load(name))
+            assert (await http.post(URL, content=body, headers=headers)).status_code == 200
+
+        rows = await owner_conn.fetch("SELECT message_type, body FROM channel_inbox")
+        assert [(r["message_type"], r["body"]) for r in rows] == [("text", "hi all")]
+
 
 class TestTwoChannels:
     async def test_one_id_on_both_channels_is_two_messages(

@@ -173,6 +173,21 @@ class TestGroups:
         payload["payload"]["poll"]["type"] = "creation"
         assert _parse(payload).messages[0].message_type == "poll"
 
+    def test_a_group_key_stub_is_skipped(self) -> None:
+        """A sender's first message after a key change comes first as a stub with no
+        content, under the real message's id; storing it would drop the real one."""
+        batch = _parse(load("group_key_stub"))
+        assert batch.messages == ()
+        assert batch.skipped == 1
+
+    def test_a_group_voice_note_without_text_is_kept(self) -> None:
+        payload = load("group_text")
+        del payload["payload"]["body"]
+        payload["payload"]["audio"] = load("audio")["payload"]["audio"]
+        (message,) = _parse(payload).messages
+        assert message.message_type == "audio"
+        assert message.group_id == "120363402106000001@g.us"
+
 
 class TestSkipped:
     @pytest.mark.parametrize("name", ["from_me", "reaction"])
