@@ -165,12 +165,32 @@ async def test_set_briefing_refuses_other_times(at: object) -> None:
 
 
 @pytest.mark.parametrize(
+    ("zone", "expected"),
+    [("America/New_York", "America/New_York"), ("london", "Europe/London")],
+)
+async def test_set_timezone_fixes_a_wrong_guess(zone: str, expected: str) -> None:
+    """Setup takes the zone from the number without asking; this is where it is corrected."""
+    schedule = InMemorySchedule(NOW)
+    llm = await _respond(schedule, said("", call("set_timezone", zone=zone)), said("ok"))
+    assert llm.calls[1][-1].content.startswith("ok: time zone set to")
+    assert schedule.timezone == expected
+
+
+async def test_set_timezone_refuses_what_is_not_a_zone() -> None:
+    schedule = InMemorySchedule(NOW)
+    llm = await _respond(schedule, said("", call("set_timezone", zone="Mars")), said("ok"))
+    assert llm.calls[1][-1].content.startswith("error:")
+    assert schedule.timezone is None
+
+
+@pytest.mark.parametrize(
     "tool",
     [
         call("set_reminder", text="call mom", at="2026-10-15T18:00"),
         call("list_reminders"),
         call("cancel_reminder", n=1),
         call("set_briefing", at="08:00"),
+        call("set_timezone", zone="Europe/London"),
     ],
 )
 async def test_without_a_schedule_the_tools_say_so(tool: Any) -> None:

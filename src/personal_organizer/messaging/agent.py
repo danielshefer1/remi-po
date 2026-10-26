@@ -22,15 +22,18 @@ else drops the proposal and goes to the agent, which sees the proposal in the hi
 
 **Errors (D3, D9).** The tool answers a calendar that is not connected (no active row, or
 Composio says the account no longer works) or that refused the call with a short error the
-model reads, so the turn still answers. A not-connected answer also gets the fixed
-``calendar_disconnected`` line under it. An unavailable model or Composio raises, for the job
+model reads, so the turn still answers. The calendar is optional, so not connected is
+ordinary: that answer, or a ``connect_calendar`` call, gets the fixed
+``calendar_not_connected`` line under it with a connect link, issued or reused as onboarding
+does and recorded as :data:`LINK_PLACEHOLDER`. An unavailable model or Composio raises, for the job
 to retry. On the job's last attempt, or when the model refuses, the turn sends the fixed
 ``agent_unavailable`` line instead, under the same kind, so a re-run sends nothing new.
 
 **Reminders (Iteration 05).** ``set_reminder``, ``list_reminders``, ``cancel_reminder`` and
 ``set_briefing`` go through a :class:`~personal_organizer.messaging.schedule.Schedule`. The
 model sees reminders numbered by ``list_reminders``, never their ids, and cancels only by a
-number from a list made in the same turn.
+number from a list made in the same turn. ``set_timezone`` goes through it too: setup takes
+the zone from the number without asking, and this is where a wrong guess is fixed.
 
 **Notes (Iteration 06).** ``remember``, ``list_notes`` and ``forget`` go through a
 :class:`~personal_organizer.messaging.notes.Notes`, numbered like reminders. Every saved note,
@@ -41,17 +44,13 @@ newest first and cut at ``PROFILE_CHARS``, is in the prompt as data. A secret is
 the prompt, numbered, through an :class:`~personal_organizer.messaging.groups.answers.Outings`.
 ``answer_outing`` records their answer by that number, which stops the follow-ups. Coming adds
 nothing to their calendar: only their vote on the group's poll does, and the prompt says so.
-
-*shortcut: the ``calendar_disconnected`` line asks the tenant to go through whoever invited
-them, because the connect flow only links ``onboarding`` tenants (``onboarding/connect.py``).
-Append a fresh connect link, as D9 plans, once that flow lets an active tenant reconnect.*
 """
 
 from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import date, datetime, time, timedelta
 from typing import Any, Final
 from uuid import UUID
@@ -88,6 +87,9 @@ from personal_organizer.messaging.outbox import already_sent, send_once
 from personal_organizer.messaging.schedule import Schedule, TenantSchedule
 from personal_organizer.messaging.tenancy import TenantState, load_history, phone_of
 from personal_organizer.messaging.text import WHATSAPP_TEXT_LIMIT, split_text
+from personal_organizer.messaging.timezones import match_zone, zone_label
+from personal_organizer.onboarding.links import issue_or_reuse_link
+from personal_organizer.settings import Settings
 
 log = structlog.get_logger(__name__)
 
@@ -114,7 +116,7 @@ NOT_CONNECTED: Final = "error: calendar_not_connected"
 UNAVAILABLE: Final = "error: calendar_unavailable"
 NO_SCHEDULE: Final = "error: reminders are not available here"
 _SCHEDULE_TOOLS: Final = frozenset(
-    {"set_reminder", "list_reminders", "cancel_reminder", "set_briefing"}
+    {"set_reminder", "list_reminders", "cancel_reminder", "set_briefing", "set_timezone"}
 )
 NO_NOTES: Final = "error: notes are not available here"
 _NOTES_TOOLS: Final = frozenset({"remember", "list_notes", "forget"})
@@ -187,6 +189,26 @@ TOOLS: Final[tuple[Mapping[str, Any], ...]] = (
                 "all_day": {"type": "boolean", "description": "True for an all-day event"},
             },
             "required": ["title", "start", "end"],
+        },
+    },
+    {
+        "name": "connect_calendar",
+        "description": (
+            "Send them a link to connect, or reconnect, their Google Calendar. The link is put "
+            "under your reply automatically."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "set_timezone",
+        "description": (
+            "Save their time zone when they say they are somewhere else or their times are off. "
+            "Use the IANA name, for example Asia/Jerusalem or America/New_York."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"zone": {"type": "string", "description": "An IANA time zone."}},
+            "required": ["zone"],
         },
     },
     {
@@ -325,7 +347,7 @@ TOOLS: Final[tuple[Mapping[str, Any], ...]] = (
 
 _PROMPT: Final = """\
 You are the WhatsApp assistant of a personal organizer, run privately by one person for a small \
-circle of friends and family. You are talking with a member whose Google Calendar is connected.
+circle of friends and family. You are talking with a member. {calendar}
 
 It is now {weekday} {today}, {clock}, in their time zone, {zone}. Weeks start on Sunday: this \
 week runs from Sunday {week_start} to Saturday {week_end}. The work week is Sunday to Thursday.
@@ -348,8 +370,13 @@ saved below, call remember with exactly "Gender: woman" or "Gender: man" alongsi
 else they asked for, in the same step. Until then phrase around it (an impersonal "you can", \
 an infinitive), never a slashed form like "at/ah" and never a guess, not even from their name.
 - Setup happened earlier in this chat: their time zone was set, from their phone number unless \
-they named a city, and they connected their calendar through a link shown in the history as \
-[link]. Those messages were yours and are right; never revisit or correct them.
+they named a city, and they were offered a link to connect their calendar, shown in the history \
+as [link]. Those messages were yours and are right; never revisit or correct them. If they say \
+they're somewhere else, call set_timezone and say which city's time you set.
+- Connecting their calendar is optional. If they ask to connect or reconnect it, call \
+connect_calendar. When it isn't connected, list_events and propose_event say so, and a line \
+with a link to connect it is added below your reply automatically: say in a few words that you \
+can't see their calendar yet, and never write the link yourself.
 
 Rules:
 - Their language is {language}. Reply in it, unless they write to you in the other one (Hebrew \
@@ -418,13 +445,19 @@ def agent_prompt(
     briefing_at: time | None = None,
     profile: Sequence[str] = (),
     outings: Sequence[str] = (),
+    *,
+    connected: bool = True,
 ) -> str:
     """The system prompt, for ``now`` already in the tenant's zone. ``outings`` are the
-    one-line plans waiting for their answer, numbered from 1 in that order."""
+    one-line plans waiting for their answer, numbered from 1 in that order. ``connected`` is
+    whether they have a calendar connection."""
     waiting = "\n".join(f"{n}. {line}" for n, line in enumerate(outings, 1))
     week_start, week_end = week_of(now.date())
     return _PROMPT.format_map(
         {
+            "calendar": "Their Google Calendar is connected."
+            if connected
+            else "Their Google Calendar isn't connected yet.",
             "weekday": WEEKDAYS[now.weekday()],
             "today": now.date().isoformat(),
             "clock": now.strftime("%H:%M"),
@@ -706,6 +739,15 @@ async def move_briefing(arguments: Mapping[str, Any], schedule: Schedule) -> str
     return f"ok: morning message at {at:%H:%M}"
 
 
+async def move_zone(arguments: Mapping[str, Any], schedule: Schedule, language: str) -> str:
+    """``set_timezone``: any zone :func:`match_zone` knows, by its IANA name or a city."""
+    zone = match_zone(str(arguments.get("zone", "")))
+    if zone is None:
+        return "error: not a time zone; ask which city they are in"
+    await schedule.set_timezone(zone)
+    return f"ok: time zone set to {zone_label(zone, language)} time"
+
+
 def _card_like(run: str) -> bool:
     """4-4-4-4(-3) groups, or one unbroken 13 to 19 digits: not phones, not a list of years."""
     groups = re.split(r"[\s-]+", run)
@@ -800,11 +842,15 @@ async def respond(
     notes: Notes | None = None,
     grants: Grants | None = None,
     outings: Outings | None = None,
+    connect_link: Callable[[], Awaitable[str]] | None = None,
 ) -> str:
     """The model's answer to ``text``, or ``""`` when it has none worth sending.
 
     A reply holding a URL or the link placeholder is dropped: the prompt forbids both, and an
     event title can carry one. ``account`` ``None`` is a tenant with no active connection.
+    A calendar found not connected, or a ``connect_calendar`` call, ends the reply with the
+    ``calendar_not_connected`` line and the URL ``connect_link`` gives; with no
+    ``connect_link``, with the link-less ``calendar_disconnected`` line.
     A ``propose_event`` the model makes is appended to ``proposed``, and the reply ends with
     its confirm question; the caller stores it, or nothing confirms it. With ``schedule``
     ``None``, the reminder and morning-message tools answer that they are not available.
@@ -856,7 +902,12 @@ async def respond(
                 return await list_reminders(schedule, zone, listed)
             if name == "cancel_reminder":
                 return await cancel(arguments, schedule, listed)
+            if name == "set_timezone":
+                return await move_zone(arguments, schedule, tenant.language)
             return await move_briefing(arguments, schedule)
+        if name == "connect_calendar":
+            disconnected = True
+            return "ok: the link goes below your reply; never write one yourself"
         if name == "propose_event":
             if found:
                 return "error: one proposal per message; the first one stands"
@@ -883,6 +934,7 @@ async def respond(
             tenant.briefing_at,
             known,
             [outing_line(poll, zone, tenant.language) for poll in waiting],
+            connected=account is not None,
         ),
         tools=TOOLS,
         run_tool=run_tool,
@@ -899,8 +951,17 @@ async def respond(
         if len(f"{said}\n\n{suffix}") > WHATSAPP_TEXT_LIMIT:
             said = ""
         said = f"{said}\n\n{suffix}".strip()
-    if disconnected:
-        return f"{said}\n\n{t('calendar_disconnected', tenant.language)}".strip()
+    # A proposal means a connected calendar, and its confirm question must stay last and whole.
+    if disconnected and not found:
+        language = tenant.language
+        if connect_link is None:
+            line = t("calendar_disconnected", language)
+        else:
+            line = t("calendar_not_connected", language, url=await connect_link())
+        # The link must arrive whole: a cut reply would lose it.
+        if len(f"{said}\n\n{line}") > WHATSAPP_TEXT_LIMIT:
+            said = ""
+        return f"{said}\n\n{line}".strip()
     return said
 
 
@@ -949,9 +1010,11 @@ async def agent_turn(
     db: Database,
     llm: LLMProvider,
     calendar: CalendarProvider,
+    settings: Settings | None = None,
     last_attempt: bool = False,
 ) -> Advance:
-    """Answer ``row`` for an active ``tenant``: send once, return the reply to record."""
+    """Answer ``row`` for an active ``tenant``: send once, return the reply to record.
+    ``settings`` lets the reply carry a connect link; without them it says to ask for one."""
     address = row.sender_phone or await phone_of(db, tenant.id)
     if address is None:
         # As in onboarding: a BSUID-only sender with no number on file cannot be addressed.
@@ -1008,6 +1071,14 @@ async def agent_turn(
             await pending.drop(session, tenant.id)
     history = await load_history(db, tenant.id)
     proposed: list[CalendarEvent] = []
+    links: list[str] = []
+
+    async def connect_link() -> str:
+        assert settings is not None  # only passed when there are settings
+        url = await issue_or_reuse_link(db, tenant.id, settings=settings, now=now)
+        links.append(url)
+        return url
+
     # The model and calendar log lines inside this turn carry the row, never its words.
     with structlog.contextvars.bound_contextvars(inbox_id=str(row.id)):
         try:
@@ -1024,6 +1095,7 @@ async def agent_turn(
                 notes=TenantNotes(db, tenant.id),
                 grants=TenantGrants(db, tenant.id),
                 outings=TenantOutings(db, tenant.id, now),
+                connect_link=connect_link if settings is not None else None,
             )
         except LLMUnavailableError, CalendarProviderUnavailableError:
             if not last_attempt:
@@ -1052,7 +1124,10 @@ async def agent_turn(
         to=address,
         text=text,
     )
-    return Advance(reply=text)
+    recorded = text
+    for url in links:
+        recorded = recorded.replace(url, LINK_PLACEHOLDER)
+    return Advance(reply=recorded)
 
 
 __all__ = [

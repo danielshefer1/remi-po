@@ -151,14 +151,21 @@ class TestConnectPage:
         assert after == before
         assert after[0][1] is None
 
-    @pytest.mark.parametrize("age", ["fresh", "past_its_ttl"])
+    @pytest.mark.parametrize("age", ["spent", "past_its_ttl"])
     async def test_a_tenant_already_connected_is_told_so(
         self, http: AsyncClient, db: Database, linker: FakeConnectLinker, age: str
     ) -> None:
-        """Not "this link has expired, send a message for a new one": the bot only acks an
-        active tenant, so that page would send them round in a circle."""
+        """An old link tapped after connecting: not "this link has expired, send a message for
+        a new one", which they don't need."""
         tenant_id = await seed_tenant(db, language="en")
         token = await seed_link(db, tenant_id)
+        async with db.tenant_session(TenantId(tenant_id)) as session:
+            await bind_connection(
+                session, tenant_id, connected_account_id="ca_bound", auth_config_id=AUTH_CONFIG_ID
+            )
+            if age == "spent":
+                spent_at = datetime.now(UTC) - REPLAY_WINDOW - timedelta(seconds=1)
+                await session.execute(update(OnboardingLink).values(used_at=spent_at))
         if age == "past_its_ttl":
             token = stale(lambda: link_token(tenant_id))
         await make_active(db, tenant_id)
@@ -168,6 +175,41 @@ class TestConnectPage:
             assert page_text("already_connected", "he")["title"] not in response.text
             assert_hardened(response)
         assert linker.links == []
+
+    @pytest.mark.parametrize("connected", [False, True])
+    async def test_an_active_tenant_with_a_fresh_link_connects(
+        self, http: AsyncClient, db: Database, linker: FakeConnectLinker, connected: bool
+    ) -> None:
+        """The calendar is optional, so setup ends active: the link connects them later, and
+        a fresh one reconnects a calendar that stopped working."""
+        tenant_id = await seed_tenant(db, language="en")
+        token = await seed_link(db, tenant_id)
+        await make_active(db, tenant_id)
+        if connected:
+            async with db.tenant_session(TenantId(tenant_id)) as session:
+                await bind_connection(
+                    session, tenant_id, connected_account_id="ca_old", auth_config_id=AUTH_CONFIG_ID
+                )
+        page = await http.get(f"/connect/{token}")
+        assert page.status_code == 200
+        assert page_text("connect", "en")["button"] in page.text
+        response = await http.post(f"/connect/{token}")
+        assert response.status_code == 303
+        assert response.headers["location"] == REDIRECT_URL
+        assert len(linker.links) == 1
+
+    async def test_the_page_shows_apple_users_how_to_sync_through_google(
+        self, http: AsyncClient, db: Database
+    ) -> None:
+        tenant_id = await seed_tenant(db, language="en")
+        token = await seed_link(db, tenant_id)
+        response = await http.get(f"/connect/{token}")
+        text = page_text("connect", "en")
+        for key in ("apple", "apple_step_1", "apple_step_2", "apple_step_3", "apple_after"):
+            assert text[key] in html.unescape(response.text)
+        # The Apple path ends in the same Google connect: two buttons, one action.
+        assert response.text.count(f'action="/connect/{token}"') == 2
+        assert_hardened(response)
 
     async def test_an_expired_link_of_a_tenant_still_onboarding_is_refused(
         self, http: AsyncClient, db: Database, linker: FakeConnectLinker

@@ -9,4 +9,18 @@
 <button type="submit">{{ text.button }}</button>
 </form>
 <p class="note">{{ text.revoke }}</p>
+{# Apple Calendar is reached through Google: sync Google to the iPhone, then connect Google. #}
+<details>
+<summary>{{ text.apple }}</summary>
+<p>{{ text.apple_body }}</p>
+<ol>
+<li>{{ text.apple_step_1 }}</li>
+<li>{{ text.apple_step_2 }}</li>
+<li>{{ text.apple_step_3 }}</li>
+</ol>
+<p>{{ text.apple_after }}</p>
+<form method="post" action="/connect/{{ token }}">
+<button type="submit">{{ text.button }}</button>
+</form>
+</details>
 {% endblock %}

@@ -7,9 +7,11 @@ D4: a link is spent on POST, never on GET, because WhatsApp fetches links to bui
 D5: the callback believes Composio's API, not its query string. :func:`complete_connect`
 verifies our signed state, fetches the account and checks it before it binds anything.
 
-A tenant who is already connected and opens an old link, or reloads the callback tab after the
-state's hour, is told so (:class:`AlreadyConnected`) rather than sent back to the bot for a new
-link: the bot only acknowledges an active tenant, so that would be a circle.
+The calendar is optional: onboarding ends with the time zone, so a link is usually opened by an
+``active`` tenant, and a usable one connects, or reconnects, whoever it was sent to. A tenant
+whose calendar is connected and who opens a spent or expired link, or reloads the callback tab
+after the state's hour, is told so (:class:`AlreadyConnected`) rather than sent back to the bot
+for a link they don't need.
 """
 
 from __future__ import annotations
@@ -21,9 +23,12 @@ from typing import Final
 from urllib.parse import urlencode
 from uuid import UUID
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from personal_organizer.core.errors import ConfigError
 from personal_organizer.core.types import TenantId
 from personal_organizer.db.engine import Database
+from personal_organizer.db.models.tenant import Tenant
 from personal_organizer.db.repositories.connections import (
     ConcurrentBindError,
     active_connection,
@@ -41,21 +46,21 @@ from personal_organizer.onboarding.tokens import (
 )
 from personal_organizer.settings import Settings
 
-#: Only a tenant still onboarding may use a link. An active one has connected already, through
-#: another link; reconnecting arrives with the calendar-read iteration.
-_LINKABLE: Final = "onboarding"
+#: Who may use a link: a tenant still onboarding, or an active one connecting (or reconnecting)
+#: a calendar, which onboarding no longer requires. Never a suspended one.
+_LINKABLE: Final = frozenset({"onboarding", "active"})
 _ACTIVE: Final = "active"
 #: How many trailing digits of the number the page shows: enough for someone handed another
 #: person's link to see that it is not theirs before connecting their Google account to it.
 PHONE_SUFFIX_DIGITS: Final = 4
 #: A callback may land again (a reload) after the first one activated the tenant.
-_BINDABLE: Final = frozenset({"onboarding", "active"})
+_BINDABLE: Final = _LINKABLE
 #: How long a signed state stays good: the time a user may spend on Composio's and Google's
 #: screens, unverified-app warning included. Generous, because the state is not the authority
 #: (Composio's API is, D5), and a late callback can only bind what it verifies.
 STATE_MAX_AGE_S: Final = 3600
 #: How old a link or state may be and still be recognised as ours: authentic, though too old to
-#: use. It only picks the page. An active tenant with an expired token is told "already
+#: use. It only picks the page. A connected tenant with an expired token is told "already
 #: connected"; anyone else gets the page a forged token gets. It grants nothing: a token past
 #: its own max age never reaches ``consume_link``, Composio or ``bind_connection``. Thirty days,
 #: because an old link sits in the chat and gets tapped long after it expired.
@@ -116,8 +121,8 @@ class Connected:
 
 @dataclass(frozen=True, slots=True)
 class AlreadyConnected:
-    """The tenant is active: a link has nothing left to do, and a late callback nothing to
-    bind. Nothing was written, and no message is due."""
+    """The tenant is active with a connected calendar, and the link or late callback in hand
+    can do nothing more. Nothing was written, and no message is due."""
 
     tenant_id: UUID
     language: str
@@ -137,7 +142,7 @@ class Refused:
 class _Link:
     payload: TokenPayload
     #: Within the link's own max age. A recognised but older link is good for nothing but
-    #: telling an active tenant they are connected.
+    #: telling a connected tenant they are connected.
     usable: bool
 
 
@@ -163,12 +168,13 @@ async def open_link(
     tenant_id = link.payload.tenant_id
     async with db.tenant_session(TenantId(tenant_id)) as session:
         tenant = await get_tenant(session, tenant_id)
-        if tenant is not None and tenant.status == _ACTIVE:
-            return AlreadyConnected(tenant_id=tenant_id, language=tenant.language)
-        if tenant is None or tenant.status != _LINKABLE or not link.usable:
+        if tenant is None or tenant.status not in _LINKABLE:
             return None
-        if not await link_spendable(session, tenant_id, nonce=link.payload.nonce, now=now):
-            return None
+        spendable = link.usable and await link_spendable(
+            session, tenant_id, nonce=link.payload.nonce, now=now
+        )
+        if not spendable:
+            return await _connected(session, tenant)
         phone = await primary_phone(session, tenant_id)
     return LinkPage(
         language=tenant.language,
@@ -179,8 +185,8 @@ async def open_link(
 async def start_connect(
     token: str, *, db: Database, linker: ConnectLinker, config: ConnectConfig, now: datetime
 ) -> str | AlreadyConnected | None:
-    """Spend the link and return Composio's URL, or ``None`` if the link cannot be used. An
-    active tenant's link is not spent.
+    """Spend the link and return Composio's URL, or ``None`` if the link cannot be used: then
+    :class:`AlreadyConnected` instead when the tenant's calendar is connected.
 
     The link is spent *before* Composio is called, in its own transaction. It stays spendable
     for ``REPLAY_WINDOW`` after that first use, so a browser that re-sends the POST (or a
@@ -198,12 +204,11 @@ async def start_connect(
     tenant_id = payload.tenant_id
     async with db.tenant_session(TenantId(tenant_id)) as session:
         tenant = await get_tenant(session, tenant_id)
-        if tenant is not None and tenant.status == _ACTIVE:
-            return AlreadyConnected(tenant_id=tenant_id, language=tenant.language)
-        if tenant is None or tenant.status != _LINKABLE or not link.usable:
+        if tenant is None or tenant.status not in _LINKABLE:
             return None
-        if not await consume_link(session, tenant_id, nonce=payload.nonce, now=now):
-            return None
+        spent = link.usable and await consume_link(session, tenant_id, nonce=payload.nonce, now=now)
+        if not spent:
+            return await _connected(session, tenant)
     state = sign(
         TokenPayload(tenant_id=tenant_id, nonce=payload.nonce),
         secret=config.secret,
@@ -287,13 +292,15 @@ async def _late(state: str, *, db: Database, config: ConnectConfig) -> AlreadyCo
     tenant_id = payload.tenant_id
     async with db.tenant_session(TenantId(tenant_id)) as session:
         tenant = await get_tenant(session, tenant_id)
-        if (
-            tenant is not None
-            and tenant.status == _ACTIVE
-            and await active_connection(session, tenant_id) is not None
-        ):
-            return AlreadyConnected(tenant_id=tenant_id, language=tenant.language)
-    return Refused("expired_state", tenant_id)
+        connected = await _connected(session, tenant) if tenant is not None else None
+    return connected or Refused("expired_state", tenant_id)
+
+
+async def _connected(session: AsyncSession, tenant: Tenant) -> AlreadyConnected | None:
+    """:class:`AlreadyConnected` when ``tenant`` is active with an active connection."""
+    if tenant.status != _ACTIVE or await active_connection(session, tenant.id) is None:
+        return None
+    return AlreadyConnected(tenant_id=tenant.id, language=tenant.language)
 
 
 __all__ = [

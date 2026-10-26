@@ -66,11 +66,7 @@ from personal_organizer.core.types import TenantId
 from personal_organizer.db.engine import Database
 from personal_organizer.db.models.channel import ChannelInbox, ChannelOutbox
 from personal_organizer.db.repositories.messages import record_inbound, record_outbound
-from personal_organizer.db.repositories.tenants import (
-    set_language,
-    set_onboarding_step,
-    set_timezone,
-)
+from personal_organizer.db.repositories.tenants import activate, set_language, set_timezone
 from personal_organizer.interfaces.channel import OutboundChannel
 from personal_organizer.interfaces.llm import LLMProvider
 from personal_organizer.interfaces.voice import Transcriber
@@ -160,8 +156,8 @@ async def _finish_known(
             return
         if change.timezone is not None:
             await set_timezone(session, tenant_id, change.timezone)
-        if change.next_step is not None:
-            await set_onboarding_step(session, tenant_id, change.next_step)
+        if change.activate:
+            await activate(session, tenant_id)
         if change.language is not None:
             await set_language(session, tenant_id, change.language)
         await record_inbound(

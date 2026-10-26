@@ -4,8 +4,10 @@ Once per local day, a short message of today's events and the reminders still to
 model call with no tools writes it from the day as JSON data, so an invite's title can at worst
 make an odd sentence. Code sends a fixed list instead when the model refuses, writes something
 unusable, is down on the job's last attempt, or there is no model at all. An empty day is one
-fixed line, with no model call. A calendar that is not connected gives the reminders and the
-``calendar_disconnected`` line. One that could not be read (refused, or down on the last
+fixed line, with no model call. The calendar is optional: a tenant with no connection gets the
+fixed list of their reminders, or no message on a day without any. A connection Composio says
+no longer works gives the reminders and the ``calendar_disconnected`` line. One that could not
+be read (refused, or down on the last
 attempt; before that it raises for a retry) gives the reminders and the
 ``briefing_calendar_unavailable`` line, or nothing at all when there are none: never "nothing
 on your calendar" about a calendar nobody read. Links never go out: they are stripped from the
@@ -213,7 +215,12 @@ async def send_briefing(
         )
         gendered = gender(await list_notes(session, tenant_id))
     events: Sequence[CalendarEvent] = []
-    problem = "calendar_disconnected" if account is None else None
+    problem = None
+    if account is None and not reminders:
+        # No calendar and nothing to remind: a message would only say there is nothing.
+        async with db.tenant_session(TenantId(tenant_id)) as session:
+            await mark_briefed(session, tenant_id, day)
+        return None
     if account is not None:
         events, problem = await _today(
             calendar,
@@ -228,7 +235,8 @@ async def send_briefing(
             await mark_briefed(session, tenant_id, day)
         return None
     text = ""
-    if (events or reminders) and llm is not None and problem is None:
+    # Without a calendar the fixed list says it all: a model could call the day empty.
+    if (events or reminders) and llm is not None and problem is None and account is not None:
         try:
             text = await compose_briefing(
                 events,

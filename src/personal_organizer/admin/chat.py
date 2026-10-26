@@ -22,7 +22,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import UTC, datetime, time, timedelta
 from typing import Final
@@ -45,6 +45,7 @@ from personal_organizer.messaging.onboarding_text import t
 from personal_organizer.messaging.schedule import InMemorySchedule
 from personal_organizer.messaging.tenancy import TenantState, load_state, phone_of
 from personal_organizer.observability.logging import configure_logging
+from personal_organizer.onboarding.links import issue_or_reuse_link
 from personal_organizer.providers.calendar.composio import ComposioConnector
 from personal_organizer.providers.calendar.memory import InMemoryCalendar
 from personal_organizer.providers.llm.anthropic import AnthropicLLM
@@ -117,10 +118,12 @@ async def chat(
         change = reply.advance
         if change.timezone is not None:
             write(f"(time zone {change.timezone}, in memory only)")
+        if change.activate:
+            write("(setup done, in memory only: from here the agent answers)")
+            return OK
         history += [Message("user", line), Message("assistant", change.reply or reply.text)]
         tenant = replace(
             tenant,
-            step=change.next_step or tenant.step,
             language=change.language or tenant.language,
             first_message=False,
         )
@@ -134,8 +137,9 @@ async def agent_chat(
     account: CalendarConnection | None,
     read: Callable[[str], str] = input,
     write: Callable[[str], None] = _out,
+    connect_link: Callable[[], Awaitable[str]] | None = None,
 ) -> int:
-    """An active tenant's turns until end of input. Touches no database."""
+    """An active tenant's turns until end of input. Touches no database but ``connect_link``'s."""
     history: list[Message] = []
     zone, language = ZoneInfo(tenant.timezone or "UTC"), tenant.language
     waiting: list[CalendarEvent] = []
@@ -175,6 +179,7 @@ async def agent_chat(
                 proposed=waiting,
                 schedule=schedule,
                 notes=notes,
+                connect_link=connect_link,
             )
         write(f"bot [{AGENT_REPLY}]> {text or NO_ANSWER}")
         history += [Message("user", line), Message("assistant", text)]
@@ -215,7 +220,13 @@ async def _agent(
         except ConfigError:
             _out("COMPOSIO__API_KEY is not set; try --fake-calendar")
             return REFUSED
-    return await agent_chat(tenant, llm=llm, calendar=calendar, account=account)
+
+    async def connect_link() -> str:
+        return await issue_or_reuse_link(db, tenant.id, settings=settings, now=datetime.now(UTC))
+
+    return await agent_chat(
+        tenant, llm=llm, calendar=calendar, account=account, connect_link=connect_link
+    )
 
 
 def _parser() -> argparse.ArgumentParser:

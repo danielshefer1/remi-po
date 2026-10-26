@@ -1,4 +1,5 @@
-"""The agent's reminders and morning-message setting, behind one small port (Iteration 05).
+"""The agent's reminders, morning-message setting and time zone, behind one small port
+(Iteration 05).
 
 ``TenantSchedule`` is the worker's: each call is its own ``tenant_session``.
 ``InMemorySchedule`` is ``po-chat``'s, which touches no database, and the tests'.
@@ -13,7 +14,7 @@ from uuid import UUID, uuid4
 from personal_organizer.core.types import TenantId
 from personal_organizer.db.engine import Database
 from personal_organizer.db.models.tenant import Reminder
-from personal_organizer.db.repositories import reminders
+from personal_organizer.db.repositories import reminders, tenants
 
 
 class Schedule(Protocol):
@@ -21,6 +22,7 @@ class Schedule(Protocol):
     async def upcoming(self) -> list[Reminder]: ...
     async def cancel(self, reminder_id: UUID) -> bool: ...
     async def set_briefing(self, at: time | None) -> None: ...
+    async def set_timezone(self, zone: str) -> None: ...
 
 
 class TenantSchedule:
@@ -47,14 +49,20 @@ class TenantSchedule:
         async with self._db.tenant_session(TenantId(self._tenant_id)) as session:
             await reminders.set_briefing(session, self._tenant_id, at)
 
+    async def set_timezone(self, zone: str) -> None:
+        async with self._db.tenant_session(TenantId(self._tenant_id)) as session:
+            await tenants.set_timezone(session, self._tenant_id, zone)
+
 
 class InMemorySchedule:
-    """The same behaviour in a list. ``reminders`` and ``briefing_at`` are there to assert on."""
+    """The same behaviour in a list. ``reminders``, ``briefing_at`` and ``timezone`` are there
+    to assert on."""
 
     def __init__(self, now: datetime) -> None:
         self.now = now
         self.reminders: list[Reminder] = []
         self.briefing_at: time | None = time(7, 30)
+        self.timezone: str | None = None
 
     async def add(self, text: str, due_at: datetime) -> None:
         if any((r.status, r.text, r.due_at) == ("pending", text, due_at) for r in self.reminders):
@@ -74,6 +82,9 @@ class InMemorySchedule:
 
     async def set_briefing(self, at: time | None) -> None:
         self.briefing_at = at
+
+    async def set_timezone(self, zone: str) -> None:
+        self.timezone = zone
 
 
 __all__ = ["InMemorySchedule", "Schedule", "TenantSchedule"]
