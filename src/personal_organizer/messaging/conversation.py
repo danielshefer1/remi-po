@@ -27,7 +27,8 @@ from personal_organizer.observability.langfuse import observation
 log = structlog.get_logger(__name__)
 
 MAX_TOOL_ROUNDS: Final = 4
-MAX_TOKENS: Final = 1024
+# Adaptive thinking counts against this too; 1024 cut off real turns mid-thought.
+MAX_TOKENS: Final = 4096
 
 #: ``(name, arguments) -> result text``.
 RunTool = Callable[[str, Mapping[str, Any]], Awaitable[str]]
