@@ -4,9 +4,10 @@ The JSON under ``gowa/`` follows the shapes in the gateway's ``docs/webhook-payl
 with fake ids and the PII corpus's phone number, so a leak test can look for it. Replace each
 with a redacted real capture once a device is linked (docs/runbook-whatsapp-gateway.md).
 
-PROVISIONAL: ``group_text``, ``group_mention``, ``group_reply``, ``group_poll_vote`` and
-``direct_poll_vote`` are built from the v9.6.0 docs, not captured; replace them with real
-captures. The mention shape is undocumented, so ``group_mention`` has it as body text.
+``group_text``, ``group_mention``, ``group_reply``, ``group_poll_vote`` and
+``direct_poll_vote`` match staging captures from 2026-10-26 (GOWA v9.6.0), with fake ids,
+numbers and names: group senders arrive with a phone ``from``, a mention of us is body text
+``@<our number>``, and a vote carries ``selected_options``.
 """
 
 from __future__ import annotations
