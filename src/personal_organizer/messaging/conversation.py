@@ -27,8 +27,9 @@ from personal_organizer.observability.langfuse import observation
 log = structlog.get_logger(__name__)
 
 MAX_TOOL_ROUNDS: Final = 4
-# Adaptive thinking counts against this too; 1024 cut off real turns mid-thought.
-MAX_TOKENS: Final = 4096
+# Adaptive thinking counts against this too, and so does every tool call in one completion:
+# a month of class reminders (~50 set_reminder calls) overran 4096.
+MAX_TOKENS: Final = 16384
 
 #: ``(name, arguments) -> result text``.
 RunTool = Callable[[str, Mapping[str, Any]], Awaitable[str]]
