@@ -1,0 +1,14 @@
+{
+  "event": "message",
+  "device_id": "972552640741@s.whatsapp.net",
+  "payload": {
+    "id": "3EB0GROUPTEXT00000001",
+    "chat_id": "120363402106000001@g.us",
+    "from": "972500000002@s.whatsapp.net",
+    "from_lid": "251556368770001@lid",
+    "sender_display_name": "Noa",
+    "from_name": "Noa",
+    "timestamp": "2026-10-21T10:00:00Z",
+    "is_from_me": false
+  }
+}

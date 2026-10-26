@@ -20,7 +20,9 @@ The envelope, one event per POST (``docs/webhook-payload.md`` in the gateway's r
 
 **Groups.** A message in a group (``chat_id`` ending ``@g.us``) keeps ``group_id``; the
 sender is still ``from``, and ``from_name`` is their push name. A resolved poll vote becomes
-``poll_vote`` with the poll id as ``reply_id`` and the first chosen option as text.
+``poll_vote`` with the poll id as ``reply_id`` and the first chosen option as text. A
+sender's first group message after the group's keys change arrives twice under one id: first
+a key stub with no content, then the message. The stub is skipped, so the message is stored.
 
 **Identity is the phone number.** GOWA normalises ``from`` to the phone JID when it can and
 keeps WhatsApp's linked id (LID) in ``from_lid``. The LID becomes the sender's ``user_id``
@@ -163,15 +165,19 @@ def _message(payload: Mapping[str, Any]) -> InboundMessage | None:
     sender = _sender(payload)
     if sender.user_id is None and sender.phone is None:
         return None
+    group_id = chat_id if chat_id is not None and chat_id.endswith(GROUP_SERVER) else None
+    content = _content(payload)
+    if group_id is not None and content["message_type"] == "unknown":
+        return None  # a key stub: storing it would drop the real message under the same id
     return InboundMessage(
         provider_message_id=provider_message_id,
         sender=sender,
         sent_at=_timestamp(payload.get("timestamp")),
         context_message_id=_text(payload.get("replied_to_id")),
-        group_id=chat_id if chat_id is not None and chat_id.endswith(GROUP_SERVER) else None,
+        group_id=group_id,
         sender_name=_text(payload.get("from_name")),
         raw=dict(payload),
-        **_content(payload),
+        **content,
     )
 
 
