@@ -100,9 +100,13 @@ class AnthropicLLM:
 
     @classmethod
     def from_settings(
-        cls, settings: Settings, *, http_client: httpx2.AsyncClient | None = None
+        cls,
+        settings: Settings,
+        *,
+        model: str | None = None,
+        http_client: httpx2.AsyncClient | None = None,
     ) -> AnthropicLLM:
-        """``http_client`` is for tests: the SDK sends every request through it."""
+        """``model`` overrides the chat model; ``http_client`` is for tests (requests use it)."""
         if settings.agent.api_key is None:
             msg = "AnthropicLLM needs AGENT__API_KEY"
             raise ConfigError(msg)
@@ -113,7 +117,7 @@ class AnthropicLLM:
             max_retries=0,
             http_client=http_client,
         )
-        return cls(client, model=settings.models.chat_model)
+        return cls(client, model=model or settings.models.chat_model)
 
     async def complete(
         self,

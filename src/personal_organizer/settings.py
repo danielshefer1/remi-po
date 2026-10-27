@@ -143,6 +143,8 @@ class ModelSettings(BaseModel):
     embedding_model: str
     embedding_dimensions: int = 1536
     transcription_model: str
+    # A stronger model the agent can hand a hard turn to; unset leaves the handoff off.
+    strong_model: str | None = None
     request_timeout_s: float = 60.0
     max_retries: int = 3
 

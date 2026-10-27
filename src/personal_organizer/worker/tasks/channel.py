@@ -83,6 +83,15 @@ def agent_llm() -> AnthropicLLM | None:
 
 
 @functools.cache
+def strong_llm() -> AnthropicLLM | None:
+    """The stronger model's client, built on first use: off unless the agent and it are set."""
+    settings = get_settings()
+    if not settings.agent.enabled or settings.models.strong_model is None:
+        return None
+    return AnthropicLLM.from_settings(settings, model=settings.models.strong_model)
+
+
+@functools.cache
 def agent_calendar() -> ComposioConnector:
     """One Composio client for the process; the agent being on implies Composio is."""
     return ComposioConnector.from_settings(get_settings().composio)

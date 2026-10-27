@@ -112,6 +112,10 @@ def test_it_needs_a_key(settings: Settings) -> None:
         AnthropicLLM.from_settings(settings)
 
 
+def test_from_settings_uses_given_model(agent_settings: Settings) -> None:
+    assert AnthropicLLM.from_settings(agent_settings, model="strong-m")._model == "strong-m"
+
+
 class TestRequest:
     async def test_what_haiku_5_5_accepts(self, agent_settings: Settings) -> None:
         api = Api(answer(text("Hi!")))
