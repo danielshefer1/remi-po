@@ -97,8 +97,11 @@ class InMemorySchedule:
         return sorted(pending, key=lambda r: r.due_at)
 
     async def recent_sent(self) -> list[Reminder]:
-        sent = [r for r in self.reminders if r.status == "sent"]
-        return sorted(sent, key=lambda r: r.due_at, reverse=True)[:5]
+        latest: dict[UUID, Reminder] = {}  # like the repository: one per series, its latest
+        for r in sorted(self.reminders, key=lambda r: r.due_at):
+            if r.status == "sent":
+                latest[r.series_id or r.id] = r
+        return sorted(latest.values(), key=lambda r: r.due_at, reverse=True)[:5]
 
     async def cancel(self, reminder_id: UUID, *, just_once: bool = False) -> bool:
         for reminder in self.reminders:

@@ -80,10 +80,21 @@ def check_rule(rule: str, first: datetime) -> str:
         if not 1 <= count <= _MAX_COUNT:
             raise ValueError(f"COUNT must be between 1 and {_MAX_COUNT}")
         normal = ";".join(f"{k}={parts[k]}" for k in _KEYS if k in parts)
-        series = list(rrulestr(f"{normal};COUNT={count}", dtstart=first.replace(tzinfo=None)))
+        start = first_at(normal, first).replace(tzinfo=None)
+        series = list(rrulestr(f"{normal};COUNT={count}", dtstart=start))
         parts["UNTIL"] = series[-1].strftime("%Y%m%dT%H%M%S")
         del parts["COUNT"]
     return ";".join(f"{k}={parts[k]}" for k in _KEYS if k in parts)
+
+
+def first_at(rule: str, at: datetime) -> datetime:
+    """The rule's first occurrence at or after ``at``, so a Tuesday ``at`` for a Sundays rule
+    becomes the Sunday. Raises ValueError when there is none (``UNTIL`` is before it)."""
+    naive = at.replace(tzinfo=None)
+    first = rrulestr(rule, dtstart=naive).after(naive, inc=True)
+    if first is None:
+        raise ValueError("UNTIL is before the first time, so it would never go off")
+    return first.replace(tzinfo=at.tzinfo)
 
 
 def next_after(rule: str, after: datetime) -> datetime | None:

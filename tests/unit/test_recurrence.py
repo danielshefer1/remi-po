@@ -5,7 +5,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from personal_organizer.messaging.recurrence import check_rule, describe_rule, next_after
+from personal_organizer.messaging.recurrence import check_rule, describe_rule, first_at, next_after
 
 J = ZoneInfo("Asia/Jerusalem")
 FIRST = datetime(2026, 11, 1, 9, 0, tzinfo=J)
@@ -25,6 +25,24 @@ def test_keeps_wall_time_across_dst() -> None:
 
 def test_count_becomes_until() -> None:
     assert check_rule("FREQ=DAILY;COUNT=3", FIRST) == "FREQ=DAILY;UNTIL=20261103T090000"
+
+
+def test_first_at_moves_to_the_rules_first_day() -> None:
+    tuesday = datetime(2026, 10, 27, 8, 0, tzinfo=J)
+    rule = check_rule("FREQ=WEEKLY;BYDAY=SU;COUNT=3", tuesday)
+    times = [first_at(rule, tuesday)]
+    while (nxt := next_after(rule, times[-1])) is not None:
+        times.append(nxt)
+    assert times == [datetime(2026, 11, d, 8, 0, tzinfo=J) for d in (1, 8, 15)]
+
+
+def test_first_at_on_a_rule_day_stays() -> None:
+    assert first_at("FREQ=WEEKLY;BYDAY=SU", FIRST) == FIRST
+
+
+def test_until_before_the_first_time_is_an_error() -> None:
+    with pytest.raises(ValueError, match="UNTIL"):
+        first_at(check_rule("FREQ=DAILY;UNTIL=20261001T090000", FIRST), FIRST)
 
 
 def test_normalises_key_order() -> None:

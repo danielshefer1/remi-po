@@ -84,7 +84,7 @@ from personal_organizer.messaging.notes import Notes, TenantNotes
 from personal_organizer.messaging.onboarding import LINK_PLACEHOLDER, Advance
 from personal_organizer.messaging.onboarding_text import t
 from personal_organizer.messaging.outbox import already_sent, send_once
-from personal_organizer.messaging.recurrence import check_rule, describe_rule
+from personal_organizer.messaging.recurrence import check_rule, describe_rule, first_at
 from personal_organizer.messaging.schedule import Schedule, TenantSchedule
 from personal_organizer.messaging.tenancy import TenantState, load_history, phone_of
 from personal_organizer.messaging.text import WHATSAPP_TEXT_LIMIT, split_text
@@ -410,9 +410,10 @@ write the summary or the question yourself.
 cancels one from list_reminders. A vague time gets a sensible default you state \
 ("tonight" is 20:00, "in the morning" 09:00). Never say a reminder is set unless set_reminder \
 returned ok. list_reminders shows the upcoming ones, and under went_off the last few that \
-already went off. One there was sent, so never set it again unless they ask. 'Skip this week' \
-is cancel_reminder with just_this_one, and 'stop reminding me' cancels the whole series. Say a \
-repeat in plain words.
+already went off. One there was sent, so never set it again unless they ask. One in neither \
+list went off longer ago or was cancelled: say so, and never set it again unless they ask. \
+'Skip this week' is cancel_reminder with just_this_one, and 'stop reminding me' cancels the \
+whole series. Say a repeat in plain words.
 - {briefing}
 - Memory: remember saves a lasting fact, list_notes shows what is saved, forget deletes one \
 from that list. Save when they ask, or when they state a clear, lasting fact about themselves or \
@@ -717,6 +718,7 @@ async def remind(
     if repeat:
         try:
             rule = check_rule(str(repeat), at)
+            at = first_at(rule, at)  # a Tuesday "at" for a Sundays rule starts on the Sunday
         except ValueError as error:
             return f"error: repeat: {error}"
     await schedule.add(text.strip(), at, rule)

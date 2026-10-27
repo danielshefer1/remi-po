@@ -10,11 +10,12 @@ import json
 from dataclasses import replace
 from datetime import UTC, datetime, time
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
 import pytest
 
+from personal_organizer.db.models.tenant import Reminder
 from personal_organizer.interfaces.llm import Completion
 from personal_organizer.messaging.agent import (
     agent_prompt,
@@ -232,6 +233,23 @@ async def test_set_repeating() -> None:
     assert schedule.reminders[0].rule == SUNDAYS
 
 
+async def test_a_first_time_off_the_rules_days_moves_to_the_first_one() -> None:
+    schedule = InMemorySchedule(NOW)
+    arguments = {"text": "trash", "at": "2026-10-27T08:00", "repeat": SUNDAYS}  # a Tuesday
+    out = await remind(arguments, schedule=schedule, zone=J, now=NOW)
+    assert out.startswith("ok: set for 2026-11-01T08:00"), out
+    assert schedule.reminders[0].due_at == datetime(2026, 11, 1, 8, 0, tzinfo=J)
+
+
+async def test_until_before_the_first_time_is_an_error() -> None:
+    schedule = InMemorySchedule(NOW)
+    repeat = "FREQ=DAILY;UNTIL=20261020T080000"
+    arguments = {"text": "trash", "at": "2026-10-27T08:00", "repeat": repeat}
+    out = await remind(arguments, schedule=schedule, zone=J, now=NOW)
+    assert out.startswith("error:"), out
+    assert schedule.reminders == []
+
+
 async def test_bad_rule_is_an_error() -> None:
     schedule = InMemorySchedule(NOW)
     arguments = {"text": "trash", "at": "2026-11-01T08:00", "repeat": "FREQ=HOURLY"}
@@ -254,6 +272,31 @@ async def test_list_reminders_shows_recently_sent() -> None:
     schedule.reminders[0].status = "sent"
     out = await list_reminders(schedule, J, [])
     assert json.loads(out)["went_off"] == [{"text": "Eden", "at": "2026-10-16T18:00"}]
+
+
+async def test_went_off_keeps_one_per_series() -> None:
+    """A daily series fills the last five in five days; an older one-off must still show."""
+    schedule = InMemorySchedule(NOW)
+    await schedule.add("Eden", datetime(2026, 10, 1, 9, 0, tzinfo=J))
+    for text in ("pills", "water"):
+        await schedule.add(text, datetime(2026, 10, 10, 9, 0, tzinfo=J), "FREQ=DAILY")
+        first = schedule.reminders[-1]
+        for day in (11, 12):
+            schedule.reminders.append(
+                Reminder(
+                    id=uuid4(),
+                    text=text,
+                    due_at=datetime(2026, 10, day, 9, 0, tzinfo=J),
+                    status="pending",
+                    rule="FREQ=DAILY",
+                    series_id=first.id,
+                )
+            )
+    for reminder in schedule.reminders:
+        reminder.status = "sent"
+    went_off = json.loads(await list_reminders(schedule, J, []))["went_off"]
+    assert sorted(r["text"] for r in went_off) == ["Eden", "pills", "water"]
+    assert {r["at"] for r in went_off if r["text"] != "Eden"} == {"2026-10-12T09:00"}
 
 
 async def _series() -> tuple[InMemorySchedule, list[UUID]]:

@@ -11,6 +11,7 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 import pytest
 from sqlalchemy import text
@@ -19,6 +20,7 @@ from personal_organizer.core.errors import RejectedChannelError, TransientChanne
 from personal_organizer.core.types import TenantId
 from personal_organizer.db.engine import Database
 from personal_organizer.db.repositories import reminders
+from personal_organizer.db.repositories.tenants import set_timezone
 from personal_organizer.messaging import reminders as delivery
 from personal_organizer.messaging.onboarding_text import t
 from personal_organizer.messaging.outbox import send_once
@@ -280,6 +282,23 @@ async def test_no_target_still_schedules_next(db: Database) -> None:
 
     assert await _status(db, tenant_id, reminder_id) == "failed"
     assert await _pending(db, tenant_id) == [now + timedelta(days=1)]
+
+
+async def test_no_target_steps_in_the_tenants_zone(db: Database) -> None:
+    """In UTC a Sunday 01:00 in Jerusalem is Saturday 23:00, and the next would be Monday."""
+    tenant_id = await _tenant(db, inbound=False)
+    async with db.tenant_session(TenantId(tenant_id)) as session:
+        await set_timezone(session, tenant_id, "Asia/Jerusalem")
+        due = datetime(2026, 11, 1, 1, 0, tzinfo=ZoneInfo("Asia/Jerusalem"))
+        reminder_id = await reminders.add_reminder(
+            session, tenant_id, text=TEXT, due_at=due, rule="FREQ=WEEKLY;BYDAY=SU"
+        )
+    gowa = FakeOutbound(name="gowa")
+
+    await send_reminder(reminder_id, tenant_id, db=db, channels=resolver(gowa), now=due)
+
+    assert await _status(db, tenant_id, reminder_id) == "failed"
+    assert await _pending(db, tenant_id) == [due + timedelta(days=7)]
 
 
 async def test_rerun_schedules_one_next(db: Database) -> None:

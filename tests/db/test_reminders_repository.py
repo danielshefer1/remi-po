@@ -252,6 +252,32 @@ async def test_recent_sent_is_count_based_not_age_based(db: Database) -> None:
         assert [r.id for r in await reminders.recent_sent(session, tenant_id, limit=1)] == [newer]
 
 
+async def test_recent_sent_keeps_one_per_series(db: Database) -> None:
+    """Two daily series would fill the last five in three days; the older one-off stays."""
+    tenant_id = await _tenant(db, "+972500000001")
+    one_off = await _add(db, tenant_id, NOW - timedelta(days=10), "old")
+    latest = []
+    async with db.tenant_session(TenantId(tenant_id)) as session:
+        assert await reminders.finish_reminder(session, tenant_id, one_off, status="sent")
+    for _ in range(2):
+        rid = await _add_rule(db, tenant_id, NOW - timedelta(days=3), DAILY)
+        for _ in range(3):
+            async with db.tenant_session(TenantId(tenant_id)) as session:
+                reminder = await reminders.get_reminder(session, tenant_id, rid)
+                assert reminder is not None
+                assert await reminders.finish_reminder(session, tenant_id, rid, status="sent")
+                nxt = await reminders.schedule_next(
+                    session, tenant_id, reminder, JERUSALEM, after=reminder.due_at
+                )
+            assert nxt is not None
+            last, rid = rid, nxt
+        latest.append(last)
+    async with db.tenant_session(TenantId(tenant_id)) as session:
+        sent = await reminders.recent_sent(session, tenant_id)
+    assert sorted(r.id for r in sent[:2]) == sorted(latest)
+    assert [r.id for r in sent[2:]] == [one_off]
+
+
 async def test_due_reminders_keeps_stale_repeating_rows(db: Database) -> None:
     tenant_id = await _tenant(db, "+972500000001")
     stale = NOW - timedelta(hours=20)

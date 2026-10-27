@@ -18,6 +18,7 @@ from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import Date, Uuid, column, func, insert, select, update
+from sqlalchemy.dialects.postgresql import distinct_on
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from personal_organizer.db.models.tenant import Reminder, Tenant
@@ -113,12 +114,20 @@ async def schedule_next(
 
 
 async def recent_sent(session: AsyncSession, tenant_id: UUID, *, limit: int = 5) -> list[Reminder]:
-    """The last ``limit`` reminders that went off, newest first, of any age."""
+    """The last ``limit`` reminders that went off, newest first, of any age. A repeating
+    series counts once, by its latest, so a daily one doesn't push the rest out."""
+    series = func.coalesce(Reminder.series_id, Reminder.id)  # the first row's id is the key
+    latest = (
+        scoped(select(Reminder.id), Reminder, tenant_id)
+        .where(Reminder.status == "sent")
+        .ext(distinct_on(series))
+        .order_by(series, Reminder.due_at.desc())
+    )
     return list(
         await session.scalars(
             scoped(select(Reminder), Reminder, tenant_id)
-            .where(Reminder.status == "sent")
-            .order_by(Reminder.due_at.desc())
+            .where(Reminder.id.in_(latest))
+            .order_by(Reminder.due_at.desc(), Reminder.id.desc())
             .limit(limit)
         )
     )

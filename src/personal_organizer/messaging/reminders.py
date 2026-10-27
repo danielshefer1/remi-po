@@ -61,9 +61,9 @@ async def send_reminder(
         reminder = await get_reminder(session, tenant_id, reminder_id)
         if reminder is None or reminder.status != "pending":
             return None
+        tenant = await get_tenant(session, tenant_id)
+        zone = ZoneInfo(tenant.timezone if tenant and tenant.timezone else "UTC")
         if reminder.rule is not None and now - reminder.due_at > STALE:
-            tenant = await get_tenant(session, tenant_id)
-            zone = ZoneInfo(tenant.timezone if tenant and tenant.timezone else "UTC")
             if await finish_reminder(session, tenant_id, reminder_id, status="failed"):
                 await schedule_next(session, tenant_id, reminder, zone, after=now)
             return None
@@ -71,7 +71,7 @@ async def send_reminder(
     if target is None:
         async with db.tenant_session(TenantId(tenant_id)) as session:
             if await finish_reminder(session, tenant_id, reminder_id, status="failed"):
-                await schedule_next(session, tenant_id, reminder, ZoneInfo("UTC"), after=now)
+                await schedule_next(session, tenant_id, reminder, zone, after=now)
         return None
     text = t("reminder", target.tenant.language, text=reminder.text)
     status = await send_once(
@@ -93,7 +93,6 @@ async def send_reminder(
                 await record_outbound(
                     session, tenant_id, inbox_id=None, channel=target.channel.name, body=text
                 )
-            zone = ZoneInfo(target.tenant.timezone or "UTC")
             await schedule_next(session, tenant_id, reminder, zone, after=now)
     log.info("reminder.sent", reminder_id=str(reminder_id), status=status)
     return status
