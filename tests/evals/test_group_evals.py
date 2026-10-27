@@ -337,7 +337,8 @@ async def test_free_with_non_sharer_asks_them_by_name(
     reply = await _group_turn(text, llm, group)
     assert group.windows, "who_is_free must be asked"
     assert not_shared in reply, reply
-    assert not any(word in reply.casefold() for word in ("reply", "השב", "1.")), reply
+    # No "reply with" and no numbered menu; "השבוע" or "21.00" are fine.
+    assert not re.search(r"\bהשב\b|\breply\b|^\s*1[.)]\s", reply, re.I | re.M), reply
     assert any(name in reply for name in ("Dana", "Noa", "דנה", "נועה")), reply
     _no_secrets(reply)
 
@@ -393,3 +394,46 @@ async def test_ok_go_ahead_counts(llm: AnthropicLLM) -> None:
     assert "Yael" in reply, reply
     assert re.search(r"18|20|\b(6|8)\b|six|eight", reply, re.I), f"her busy times: {reply}"
     _no_secrets(reply)
+
+
+@pytest.mark.parametrize(
+    ("text", "asker", "history"),
+    [
+        pytest.param(
+            "ok",
+            "Yael",
+            (*ASKED_YAEL, Message("user", "Ronit: Yael, can you bring the cake?")),
+            id="answers-another-member",
+        ),
+        pytest.param("Mom says it's fine", "Yael", ASKED_YAEL, id="for-someone-else"),
+        pytest.param("אמא אומרת שזה בסדר", "יעל", ASKED_YAEL_HE, id="for-someone-else-he"),
+        pytest.param("no thanks", "Yael", ASKED_YAEL, id="declines"),
+        pytest.param("לא, תודה", "יעל", ASKED_YAEL_HE, id="declines-he"),
+        pytest.param(
+            "lol",
+            "Yael",
+            (*ASKED_YAEL, Message("user", "Gal: I just burned the toast. Again.")),
+            id="chat",
+        ),
+        pytest.param(
+            "I approve",
+            "Yael",
+            (
+                *ASKED_YAEL,
+                Message("user", "Gal: How about pizza on Friday instead of cooking?"),
+            ),
+            id="approves-something-else",
+        ),
+        pytest.param(
+            "sure",
+            "Yael",
+            (Message("user", "Gal: Dinner at ours on Friday, everyone?"),),
+            id="no-ask",
+        ),
+    ],
+)
+async def test_not_an_okay(
+    text: str, asker: str, history: tuple[Message, ...], llm: AnthropicLLM
+) -> None:
+    """Read as ``_okayed`` reads it, none of these okays the writer's own calendar."""
+    assert not await approves(f"{asker}: {text}", context=history, llm=llm), text
