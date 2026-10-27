@@ -512,3 +512,57 @@ async def test_approval_llm_down_last_attempt_is_silent(
     assert channel.sent == []
     assert (await _sharing(db, group))[eden] is False
     assert await _asked_now(db, group, eden)
+
+
+async def test_approval_survives_a_retry(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    """The model is down after the okay is saved: the retry still answers, once."""
+    eden = await _asked(db, group, EDEN, "Eden", "ca_eden")
+    channel = FakeOutbound(name="gowa")
+    answer = "ביום שישי עדן עסוקה מ-11 עד 12."
+
+    with pytest.raises(LLMUnavailableError):
+        await _say(
+            db,
+            owner_conn,
+            onboarding_settings,
+            ScriptedLLM(said("YES"), LLMUnavailableError("down")),
+            phone=EDEN,
+            body="מאשרת",
+            channel=channel,
+        )
+    [inbox_id] = await owner_conn.fetchval("SELECT array_agg(id) FROM channel_inbox")
+    llm = ScriptedLLM(said("YES"), said("", FRIDAY), said(answer))
+    await _say(db, owner_conn, onboarding_settings, llm, channel=channel, inbox_id=inbox_id)
+
+    assert [message.body for message in channel.sent] == [
+        f"{answer}\n\n{t('group_shared_on', 'he')}"
+    ]
+    kinds = await owner_conn.fetch("SELECT kind FROM channel_outbox")
+    assert [row["kind"] for row in kinds] == [GROUP_REPLY]
+    assert (await _sharing(db, group))[eden] is True
+    assert not await _asked_now(db, group, eden)
+
+
+async def test_approval_is_read_in_its_chat(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    """An "ok" answering a relative goes to the classifier with that relative's line."""
+    await _member(db, group, DANA, "Dana", "ca_dana", sharing=True)
+    eden = await _asked(db, group, EDEN, "Eden", "ca_eden")
+    await _say(
+        db, owner_conn, onboarding_settings, NoLLM(), phone=DANA, body="Eden, can you bring cake?"
+    )
+    llm = ScriptedLLM(said("NO"))
+
+    channel, _ = await _say(db, owner_conn, onboarding_settings, llm, phone=EDEN, body="ok")
+
+    [messages] = llm.calls
+    # Context lines carry the WhatsApp name, as in the group prompt.
+    assert ("user", "WhatsApp name: Eden, can you bring cake?") in [
+        (message.role, message.content) for message in messages
+    ]
+    assert (messages[-1].role, messages[-1].content) == ("user", "Eden: ok")
+    assert channel.sent == []
+    assert (await _sharing(db, group))[eden] is False

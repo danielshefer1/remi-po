@@ -116,14 +116,17 @@ async def touch_member(
 
 
 async def set_sharing(
-    session: AsyncSession, tenant_id: UUID, group_id: UUID, sharing: bool
+    session: AsyncSession, tenant_id: UUID, group_id: UUID, sharing: bool, *, close_ask: bool = True
 ) -> None:
-    """Okay (or stop) showing busy/free in the group; either answers any open ask.
-    :func:`touch_member` comes first."""
+    """Okay (or stop) showing busy/free in the group; either answers any open ask, unless
+    ``close_ask`` is false. :func:`touch_member` comes first."""
+    values: dict[str, object] = {"sharing": sharing}
+    if close_ask:
+        values["asked_at"] = None
     await session.execute(
         scoped(update(GroupMember), GroupMember, tenant_id)
         .where(GroupMember.group_id == group_id)
-        .values(sharing=sharing, asked_at=None)
+        .values(values)
     )
 
 
@@ -137,10 +140,10 @@ async def ask(session: AsyncSession, tenant_id: UUID, group_id: UUID, now: datet
 
 
 async def open_ask(session: AsyncSession, tenant_id: UUID, group_id: UUID, now: datetime) -> bool:
-    """Is the member not sharing, with an ask younger than ``ASK_TTL``?"""
+    """Was the member asked, less than ``ASK_TTL`` ago, and not answered yet? An okay read in
+    the group keeps it open until Remi's answer is out (``set_sharing(close_ask=False)``)."""
     stmt = scoped(select(GroupMember.id), GroupMember, tenant_id).where(
         GroupMember.group_id == group_id,
-        GroupMember.sharing.is_(False),
         GroupMember.asked_at > now - ASK_TTL,
     )
     return (await session.scalars(stmt)).first() is not None

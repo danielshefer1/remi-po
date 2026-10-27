@@ -308,6 +308,20 @@ async def _zone(db: Database, group_id: UUID, asker: Tenant | None) -> ZoneInfo:
     return ZoneInfo(DEFAULT_ZONE)
 
 
+async def _history(db: Database, row: InboxRow, turn: GroupTurn) -> tuple[Message, ...]:
+    """The group's recent conversation before ``row``, as the model reads it."""
+    async with db.system_session() as session:
+        context = await recent_context(session, turn.group_id)
+    # The gate already added this message; it is the turn's text, not its history.
+    return tuple(
+        Message("assistant", line.body)
+        if line.inbox_id is None
+        else Message("user", f"{line.sender_name or SOMEONE}: {line.body}")
+        for line in context
+        if line.inbox_id != row.id
+    )
+
+
 async def group_turn(
     row: InboxRow,
     channel: OutboundChannel,
@@ -323,6 +337,7 @@ async def group_turn(
     if row.message_type == POLL_VOTE:
         await handle_vote(row, channel, turn, db=db, calendar=calendar)
         return
+    okayed = False
     if not turn.addressed:
         try:
             okayed = await _okayed(row, turn, db=db, llm=llm)
@@ -348,20 +363,30 @@ async def group_turn(
         last_attempt=last_attempt,
         approved=not turn.addressed,
     )
+    if okayed and turn.tenant_id is not None:
+        # Answered (or already was): the ask is done. Until now a retry reads the okay again.
+        async with db.tenant_session(TenantId(turn.tenant_id)) as session:
+            await set_sharing(session, turn.tenant_id, turn.group_id, True)
 
 
 async def _okayed(row: InboxRow, turn: GroupTurn, *, db: Database, llm: LLMProvider) -> bool:
     """Did ``row``, not for Remi, okay sharing after Remi asked its sender? Saved if so, for
-    the sender only. Costs no model call unless they have an open ask."""
+    the sender only, with the ask left open until the answer is out. Costs no model call
+    unless they have an open ask."""
     if turn.tenant_id is None or not row.body:
         return False
     tenant_id = TenantId(turn.tenant_id)
     async with db.tenant_session(tenant_id) as session:
         asked = await open_ask(session, tenant_id, turn.group_id, turn.now)
-    if not asked or not await approves(row.body, llm=llm):
+        tenant = await get_tenant(session, tenant_id)
+    if not asked:
+        return False
+    name = (tenant.display_name if tenant else None) or row.sender_name or SOMEONE
+    context = await _history(db, row, turn)
+    if not await approves(f"{name}: {row.body}", context=context, llm=llm):
         return False
     async with db.tenant_session(tenant_id) as session:
-        await set_sharing(session, tenant_id, turn.group_id, True)
+        await set_sharing(session, tenant_id, turn.group_id, True, close_ask=False)
     return True
 
 
@@ -388,16 +413,7 @@ async def _answer(
     asker_name = (asker.display_name if asker else None) or row.sender_name or SOMEONE
     language = detect_language(row.body)
     zone = await _zone(db, turn.group_id, asker)
-    async with db.system_session() as session:
-        context = await recent_context(session, turn.group_id)
-    # The gate already added this message; it is the turn's text, not its history.
-    history = tuple(
-        Message("assistant", line.body)
-        if line.inbox_id is None
-        else Message("user", f"{line.sender_name or SOMEONE}: {line.body}")
-        for line in context
-        if line.inbox_id != row.id
-    )
+    history = await _history(db, row, turn)
     windows: list[tuple[datetime, datetime]] = []
     shared: list[bool] = [True] if approved else []
     posted: list[bool] = []
