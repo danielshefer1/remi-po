@@ -537,8 +537,8 @@ async def test_stop_reminding_cancels_series(
 @pytest.mark.parametrize(
     ("text", "language", "history"),
     [
-        ("skip the trash this week, I'm away", "en", SERIES),
-        ("השבוע לא צריך להזכיר לי על הזבל, אני לא בבית", "he", SERIES_HE),
+        ("skip the trash this Sunday, I'm away", "en", SERIES),
+        ("ביום ראשון אל תזכירי לי על הזבל, אני לא בבית", "he", SERIES_HE),
     ],
 )
 async def test_skip_this_week_keeps_series(
