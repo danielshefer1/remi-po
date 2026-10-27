@@ -155,7 +155,8 @@ async def test_a_guess_about_a_title_is_neither_confirmed_nor_denied(
     assert not re.match(r"\W*(yes|yeah|yep|sure|no|nope|נכון|כן|לא)\b", reply, re.I), reply
     assert not re.search(r"not that i can (see|tell)|אין לו|הוא לא אצל", reply, re.I), reply
     assert re.search(
-        r"can't see|cannot see|don't see|only see (when|busy|free)|details|"
+        r"can't see|cannot see|don't see|only see (when|busy|free|that)|not what for|"
+        r"can(no|')t (say|tell)|details|"
         r"לא רואה|לא יכול(ה)? לראות|רק (מתי|פנוי|עסוק)|פרטים",
         reply,
         re.I,
@@ -199,7 +200,11 @@ async def test_dinner_at_seven_sets_up_one_outing(
             FOLLOW_UP,
             r"two hours|2 hours|2-hour|(until|till) 9|21:00|\b9 ?pm",
         ),
-        ("רמי, בוא נעשה ארוחת ערב ב-7, תסדר את זה", FOLLOW_UP_HE, r"שעתיים|עד (21|9|תשע)\b|21:00"),
+        (
+            "רמי, בוא נעשה ארוחת ערב ב-7, תסדר את זה",
+            FOLLOW_UP_HE,
+            r"שעתיים|(ל-?)?2 שעות|עד (21|9|תשע)\b|21:00",
+        ),
     ],
 )
 async def test_an_assumed_length_is_said(
