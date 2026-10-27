@@ -46,6 +46,7 @@ from personal_organizer.db.models.tenant import CalendarConnection, Tenant
 from personal_organizer.db.repositories.connections import active_connection
 from personal_organizer.db.repositories.groups import (
     add_context,
+    ask,
     detail_grantors,
     group_tenants,
     recent_context,
@@ -191,10 +192,16 @@ async def _events(
 
 
 async def free_busy(
-    db: Database, group_id: UUID, start: datetime, end: datetime, *, calendar: CalendarProvider
+    db: Database,
+    group_id: UUID,
+    start: datetime,
+    end: datetime,
+    *,
+    calendar: CalendarProvider,
+    now: datetime,
 ) -> dict[str, object]:
     """Who is busy when in ``[start, end)``, among the group's members who okayed it; the
-    others by name only, in ``not_shared``. Times are in ``start``'s zone."""
+    others by name only, in ``not_shared``, and asked to okay it. Times are in ``start``'s zone."""
     zone = start.tzinfo
     assert isinstance(zone, ZoneInfo), "start carries its zone"
     async with db.system_session() as session:
@@ -205,6 +212,8 @@ async def free_busy(
         async with db.tenant_session(TenantId(tenant_id)) as session:
             name = _name(await get_tenant(session, tenant_id))
             account = await active_connection(session, tenant_id) if sharing else None
+            if not sharing:
+                await ask(session, tenant_id, group_id, now)
         if not sharing:
             not_shared.append(name)
             continue
@@ -347,7 +356,7 @@ async def group_turn(
                 return window
             start, end, note = window
             windows.append((start, end))
-            result = await free_busy(db, turn.group_id, start, end, calendar=calendar)
+            result = await free_busy(db, turn.group_id, start, end, calendar=calendar, now=turn.now)
             if note:
                 result["note"] = note
             return json.dumps(result, ensure_ascii=False)

@@ -195,6 +195,20 @@ async def test_not_shared_member_is_not_read(
     assert "Therapy" not in _seen(llm)
 
 
+async def test_free_busy_asks_not_shared(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    dana = await _member(db, group, DANA, "Dana", "ca_dana", sharing=True)
+    eden = await _member(db, group, EDEN, "Eden", "ca_eden", sharing=False)
+    llm = ScriptedLLM(said("", FRIDAY), said("Dana's busy 9 to 10."))
+
+    await _say(db, owner_conn, onboarding_settings, llm)
+
+    for tenant_id, asked in ((dana, False), (eden, True)):
+        async with db.tenant_session(TenantId(tenant_id)) as session:
+            assert await groups.open_ask(session, tenant_id, group, NOW) is asked
+
+
 async def test_share_my_calendar_sets_sharing(
     db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
 ) -> None:
