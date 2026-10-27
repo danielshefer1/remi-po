@@ -15,7 +15,8 @@ from personal_organizer.messaging.agent import LANGUAGE_NAMES, WEEKDAYS, week_of
 
 _PROMPT: Final = """\
 You are Remi, a personal organizer's WhatsApp assistant, answering in a family's WhatsApp \
-group. Everyone in the group reads what you write. The last message is from {asker}{member}.
+group. Everyone in the group reads what you write. The last message is from {asker}{member}.\
+{approved}
 
 It is now {weekday} {today}, {clock}, in {zone} time. Weeks start on Sunday: this week runs from \
 Sunday {week_start} to Saturday {week_end}. The work week is Sunday to Thursday.
@@ -74,8 +75,11 @@ and anything personal happen in a private chat with you; say so if asked.
 """
 
 
-def group_prompt(language: str, now: datetime, asker_name: str, asker_is_member: bool) -> str:
-    """The system prompt, for ``now`` already in the turn's zone."""
+def group_prompt(
+    language: str, now: datetime, asker_name: str, asker_is_member: bool, *, approved: bool = False
+) -> str:
+    """The system prompt, for ``now`` already in the turn's zone. ``approved``: the asker
+    just okayed sharing here, after Remi asked."""
     week_start, week_end = week_of(now.date())
     return _PROMPT.format_map(
         {
@@ -83,6 +87,9 @@ def group_prompt(language: str, now: datetime, asker_name: str, asker_is_member:
             "member": ", who is set up with you"
             if asker_is_member
             else ", who isn't set up with you: they can ask, but not okay sharing or set a name",
+            "approved": f" {asker_name} just okayed sharing here, after you asked."
+            if approved
+            else "",
             "weekday": WEEKDAYS[now.weekday()],
             "today": now.date().isoformat(),
             "clock": now.strftime("%H:%M"),

@@ -16,10 +16,16 @@ reply is out a retry runs the turn again, and the details' own key keeps them to
 message not for Remi goes to ``read_answer``, which costs a model call only when its sender
 has an open outing to answer. ``set_up_outing`` posts one poll per message, members only.
 
+**An okay said in the group** (#51). A message not for Remi, from a member ``who_is_free``
+asked to okay sharing, goes to :func:`.approval.approves` first. A yes turns on that sender's
+sharing, and only theirs, and the turn then answers as if the message were for Remi, so the
+model can answer the who's-free question again; a no goes on to ``read_answer``.
+
 **Silence.** The model may reply with nothing (the message was for someone else, or for a
 person named Rami): nothing is sent. Not-addressed messages cost no model call beyond
-``read_answer``'s. An unavailable model or Composio raises for the job to retry, and the last
-attempt answers with the fixed ``agent_unavailable`` line, as the agent does.
+``approves``' and ``read_answer``'s, each only when its sender has an open ask or outing. An
+unavailable model or Composio raises for the job to retry, and the last attempt answers with
+the fixed ``agent_unavailable`` line, as the agent does.
 """
 
 from __future__ import annotations
@@ -49,6 +55,7 @@ from personal_organizer.db.repositories.groups import (
     ask,
     detail_grantors,
     group_tenants,
+    open_ask,
     recent_context,
     set_display_name,
     set_sharing,
@@ -60,6 +67,7 @@ from personal_organizer.interfaces.llm import LLMProvider, Message
 from personal_organizer.messaging.agent import day_label, fit_message, read_window, shown_event
 from personal_organizer.messaging.conversation import converse
 from personal_organizer.messaging.groups.addressing import group_key
+from personal_organizer.messaging.groups.approval import approves
 from personal_organizer.messaging.groups.gate import GROUP_REPLY, POLL_VOTE, REMI, GroupTurn
 from personal_organizer.messaging.groups.outings import handle_vote, read_answer, set_up_outing
 from personal_organizer.messaging.groups.prompt import group_prompt
@@ -310,21 +318,66 @@ async def group_turn(
     calendar: CalendarProvider,
     last_attempt: bool = False,
 ) -> None:
-    """Count a vote; read an answer said to the group; or answer ``row`` in the group if it
-    was for Remi, sending any granted details privately."""
+    """Count a vote; read an okay or an answer said to the group; or answer ``row`` in the
+    group if it was for Remi or okayed sharing, sending any granted details privately."""
     if row.message_type == POLL_VOTE:
         await handle_vote(row, channel, turn, db=db, calendar=calendar)
         return
     if not turn.addressed:
         try:
-            await read_answer(row, turn, db=db, llm=llm)
+            okayed = await _okayed(row, turn, db=db, llm=llm)
+            if not okayed:
+                await read_answer(row, turn, db=db, llm=llm)
         except LLMUnavailableError:
             if not last_attempt:
                 raise
             log.warning("group.answer_unread", reason="unavailable")
+            return
         except LLMRejectedError:
             log.warning("group.answer_unread", reason="rejected")
-        return
+            return
+        if not okayed:
+            return
+    await _answer(
+        row,
+        channel,
+        turn,
+        db=db,
+        llm=llm,
+        calendar=calendar,
+        last_attempt=last_attempt,
+        approved=not turn.addressed,
+    )
+
+
+async def _okayed(row: InboxRow, turn: GroupTurn, *, db: Database, llm: LLMProvider) -> bool:
+    """Did ``row``, not for Remi, okay sharing after Remi asked its sender? Saved if so, for
+    the sender only. Costs no model call unless they have an open ask."""
+    if turn.tenant_id is None or not row.body:
+        return False
+    tenant_id = TenantId(turn.tenant_id)
+    async with db.tenant_session(tenant_id) as session:
+        asked = await open_ask(session, tenant_id, turn.group_id, turn.now)
+    if not asked or not await approves(row.body, llm=llm):
+        return False
+    async with db.tenant_session(tenant_id) as session:
+        await set_sharing(session, tenant_id, turn.group_id, True)
+    return True
+
+
+async def _answer(
+    row: InboxRow,
+    channel: OutboundChannel,
+    turn: GroupTurn,
+    *,
+    db: Database,
+    llm: LLMProvider,
+    calendar: CalendarProvider,
+    last_attempt: bool,
+    approved: bool,
+) -> None:
+    """Answer ``row`` in the group, sending any granted details privately. ``approved``: its
+    sender just okayed sharing, which is already saved."""
     if await already_sent(db, row.id, GROUP_REPLY):
         log.info("group.already_sent", inbox_id=str(row.id))
         return
@@ -346,7 +399,7 @@ async def group_turn(
         if line.inbox_id != row.id
     )
     windows: list[tuple[datetime, datetime]] = []
-    shared: list[bool] = []
+    shared: list[bool] = [True] if approved else []
     posted: list[bool] = []
 
     async def run_tool(name: str, arguments: Mapping[str, Any]) -> str:
@@ -390,7 +443,9 @@ async def group_turn(
         return f"ok: they are {called.strip()} from now on"
 
     text = f"{asker_name}: {row.body or f'[{row.message_type}]'}"
-    system = group_prompt(language, turn.now.astimezone(zone), asker_name, asker is not None)
+    system = group_prompt(
+        language, turn.now.astimezone(zone), asker_name, asker is not None, approved=approved
+    )
     with structlog.contextvars.bound_contextvars(inbox_id=str(row.id)):
         try:
             reply = (

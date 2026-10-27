@@ -29,6 +29,7 @@ from personal_organizer.db.repositories import groups
 from personal_organizer.db.repositories.connections import bind_connection
 from personal_organizer.db.repositories.tenants import set_timezone
 from personal_organizer.interfaces.calendar import CalendarEvent
+from personal_organizer.messaging.groups.gate import GROUP_REPLY
 from personal_organizer.messaging.groups.turn import group_turn
 from personal_organizer.messaging.inbound import handle_inbound
 from personal_organizer.messaging.onboarding_text import t
@@ -392,3 +393,122 @@ async def test_unaddressed_message_calls_no_model(
     )
     assert channel.sent == []
     assert calendar.calls == []
+
+
+async def _asked(db: Database, group: UUID, phone: str, name: str, account: str) -> UUID:
+    """A member who doesn't share yet and was just asked to okay it."""
+    tenant_id = await _member(db, group, phone, name, account, sharing=False)
+    async with db.tenant_session(TenantId(tenant_id)) as session:
+        await groups.ask(session, tenant_id, group, NOW)
+    return tenant_id
+
+
+async def _sharing(db: Database, group: UUID) -> dict[UUID, bool]:
+    async with db.system_session() as session:
+        return dict(await groups.group_tenants(session, group))
+
+
+async def _asked_now(db: Database, group: UUID, tenant_id: UUID) -> bool:
+    async with db.tenant_session(TenantId(tenant_id)) as session:
+        return await groups.open_ask(session, tenant_id, group, NOW)
+
+
+async def test_approval_turns_sharing_on_and_answers(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    await _member(db, group, DANA, "Dana", "ca_dana", sharing=True)
+    eden = await _asked(db, group, EDEN, "Eden", "ca_eden")
+    answer = "ביום שישי עדן עסוקה מ-11 עד 12."
+    llm = ScriptedLLM(said("YES"), said("", FRIDAY), said(answer))
+
+    channel, _ = await _say(db, owner_conn, onboarding_settings, llm, phone=EDEN, body="מאשרת")
+
+    assert (await _sharing(db, group))[eden] is True
+    assert llm.calls[1][-1].content == "Eden: מאשרת"
+    assert "Eden just okayed sharing here" in llm.calls[1][0].content
+    people = json.loads(llm.calls[2][-1].content)["people"]
+    assert sorted(person["name"] for person in people) == ["Dana", "Eden"]
+    [sent] = channel.sent
+    assert sent.recipient == JID
+    assert sent.body == f"{answer}\n\n{t('group_shared_on', 'he')}"
+    kinds = await owner_conn.fetch("SELECT kind FROM channel_outbox")
+    assert [row["kind"] for row in kinds] == [GROUP_REPLY]
+
+
+async def test_non_approval_is_silent(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    eden = await _asked(db, group, EDEN, "Eden", "ca_eden")
+    llm = ScriptedLLM(said("NO"))
+
+    channel, calendar = await _say(db, owner_conn, onboarding_settings, llm, phone=EDEN, body="lol")
+
+    assert len(llm.calls) == 1
+    assert channel.sent == []
+    assert calendar.calls == []
+    assert (await _sharing(db, group))[eden] is False
+    assert await _asked_now(db, group, eden)
+
+
+async def test_not_asked_costs_no_call(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    eden = await _member(db, group, EDEN, "Eden", "ca_eden", sharing=False)
+
+    channel, _ = await _say(db, owner_conn, onboarding_settings, NoLLM(), phone=EDEN, body="מאשרת")
+
+    assert channel.sent == []
+    assert (await _sharing(db, group))[eden] is False
+
+
+async def test_approval_changes_only_sender(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    """Okaying for someone else changes nothing for them, asked or not."""
+    await _member(db, group, DANA, "Dana", "ca_dana", sharing=True)
+    noa = await _asked(db, group, NOA, "Noa", "ca_noa")
+    eden = await _asked(db, group, EDEN, "Eden", "ca_eden")
+
+    # Dana has no open ask: her message isn't read at all.
+    await _say(db, owner_conn, onboarding_settings, NoLLM(), phone=DANA, body="Eden says it's ok")
+    assert (await _sharing(db, group))[eden] is False
+
+    # Noa has one: only Noa's own sharing can change, whatever the model reads.
+    llm = ScriptedLLM(said("YES"), said("Noa's in."))
+    await _say(db, owner_conn, onboarding_settings, llm, phone=NOA, body="Eden says it's ok")
+    sharing = await _sharing(db, group)
+    assert (sharing[noa], sharing[eden]) == (True, False)
+    assert await _asked_now(db, group, eden)
+
+
+async def test_approval_llm_down_last_attempt_is_silent(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    eden = await _asked(db, group, EDEN, "Eden", "ca_eden")
+    channel = FakeOutbound(name="gowa")
+    down = LLMUnavailableError("down")
+
+    with pytest.raises(LLMUnavailableError):
+        await _say(
+            db,
+            owner_conn,
+            onboarding_settings,
+            ScriptedLLM(down),
+            phone=EDEN,
+            body="מאשרת",
+            channel=channel,
+        )
+    [inbox_id] = await owner_conn.fetchval("SELECT array_agg(id) FROM channel_inbox")
+    await _say(
+        db,
+        owner_conn,
+        onboarding_settings,
+        ScriptedLLM(down),
+        channel=channel,
+        inbox_id=inbox_id,
+        last_attempt=True,
+    )
+
+    assert channel.sent == []
+    assert (await _sharing(db, group))[eden] is False
+    assert await _asked_now(db, group, eden)
