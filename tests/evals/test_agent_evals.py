@@ -752,8 +752,8 @@ async def test_timetable_hands_off(llm: AnthropicLLM, strong: AnthropicLLM) -> N
     schedule = InMemorySchedule(NOW)
     reply = await _turn(TIMETABLE, "he", schedule, cheap, strong=hard)  # type: ignore[arg-type]
     assert "hand_off" in cheap.called, (cheap.called, reply)
-    # Tighten to the repeating reminders once #52 merges.
     assert "set_reminder" in hard.called, (hard.called, reply)
+    assert any(r.rule for r in schedule.reminders), (schedule.reminders, reply)
 
 
 @pytest.mark.parametrize(
