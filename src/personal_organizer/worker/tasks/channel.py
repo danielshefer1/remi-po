@@ -89,7 +89,9 @@ def strong_llm() -> AnthropicLLM | None:
     # An empty value is unset too: it would build a client on the chat model.
     if not settings.agent.enabled or not settings.models.strong_model:
         return None
-    return AnthropicLLM.from_settings(settings, model=settings.models.strong_model)
+    return AnthropicLLM.from_settings(
+        settings, model=settings.models.strong_model, timeout=settings.agent.strong_timeout_s
+    )
 
 
 @functools.cache

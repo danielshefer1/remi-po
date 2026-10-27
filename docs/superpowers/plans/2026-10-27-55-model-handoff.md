@@ -102,4 +102,5 @@ with no up-front routing and no retry after a failure.
   ("what do I have tomorrow?" makes no `hand_off`, in both languages).
 - [ ] **Step 2: Run** them 3 times after Track A has merged. Each passes at least 2 of 3.
 - [ ] **Step 3:** Draft PR (`Closes #55`). After merge, set `MODELS__STRONG_MODEL` on staging
-  `worker` and `api`, then resend the timetable and check the log shows `agent.handoff`.
+  `worker` and `api`, then resend the timetable and check the log shows `agent.handoff` for that inbox_id
+  and no `agent.fallback` or timeout for it.

@@ -47,6 +47,7 @@ from personal_organizer.messaging.schedule import InMemorySchedule
 from personal_organizer.messaging.tenancy import TenantState
 from personal_organizer.providers.calendar.memory import InMemoryCalendar
 from personal_organizer.providers.llm.anthropic import AnthropicLLM
+from personal_organizer.settings import AgentSettings
 
 pytestmark = pytest.mark.eval
 
@@ -187,7 +188,12 @@ SCENARIOS = [
 
 @pytest.fixture
 def llm() -> AnthropicLLM:
-    client = anthropic.AsyncAnthropic(api_key=os.environ["AGENT__API_KEY"], max_retries=2)
+    # Like production's strong client: its own timeout, no SDK retries.
+    client = anthropic.AsyncAnthropic(
+        api_key=os.environ["AGENT__API_KEY"],
+        timeout=AgentSettings().strong_timeout_s,
+        max_retries=0,
+    )
     return AnthropicLLM(client, model=os.environ.get("MODELS__CHAT_MODEL", "claude-haiku-5-5"))
 
 

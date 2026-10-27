@@ -398,6 +398,9 @@ class AgentSettings(BaseModel):
     #: Per model call, with the SDK's own retries off: ``INBOUND_RETRY`` is the one retry layer,
     #: and a slow call holds the sender's lock.
     request_timeout_s: float = 20.0
+    #: The stronger model's per-call timeout. A non-streaming call sends nothing until it is
+    #: done, so this caps its whole generation, and a hand-off turn is the longest one.
+    strong_timeout_s: float = 60.0
 
 
 class VoiceSettings(BaseModel):

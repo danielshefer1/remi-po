@@ -104,15 +104,16 @@ class AnthropicLLM:
         settings: Settings,
         *,
         model: str | None = None,
+        timeout: float | None = None,
         http_client: httpx2.AsyncClient | None = None,
     ) -> AnthropicLLM:
-        """``model`` overrides the chat model; ``http_client`` is for tests (requests use it)."""
+        """``model``, ``timeout`` override the chat ones; ``http_client`` is for tests."""
         if settings.agent.api_key is None:
             msg = "AnthropicLLM needs AGENT__API_KEY"
             raise ConfigError(msg)
         client = anthropic.AsyncAnthropic(
             api_key=settings.agent.api_key.get_secret_value(),
-            timeout=settings.agent.request_timeout_s,
+            timeout=timeout or settings.agent.request_timeout_s,
             # The job retries (INBOUND_RETRY); the SDK's own would stack under each attempt.
             max_retries=0,
             http_client=http_client,

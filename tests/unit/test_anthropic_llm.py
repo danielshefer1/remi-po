@@ -116,6 +116,12 @@ def test_from_settings_uses_given_model(agent_settings: Settings) -> None:
     assert AnthropicLLM.from_settings(agent_settings, model="strong-m")._model == "strong-m"
 
 
+def test_from_settings_uses_given_timeout(agent_settings: Settings) -> None:
+    timeout = agent_settings.agent.strong_timeout_s
+    assert AnthropicLLM.from_settings(agent_settings, timeout=timeout)._client.timeout == 60.0
+    assert AnthropicLLM.from_settings(agent_settings)._client.timeout == 20.0
+
+
 class TestRequest:
     async def test_what_haiku_5_5_accepts(self, agent_settings: Settings) -> None:
         api = Api(answer(text("Hi!")))
