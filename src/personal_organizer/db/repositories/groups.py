@@ -31,6 +31,8 @@ from personal_organizer.db.repositories.scope import scoped
 #: The rolling context: at most this many messages, none older than ``CONTEXT_AGE``.
 CONTEXT_LIMIT: Final = 20
 CONTEXT_AGE: Final = timedelta(hours=6)
+#: How long an ask to okay sharing stays open; after that an "ok" in the group means nothing.
+ASK_TTL: Final = timedelta(hours=48)
 
 
 async def ensure_group(session: AsyncSession, *, channel: str, jid: str) -> WaGroup:
@@ -116,12 +118,32 @@ async def touch_member(
 async def set_sharing(
     session: AsyncSession, tenant_id: UUID, group_id: UUID, sharing: bool
 ) -> None:
-    """Okay (or stop) showing busy/free in the group. :func:`touch_member` comes first."""
+    """Okay (or stop) showing busy/free in the group; either answers any open ask.
+    :func:`touch_member` comes first."""
     await session.execute(
         scoped(update(GroupMember), GroupMember, tenant_id)
         .where(GroupMember.group_id == group_id)
-        .values(sharing=sharing)
+        .values(sharing=sharing, asked_at=None)
     )
+
+
+async def ask(session: AsyncSession, tenant_id: UUID, group_id: UUID, now: datetime) -> None:
+    """Remi asked this member, in the group, to okay sharing. A sharing member is left alone."""
+    await session.execute(
+        scoped(update(GroupMember), GroupMember, tenant_id)
+        .where(GroupMember.group_id == group_id, GroupMember.sharing.is_(False))
+        .values(asked_at=now)
+    )
+
+
+async def open_ask(session: AsyncSession, tenant_id: UUID, group_id: UUID, now: datetime) -> bool:
+    """Is the member not sharing, with an ask younger than ``ASK_TTL``?"""
+    stmt = scoped(select(GroupMember.id), GroupMember, tenant_id).where(
+        GroupMember.group_id == group_id,
+        GroupMember.sharing.is_(False),
+        GroupMember.asked_at > now - ASK_TTL,
+    )
+    return (await session.scalars(stmt)).first() is not None
 
 
 async def groups_of(session: AsyncSession, tenant_id: UUID) -> list[UUID]:
@@ -194,9 +216,11 @@ async def set_display_name(session: AsyncSession, tenant_id: UUID, name: str) ->
 
 
 __all__ = [
+    "ASK_TTL",
     "CONTEXT_AGE",
     "CONTEXT_LIMIT",
     "add_context",
+    "ask",
     "detail_grantors",
     "due_nudges",
     "ensure_group",
@@ -204,6 +228,7 @@ __all__ = [
     "group_tenants",
     "groups_of",
     "mark_served",
+    "open_ask",
     "peers_of",
     "recent_context",
     "revoke",

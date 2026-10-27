@@ -249,3 +249,48 @@ async def test_due_nudges_window(db: Database) -> None:
     assert await _due(db, NOW) == set()
     await _move_poll(db, poll, starts_at=NOW + timedelta(days=2), status="closed")
     assert await _due(db, NOW) == set()
+
+
+# --- asking to share ----------------------------------------------------------------------
+
+
+async def _open_ask(db: Database, tenant_id: UUID, group_id: UUID, now: datetime) -> bool:
+    async with db.tenant_session(TenantId(tenant_id)) as session:
+        return await groups.open_ask(session, tenant_id, group_id, now)
+
+
+async def _ask(db: Database, tenant_id: UUID, group_id: UUID, now: datetime) -> None:
+    async with db.tenant_session(TenantId(tenant_id)) as session:
+        await groups.ask(session, tenant_id, group_id, now)
+
+
+async def test_ask_opens(db: Database) -> None:
+    group_id = await _group(db)
+    eden = await _member(db, "+972501110001", group_id, sharing=False)
+    assert not await _open_ask(db, eden, group_id, NOW)
+    await _ask(db, eden, group_id, NOW)
+    assert await _open_ask(db, eden, group_id, NOW + timedelta(hours=47))
+
+
+async def test_ask_expires(db: Database) -> None:
+    group_id = await _group(db)
+    eden = await _member(db, "+972501110001", group_id, sharing=False)
+    await _ask(db, eden, group_id, NOW)
+    assert not await _open_ask(db, eden, group_id, NOW + timedelta(hours=49))
+
+
+async def test_set_sharing_clears_ask(db: Database) -> None:
+    group_id = await _group(db)
+    eden = await _member(db, "+972501110001", group_id, sharing=False)
+    await _ask(db, eden, group_id, NOW)
+    async with db.tenant_session(TenantId(eden)) as session:
+        await groups.set_sharing(session, eden, group_id, True)
+        await groups.set_sharing(session, eden, group_id, False)
+    assert not await _open_ask(db, eden, group_id, NOW)
+
+
+async def test_ask_ignores_sharing_member(db: Database) -> None:
+    group_id = await _group(db)
+    eden = await _member(db, "+972501110001", group_id, sharing=True)
+    await _ask(db, eden, group_id, NOW)
+    assert not await _open_ask(db, eden, group_id, NOW)
