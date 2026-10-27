@@ -191,6 +191,8 @@ class GroupMember(Base, TenantMixin):
     group_id: Mapped[UUID] = mapped_column(ForeignKey("wa_groups.id", ondelete="CASCADE"))
     sharing: Mapped[bool] = mapped_column(server_default=text("false"))
     seen_at: Mapped[datetime]
+    asked_at: Mapped[datetime | None]
+    stopped_at: Mapped[datetime | None]
 
 
 class DetailGrant(Base, TenantMixin):

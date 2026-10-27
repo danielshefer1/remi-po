@@ -31,6 +31,8 @@ from personal_organizer.db.repositories.scope import scoped
 #: The rolling context: at most this many messages, none older than ``CONTEXT_AGE``.
 CONTEXT_LIMIT: Final = 20
 CONTEXT_AGE: Final = timedelta(hours=6)
+#: How long an ask to okay sharing stays open; after that an "ok" in the group means nothing.
+ASK_TTL: Final = timedelta(hours=48)
 
 
 async def ensure_group(session: AsyncSession, *, channel: str, jid: str) -> WaGroup:
@@ -114,14 +116,54 @@ async def touch_member(
 
 
 async def set_sharing(
-    session: AsyncSession, tenant_id: UUID, group_id: UUID, sharing: bool
+    session: AsyncSession, tenant_id: UUID, group_id: UUID, sharing: bool, *, close_ask: bool = True
 ) -> None:
-    """Okay (or stop) showing busy/free in the group. :func:`touch_member` comes first."""
+    """Okay (or stop) showing busy/free in the group; either answers any open ask, unless
+    ``close_ask`` is false. Stopping is always the person's own say, so :func:`ask` skips them
+    until they share again. :func:`touch_member` comes first."""
+    values: dict[str, object] = {"sharing": sharing, "stopped_at": None if sharing else func.now()}
+    if close_ask:
+        values["asked_at"] = None
     await session.execute(
         scoped(update(GroupMember), GroupMember, tenant_id)
         .where(GroupMember.group_id == group_id)
-        .values(sharing=sharing)
+        .values(values)
     )
+
+
+async def ask(session: AsyncSession, tenant_id: UUID, group_id: UUID, now: datetime) -> bool:
+    """Remi asked this member, in the group, to okay sharing. ``False``, and left alone, if
+    they share or said to stop."""
+    result = await session.execute(
+        scoped(update(GroupMember), GroupMember, tenant_id)
+        .where(
+            GroupMember.group_id == group_id,
+            GroupMember.sharing.is_(False),
+            GroupMember.stopped_at.is_(None),
+        )
+        .values(asked_at=now)
+        .returning(GroupMember.id)
+    )
+    return result.first() is not None
+
+
+async def clear_ask(session: AsyncSession, tenant_id: UUID, group_id: UUID) -> None:
+    """The member's ask is answered; their sharing is left as it is."""
+    await session.execute(
+        scoped(update(GroupMember), GroupMember, tenant_id)
+        .where(GroupMember.group_id == group_id)
+        .values(asked_at=None)
+    )
+
+
+async def open_ask(session: AsyncSession, tenant_id: UUID, group_id: UUID, now: datetime) -> bool:
+    """Was the member asked, less than ``ASK_TTL`` ago, and not answered yet? An okay read in
+    the group keeps it open until Remi's answer is out (``set_sharing(close_ask=False)``)."""
+    stmt = scoped(select(GroupMember.id), GroupMember, tenant_id).where(
+        GroupMember.group_id == group_id,
+        GroupMember.asked_at > now - ASK_TTL,
+    )
+    return (await session.scalars(stmt)).first() is not None
 
 
 async def groups_of(session: AsyncSession, tenant_id: UUID) -> list[UUID]:
@@ -194,9 +236,12 @@ async def set_display_name(session: AsyncSession, tenant_id: UUID, name: str) ->
 
 
 __all__ = [
+    "ASK_TTL",
     "CONTEXT_AGE",
     "CONTEXT_LIMIT",
     "add_context",
+    "ask",
+    "clear_ask",
     "detail_grantors",
     "due_nudges",
     "ensure_group",
@@ -204,6 +249,7 @@ __all__ = [
     "group_tenants",
     "groups_of",
     "mark_served",
+    "open_ask",
     "peers_of",
     "recent_context",
     "revoke",

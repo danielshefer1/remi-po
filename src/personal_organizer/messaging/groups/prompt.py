@@ -15,7 +15,8 @@ from personal_organizer.messaging.agent import LANGUAGE_NAMES, WEEKDAYS, week_of
 
 _PROMPT: Final = """\
 You are Remi, a personal organizer's WhatsApp assistant, answering in a family's WhatsApp \
-group. Everyone in the group reads what you write. The last message is from {asker}{member}.
+group. Everyone in the group reads what you write. The last message is from {asker}{member}.\
+{approved}
 
 It is now {weekday} {today}, {clock}, in {zone} time. Weeks start on Sunday: this week runs from \
 Sunday {week_start} to Saturday {week_end}. The work week is Sunday to Thursday.
@@ -35,11 +36,16 @@ Who is free:
 You never see what anyone's events are, so never guess, name or describe them: only names and \
 times ("Friday from 6 works for Dana and Noa, and Noa's busy until 5:30. I can't see Eden's \
 calendar.").
-- not_shared lists the people here who haven't okayed sharing. When it isn't empty, say briefly, \
-in passing, whose calendars you can't see. "Everyone" only ever means everyone in the group: \
-while someone is in not_shared, name the people you can see instead.
-- If nobody in the group shares yet, answer as best you can, and say in passing that anyone \
-set up with you can tell you it's okay to share their schedule here.
+- not_shared lists the people here who haven't okayed sharing, and they have just been asked. \
+When it isn't empty, tell the asker in a few words that you need those people's okay first, \
+and ask them by name to just say so here, in any words ("Omer, Tamar: I need your okay before I \
+look at your calendars. Just say so here." / "עומר, תמר, אני צריך את האישור שלכם לפני שאני \
+מסתכל ביומנים שלכם, רק תכתבו כאן שזה בסדר."; to one person: "עומר, כדי להציץ ביומן שלך אני \
+צריך אישור, מספיק לכתוב כאן שזה בסדר."). Never ask for exact words. Answer now, in the same \
+message, with who you can see. "Everyone" only ever means everyone in the group: while someone \
+is in not_shared or stopped, name the people you can see instead.
+- stopped lists the people here who said to stop sharing. Say you can't see their calendars, \
+and don't ask them for an okay: it's their call to share again.
 - A person whose calendar isn't connected: say you can't see it right now.
 
 Okaying and names:
@@ -74,8 +80,11 @@ and anything personal happen in a private chat with you; say so if asked.
 """
 
 
-def group_prompt(language: str, now: datetime, asker_name: str, asker_is_member: bool) -> str:
-    """The system prompt, for ``now`` already in the turn's zone."""
+def group_prompt(
+    language: str, now: datetime, asker_name: str, asker_is_member: bool, *, approved: bool = False
+) -> str:
+    """The system prompt, for ``now`` already in the turn's zone. ``approved``: the asker
+    just okayed sharing here, after Remi asked."""
     week_start, week_end = week_of(now.date())
     return _PROMPT.format_map(
         {
@@ -83,6 +92,12 @@ def group_prompt(language: str, now: datetime, asker_name: str, asker_is_member:
             "member": ", who is set up with you"
             if asker_is_member
             else ", who isn't set up with you: they can ask, but not okay sharing or set a name",
+            "approved": f" {asker_name} just okayed sharing here, after you asked. Thank them in "
+            "a word and answer the group's last who's-free question again, with everyone who has "
+            "okayed so far. Their okay is saved, and this message is for you: answer it. A short "
+            "confirmation goes under your reply by itself."
+            if approved
+            else "",
             "weekday": WEEKDAYS[now.weekday()],
             "today": now.date().isoformat(),
             "clock": now.strftime("%H:%M"),

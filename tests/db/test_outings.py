@@ -14,11 +14,11 @@ from typing import Any
 from uuid import UUID
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from personal_organizer.core.types import TenantId
 from personal_organizer.db.engine import Database
-from personal_organizer.db.models.tenant import PollAnswer
+from personal_organizer.db.models.tenant import GroupMember, PollAnswer
 from personal_organizer.db.repositories import groups
 from personal_organizer.db.repositories.connections import bind_connection
 from personal_organizer.db.repositories.tenants import set_timezone
@@ -387,3 +387,25 @@ async def test_unaddressed_from_answered_member_calls_no_model(
 
     await family.say(NoLLM(), phone=NOA, body="see you all there")
     await family.say(NoLLM(), phone=STRANGER, body="sounds fun")
+
+
+async def test_not_an_okay_goes_on_to_the_outing(db: Database, family: Group, group: UUID) -> None:
+    """Asked to okay sharing and with an outing open: a "no" from the okay check still reads
+    the outing answer, two calls in all."""
+    await _member(db, group, DANA, "Dana", "ca_dana")
+    noa = await _member(db, group, NOA, "Noa", "ca_noa")
+    await family.set_up()
+    async with db.tenant_session(TenantId(noa)) as session:
+        await session.execute(update(GroupMember).values(sharing=False, asked_at=NOW))
+    async with db.system_session() as session:
+        await groups.add_context(
+            session, group, sender_name="Remi", body="Noa, I need your okay first.", sent_at=NOW
+        )
+    llm = ScriptedLLM(said("NO"), said("OUT 1: working"))
+
+    await family.say(llm, phone=NOA, body="Friday doesn't work for me, I'm working")
+
+    assert len(llm.calls) == 2
+    answer = await _answer(db, noa)
+    assert answer is not None
+    assert (answer.answer, answer.reason) == ("out", "working")

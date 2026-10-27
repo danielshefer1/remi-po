@@ -15,12 +15,12 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import insert, update
+from sqlalchemy import insert, select, update
 
 from personal_organizer.core.types import TenantId
 from personal_organizer.db.engine import Database
 from personal_organizer.db.models.group import GroupPoll
-from personal_organizer.db.models.tenant import PollAnswer
+from personal_organizer.db.models.tenant import GroupMember, PollAnswer
 from personal_organizer.db.repositories import groups
 from personal_organizer.db.repositories.tenants import set_timezone
 from personal_organizer.settings import Settings
@@ -65,7 +65,8 @@ async def _join(
 ) -> None:
     async with db.tenant_session(TenantId(tenant_id)) as session:
         await groups.touch_member(session, tenant_id, group_id, at)
-        await groups.set_sharing(session, tenant_id, group_id, sharing)
+        if sharing:  # a member starts out not sharing; set_sharing(False) is an explicit stop
+            await groups.set_sharing(session, tenant_id, group_id, True)
 
 
 async def _member(
@@ -155,7 +156,8 @@ async def test_detail_grantors_needs_grant_and_sharing(db: Database) -> None:
             return await groups.detail_grantors(session, a, group)
 
     assert await grantors() == [b]
-    await _join(db, b, group, sharing=False)
+    async with db.tenant_session(TenantId(b)) as session:
+        await groups.set_sharing(session, b, group, False)
     assert await grantors() == []
 
 
@@ -249,3 +251,81 @@ async def test_due_nudges_window(db: Database) -> None:
     assert await _due(db, NOW) == set()
     await _move_poll(db, poll, starts_at=NOW + timedelta(days=2), status="closed")
     assert await _due(db, NOW) == set()
+
+
+# --- asking to share ----------------------------------------------------------------------
+
+
+async def _open_ask(db: Database, tenant_id: UUID, group_id: UUID, now: datetime) -> bool:
+    async with db.tenant_session(TenantId(tenant_id)) as session:
+        return await groups.open_ask(session, tenant_id, group_id, now)
+
+
+async def _ask(db: Database, tenant_id: UUID, group_id: UUID, now: datetime) -> None:
+    async with db.tenant_session(TenantId(tenant_id)) as session:
+        await groups.ask(session, tenant_id, group_id, now)
+
+
+async def test_ask_opens(db: Database) -> None:
+    group_id = await _group(db)
+    eden = await _member(db, "+972501110001", group_id, sharing=False)
+    assert not await _open_ask(db, eden, group_id, NOW)
+    await _ask(db, eden, group_id, NOW)
+    assert await _open_ask(db, eden, group_id, NOW + timedelta(hours=47))
+
+
+async def test_ask_expires(db: Database) -> None:
+    group_id = await _group(db)
+    eden = await _member(db, "+972501110001", group_id, sharing=False)
+    await _ask(db, eden, group_id, NOW)
+    assert not await _open_ask(db, eden, group_id, NOW + timedelta(hours=49))
+
+
+async def test_set_sharing_clears_ask(db: Database) -> None:
+    group_id = await _group(db)
+    eden = await _member(db, "+972501110001", group_id, sharing=False)
+    await _ask(db, eden, group_id, NOW)
+    async with db.tenant_session(TenantId(eden)) as session:
+        await groups.set_sharing(session, eden, group_id, True)
+        await groups.set_sharing(session, eden, group_id, False)
+    assert not await _open_ask(db, eden, group_id, NOW)
+
+
+async def test_ask_ignores_sharing_member(db: Database) -> None:
+    group_id = await _group(db)
+    eden = await _member(db, "+972501110001", group_id, sharing=True)
+    await _ask(db, eden, group_id, NOW)
+    assert not await _open_ask(db, eden, group_id, NOW)
+
+
+async def test_clear_ask_leaves_sharing(db: Database) -> None:
+    group_id = await _group(db)
+    eden = await _member(db, "+972501110001", group_id, sharing=False)
+    await _ask(db, eden, group_id, NOW)
+    async with db.tenant_session(TenantId(eden)) as session:
+        await groups.clear_ask(session, eden, group_id)
+    assert not await _open_ask(db, eden, group_id, NOW)
+    async with db.system_session() as session:
+        assert await groups.group_tenants(session, group_id) == [(eden, False)]
+
+
+async def _stopped(db: Database, tenant_id: UUID) -> bool:
+    async with db.tenant_session(TenantId(tenant_id)) as session:
+        return (await session.scalars(select(GroupMember.stopped_at))).one() is not None
+
+
+async def test_stop_is_not_asked_again(db: Database) -> None:
+    group_id = await _group(db)
+    eden = await _member(db, "+972501110001", group_id, sharing=True)
+    assert not await _stopped(db, eden)
+    async with db.tenant_session(TenantId(eden)) as session:
+        await groups.set_sharing(session, eden, group_id, False)
+    assert await _stopped(db, eden)
+
+    async with db.tenant_session(TenantId(eden)) as session:
+        assert await groups.ask(session, eden, group_id, NOW) is False
+    assert not await _open_ask(db, eden, group_id, NOW)
+
+    async with db.tenant_session(TenantId(eden)) as session:
+        await groups.set_sharing(session, eden, group_id, True)
+    assert not await _stopped(db, eden)

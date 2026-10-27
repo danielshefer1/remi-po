@@ -4,7 +4,7 @@
 calendar in their own tenant session and keeps only start, end and all-day, merged into
 :func:`busy_blocks`; titles and locations are dropped before the model sees anything, so no
 prompt or reply can leak them. Members who haven't okayed this group are never read: only
-their names come back, in ``not_shared``.
+their names come back, in ``not_shared`` (asked to okay it) or ``stopped`` (said to stop).
 
 **Details, privately.** After a turn in which ``who_is_free`` ran, an asker who is a member
 gets the events of the people who granted them details, read then from ``detail_grantors``
@@ -16,15 +16,22 @@ reply is out a retry runs the turn again, and the details' own key keeps them to
 message not for Remi goes to ``read_answer``, which costs a model call only when its sender
 has an open outing to answer. ``set_up_outing`` posts one poll per message, members only.
 
+**An okay said in the group** (#51). A message not for Remi, from a member ``who_is_free``
+asked to okay sharing, goes to :func:`.approval.approves` first. A yes turns on that sender's
+sharing, and only theirs, and the turn then answers as if the message were for Remi, so the
+model can answer the who's-free question again; a no goes on to ``read_answer``.
+
 **Silence.** The model may reply with nothing (the message was for someone else, or for a
 person named Rami): nothing is sent. Not-addressed messages cost no model call beyond
-``read_answer``'s. An unavailable model or Composio raises for the job to retry, and the last
-attempt answers with the fixed ``agent_unavailable`` line, as the agent does.
+``approves``' and ``read_answer``'s, each only when its sender has an open ask or outing. An
+unavailable model or Composio raises for the job to retry, and the last attempt answers with
+the fixed ``agent_unavailable`` line, as the agent does.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping, Sequence
 from datetime import datetime
 from typing import Any, Final
@@ -46,8 +53,11 @@ from personal_organizer.db.models.tenant import CalendarConnection, Tenant
 from personal_organizer.db.repositories.connections import active_connection
 from personal_organizer.db.repositories.groups import (
     add_context,
+    ask,
+    clear_ask,
     detail_grantors,
     group_tenants,
+    open_ask,
     recent_context,
     set_display_name,
     set_sharing,
@@ -59,6 +69,7 @@ from personal_organizer.interfaces.llm import LLMProvider, Message
 from personal_organizer.messaging.agent import day_label, fit_message, read_window, shown_event
 from personal_organizer.messaging.conversation import converse
 from personal_organizer.messaging.groups.addressing import group_key
+from personal_organizer.messaging.groups.approval import approves
 from personal_organizer.messaging.groups.gate import GROUP_REPLY, POLL_VOTE, REMI, GroupTurn
 from personal_organizer.messaging.groups.outings import handle_vote, read_answer, set_up_outing
 from personal_organizer.messaging.groups.prompt import group_prompt
@@ -87,8 +98,9 @@ GROUP_TOOLS: Final[tuple[Mapping[str, Any], ...]] = (
         "description": (
             "When each person in this group who okayed sharing here is busy within [start, "
             "end): their name and busy times, never what the events are. not_shared names the "
-            "members who haven't okayed. start and end are local times, ISO 8601 with no "
-            "offset, e.g. 2026-10-23T00:00; for one day, that day's 00:00 to the next day's. "
+            "members who haven't okayed, stopped those who said to stop sharing here. start and "
+            "end are local times, ISO 8601 with no offset, e.g. 2026-10-23T00:00; for one day, "
+            "that day's 00:00 to the next day's. "
             "An all-day block's start and end are dates, end being its last day."
         ),
         "input_schema": {
@@ -191,29 +203,38 @@ async def _events(
 
 
 async def free_busy(
-    db: Database, group_id: UUID, start: datetime, end: datetime, *, calendar: CalendarProvider
+    db: Database,
+    group_id: UUID,
+    start: datetime,
+    end: datetime,
+    *,
+    calendar: CalendarProvider,
+    now: datetime,
 ) -> dict[str, object]:
     """Who is busy when in ``[start, end)``, among the group's members who okayed it; the
-    others by name only, in ``not_shared``. Times are in ``start``'s zone."""
+    others by name only: in ``not_shared``, and asked to okay it, or in ``stopped`` if they said
+    to stop. Times are in ``start``'s zone."""
     zone = start.tzinfo
     assert isinstance(zone, ZoneInfo), "start carries its zone"
     async with db.system_session() as session:
         members = await group_tenants(session, group_id)
     people: list[dict[str, object]] = []
     not_shared: list[str] = []
+    stopped: list[str] = []
     for tenant_id, sharing in members:
         async with db.tenant_session(TenantId(tenant_id)) as session:
             name = _name(await get_tenant(session, tenant_id))
             account = await active_connection(session, tenant_id) if sharing else None
+            asked = not sharing and await ask(session, tenant_id, group_id, now)
         if not sharing:
-            not_shared.append(name)
+            (not_shared if asked else stopped).append(name)
             continue
         events = await _events(calendar, account, start, end)
         if isinstance(events, str):
             people.append({"name": name, "busy": None, "note": events})
         else:
             people.append({"name": name, "busy": busy_blocks(events, zone)})
-    return {"people": people, "not_shared": not_shared}
+    return {"people": people, "not_shared": not_shared, "stopped": stopped}
 
 
 def _detail(name: str, event: CalendarEvent, zone: ZoneInfo, language: str) -> str:
@@ -291,6 +312,20 @@ async def _zone(db: Database, group_id: UUID, asker: Tenant | None) -> ZoneInfo:
     return ZoneInfo(DEFAULT_ZONE)
 
 
+async def _history(db: Database, row: InboxRow, turn: GroupTurn) -> tuple[Message, ...]:
+    """The group's recent conversation before ``row``, as the model reads it."""
+    async with db.system_session() as session:
+        context = await recent_context(session, turn.group_id)
+    # The gate already added this message; it is the turn's text, not its history.
+    return tuple(
+        Message("assistant", line.body)
+        if line.inbox_id is None
+        else Message("user", f"{line.sender_name or SOMEONE}: {line.body}")
+        for line in context
+        if line.inbox_id != row.id
+    )
+
+
 async def group_turn(
     row: InboxRow,
     channel: OutboundChannel,
@@ -301,21 +336,87 @@ async def group_turn(
     calendar: CalendarProvider,
     last_attempt: bool = False,
 ) -> None:
-    """Count a vote; read an answer said to the group; or answer ``row`` in the group if it
-    was for Remi, sending any granted details privately."""
+    """Count a vote; read an okay or an answer said to the group; or answer ``row`` in the
+    group if it was for Remi or okayed sharing, sending any granted details privately."""
     if row.message_type == POLL_VOTE:
         await handle_vote(row, channel, turn, db=db, calendar=calendar)
         return
+    okayed = False
     if not turn.addressed:
         try:
-            await read_answer(row, turn, db=db, llm=llm)
+            okayed = await _okayed(row, turn, db=db, llm=llm)
+            if not okayed:
+                await read_answer(row, turn, db=db, llm=llm)
         except LLMUnavailableError:
             if not last_attempt:
                 raise
             log.warning("group.answer_unread", reason="unavailable")
+            return
         except LLMRejectedError:
             log.warning("group.answer_unread", reason="rejected")
-        return
+            return
+        if not okayed:
+            return
+    await _answer(
+        row,
+        channel,
+        turn,
+        db=db,
+        llm=llm,
+        calendar=calendar,
+        last_attempt=last_attempt,
+        approved=not turn.addressed,
+    )
+    if okayed and turn.tenant_id is not None:
+        # Answered (or already was): the ask is done. Until now a retry reads the okay again.
+        # Sharing stays as the turn left it: the model may have turned it off again.
+        async with db.tenant_session(TenantId(turn.tenant_id)) as session:
+            await clear_ask(session, turn.tenant_id, turn.group_id)
+
+
+async def _okayed(row: InboxRow, turn: GroupTurn, *, db: Database, llm: LLMProvider) -> bool:
+    """Did ``row``, not for Remi, okay sharing after Remi asked its sender? Saved if so, for
+    the sender only, with the ask left open until the answer is out. Costs no model call
+    unless they have an open ask and Remi's asking line, naming them, is still in the context."""
+    if turn.tenant_id is None or not row.body:
+        return False
+    tenant_id = TenantId(turn.tenant_id)
+    async with db.tenant_session(tenant_id) as session:
+        asked = await open_ask(session, tenant_id, turn.group_id, turn.now)
+        tenant = await get_tenant(session, tenant_id)
+    if not asked:
+        return False
+    if await already_sent(db, row.id, GROUP_REPLY):
+        # A retry after the answer went out: only closing the ask was left.
+        async with db.tenant_session(tenant_id) as session:
+            await clear_ask(session, tenant_id, turn.group_id)
+        return False
+    context = await _history(db, row, turn)
+    # Remi asked by the name free_busy gave; without that line in view an "ok" can't be read.
+    asked_as = re.compile(rf"\b{re.escape(_name(tenant).casefold())}\b")
+    if not any(m.role == "assistant" and asked_as.search(m.content.casefold()) for m in context):
+        return False
+    name = (tenant.display_name if tenant else None) or row.sender_name or SOMEONE
+    if not await approves(f"{name}: {row.body}", context=context, llm=llm):
+        return False
+    async with db.tenant_session(tenant_id) as session:
+        await set_sharing(session, tenant_id, turn.group_id, True, close_ask=False)
+    return True
+
+
+async def _answer(
+    row: InboxRow,
+    channel: OutboundChannel,
+    turn: GroupTurn,
+    *,
+    db: Database,
+    llm: LLMProvider,
+    calendar: CalendarProvider,
+    last_attempt: bool,
+    approved: bool,
+) -> None:
+    """Answer ``row`` in the group, sending any granted details privately. ``approved``: its
+    sender just okayed sharing, which is already saved."""
     if await already_sent(db, row.id, GROUP_REPLY):
         log.info("group.already_sent", inbox_id=str(row.id))
         return
@@ -326,18 +427,9 @@ async def group_turn(
     asker_name = (asker.display_name if asker else None) or row.sender_name or SOMEONE
     language = detect_language(row.body)
     zone = await _zone(db, turn.group_id, asker)
-    async with db.system_session() as session:
-        context = await recent_context(session, turn.group_id)
-    # The gate already added this message; it is the turn's text, not its history.
-    history = tuple(
-        Message("assistant", line.body)
-        if line.inbox_id is None
-        else Message("user", f"{line.sender_name or SOMEONE}: {line.body}")
-        for line in context
-        if line.inbox_id != row.id
-    )
+    history = await _history(db, row, turn)
     windows: list[tuple[datetime, datetime]] = []
-    shared: list[bool] = []
+    shared: list[bool] = [True] if approved else []
     posted: list[bool] = []
 
     async def run_tool(name: str, arguments: Mapping[str, Any]) -> str:
@@ -347,7 +439,7 @@ async def group_turn(
                 return window
             start, end, note = window
             windows.append((start, end))
-            result = await free_busy(db, turn.group_id, start, end, calendar=calendar)
+            result = await free_busy(db, turn.group_id, start, end, calendar=calendar, now=turn.now)
             if note:
                 result["note"] = note
             return json.dumps(result, ensure_ascii=False)
@@ -381,7 +473,9 @@ async def group_turn(
         return f"ok: they are {called.strip()} from now on"
 
     text = f"{asker_name}: {row.body or f'[{row.message_type}]'}"
-    system = group_prompt(language, turn.now.astimezone(zone), asker_name, asker is not None)
+    system = group_prompt(
+        language, turn.now.astimezone(zone), asker_name, asker is not None, approved=approved
+    )
     with structlog.contextvars.bound_contextvars(inbox_id=str(row.id)):
         try:
             reply = (
