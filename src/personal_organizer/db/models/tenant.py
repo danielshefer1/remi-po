@@ -162,6 +162,10 @@ class Reminder(Base, TenantMixin):
     # A plain string default: the ``text`` column above shadows ``sqlalchemy.text`` here.
     status: Mapped[str] = mapped_column(Text, server_default="pending")
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    # A repeating reminder is a chain of rows: each carries the RRULE (never with COUNT) and
+    # the first row's id; that first row's own ``series_id`` stays NULL.
+    rule: Mapped[str | None] = mapped_column(Text)
+    series_id: Mapped[UUID | None]
 
 
 class Note(Base, TenantMixin):

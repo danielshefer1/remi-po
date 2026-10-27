@@ -11,15 +11,22 @@ the run that finishes it records the message.
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from typing import Final
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 import structlog
 
 from personal_organizer.core.types import TenantId
 from personal_organizer.db.engine import Database
 from personal_organizer.db.repositories.messages import record_outbound
-from personal_organizer.db.repositories.reminders import finish_reminder, get_reminder
+from personal_organizer.db.repositories.reminders import (
+    finish_reminder,
+    get_reminder,
+    schedule_next,
+)
+from personal_organizer.db.repositories.tenants import get_tenant
 from personal_organizer.messaging.inbound import ChannelResolver
 from personal_organizer.messaging.onboarding_text import t
 from personal_organizer.messaging.outbox import send_once
@@ -28,6 +35,7 @@ from personal_organizer.messaging.proactive import proactive_target
 log = structlog.get_logger(__name__)
 
 REMINDER_KIND: Final = "reminder"
+STALE: Final = timedelta(hours=12)  # must match the one-off window in migration 0010
 
 
 def reminder_key(reminder_id: UUID) -> str:
@@ -36,7 +44,7 @@ def reminder_key(reminder_id: UUID) -> str:
 
 
 async def send_reminder(
-    reminder_id: UUID, tenant_id: UUID, *, db: Database, channels: ChannelResolver
+    reminder_id: UUID, tenant_id: UUID, *, db: Database, channels: ChannelResolver, now: datetime
 ) -> str | None:
     """Send the reminder's line at most once, and move it out of ``pending``.
 
@@ -44,15 +52,26 @@ async def send_reminder(
     longer pending, or there is nowhere to send it (then it is marked ``failed``). Re-raises
     ``TransientChannelError`` from :func:`send_once` with the reminder still ``pending``, which
     the task's retry strategy retries.
+
+    A repeating reminder inserts its next occurrence in the session of the run that finishes
+    it (so a re-run adds none). One more than ``STALE`` overdue is skipped, unsent: the worker
+    was down, and a late line is worse than none.
     """
     async with db.tenant_session(TenantId(tenant_id)) as session:
         reminder = await get_reminder(session, tenant_id, reminder_id)
-    if reminder is None or reminder.status != "pending":
-        return None
+        if reminder is None or reminder.status != "pending":
+            return None
+        tenant = await get_tenant(session, tenant_id)
+        zone = ZoneInfo(tenant.timezone if tenant and tenant.timezone else "UTC")
+        if reminder.rule is not None and now - reminder.due_at > STALE:
+            if await finish_reminder(session, tenant_id, reminder_id, status="failed"):
+                await schedule_next(session, tenant_id, reminder, zone, after=now)
+            return None
     target = await proactive_target(db, tenant_id, channels=channels, event="reminder.skipped")
     if target is None:
         async with db.tenant_session(TenantId(tenant_id)) as session:
-            await finish_reminder(session, tenant_id, reminder_id, status="failed")
+            if await finish_reminder(session, tenant_id, reminder_id, status="failed"):
+                await schedule_next(session, tenant_id, reminder, zone, after=now)
         return None
     text = t("reminder", target.tenant.language, text=reminder.text)
     status = await send_once(
@@ -66,14 +85,15 @@ async def send_reminder(
         idempotency_key=reminder_key(reminder_id),
     )
     async with db.tenant_session(TenantId(tenant_id)) as session:
-        if status == "failed":
-            await finish_reminder(session, tenant_id, reminder_id, status="failed")
         # Accepted, or settled by an earlier attempt: it went out, or may have. Only the run
         # that finishes the reminder records it, so a racing one adds no second copy.
-        elif await finish_reminder(session, tenant_id, reminder_id, status="sent"):
-            await record_outbound(
-                session, tenant_id, inbox_id=None, channel=target.channel.name, body=text
-            )
+        done = "failed" if status == "failed" else "sent"
+        if await finish_reminder(session, tenant_id, reminder_id, status=done):
+            if done == "sent":
+                await record_outbound(
+                    session, tenant_id, inbox_id=None, channel=target.channel.name, body=text
+                )
+            await schedule_next(session, tenant_id, reminder, zone, after=now)
     log.info("reminder.sent", reminder_id=str(reminder_id), status=status)
     return status
 

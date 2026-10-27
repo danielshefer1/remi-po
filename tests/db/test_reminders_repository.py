@@ -12,6 +12,7 @@ from collections.abc import AsyncIterator
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -19,6 +20,7 @@ from personal_organizer.core.types import TenantId
 from personal_organizer.db.engine import Database
 from personal_organizer.db.repositories import messages, reminders
 from personal_organizer.db.repositories.tenants import set_timezone
+from personal_organizer.messaging.schedule import TenantSchedule
 from personal_organizer.settings import Settings
 from tests.fixtures.connect import TRUNCATE_CONNECT_TABLES, make_active, seed_tenant
 
@@ -175,3 +177,124 @@ async def test_record_outbound_without_an_inbox_row(db: Database) -> None:
     assert [(row.direction, row.inbox_id, row.body) for row in rows] == [
         ("out", None, "Reminder: call mom")
     ]
+
+
+JERUSALEM = ZoneInfo("Asia/Jerusalem")
+DAILY = "FREQ=DAILY"
+
+
+async def _add_rule(db: Database, tenant_id: UUID, due_at: datetime, rule: str | None) -> UUID:
+    async with db.tenant_session(TenantId(tenant_id)) as session:
+        return await reminders.add_reminder(
+            session, tenant_id, text="trash", due_at=due_at, rule=rule
+        )
+
+
+async def _next(db: Database, tenant_id: UUID, reminder_id: UUID, after: datetime) -> UUID | None:
+    async with db.tenant_session(TenantId(tenant_id)) as session:
+        reminder = await reminders.get_reminder(session, tenant_id, reminder_id)
+        assert reminder is not None
+        return await reminders.schedule_next(session, tenant_id, reminder, JERUSALEM, after=after)
+
+
+async def test_schedule_next_inserts_following_occurrence(db: Database) -> None:
+    tenant_id = await _tenant(db, "+972500000001")
+    due = datetime(2026, 10, 15, 5, 0, tzinfo=UTC)  # 08:00 in Jerusalem
+    first = await _add_rule(db, tenant_id, due, DAILY)
+    next_id = await _next(db, tenant_id, first, due)
+    assert next_id is not None
+    async with db.tenant_session(TenantId(tenant_id)) as session:
+        nxt = await reminders.get_reminder(session, tenant_id, next_id)
+    assert nxt is not None
+    assert (nxt.text, nxt.rule, nxt.status) == ("trash", DAILY, "pending")
+    assert nxt.series_id == first
+    assert nxt.due_at == due + timedelta(days=1)
+
+
+async def test_schedule_next_keeps_the_time_of_day_after_downtime(db: Database) -> None:
+    tenant_id = await _tenant(db, "+972500000001")
+    due = datetime(2026, 10, 15, 5, 0, tzinfo=UTC)  # 08:00 in Jerusalem
+    first = await _add_rule(db, tenant_id, due, DAILY)
+    restart = datetime(2026, 10, 18, 11, 37, tzinfo=UTC)  # 14:37 in Jerusalem
+    next_id = await _next(db, tenant_id, first, restart)
+    assert next_id is not None
+    async with db.tenant_session(TenantId(tenant_id)) as session:
+        nxt = await reminders.get_reminder(session, tenant_id, next_id)
+    assert nxt is not None
+    assert nxt.due_at == datetime(2026, 10, 19, 5, 0, tzinfo=UTC)
+
+
+async def test_schedule_next_stops_at_until(db: Database) -> None:
+    tenant_id = await _tenant(db, "+972500000001")
+    due = datetime(2026, 10, 15, 5, 0, tzinfo=UTC)
+    first = await _add_rule(db, tenant_id, due, "FREQ=DAILY;UNTIL=20261015T235959")
+    assert await _next(db, tenant_id, first, due) is None
+
+
+async def test_one_off_has_no_next(db: Database) -> None:
+    tenant_id = await _tenant(db, "+972500000001")
+    due = datetime(2026, 10, 15, 5, 0, tzinfo=UTC)
+    one_off = await _add_rule(db, tenant_id, due, None)
+    assert await _next(db, tenant_id, one_off, due) is None
+
+
+async def test_recent_sent_is_count_based_not_age_based(db: Database) -> None:
+    tenant_id = await _tenant(db, "+972500000001")
+    old = await _add(db, tenant_id, NOW - timedelta(days=10), "old")
+    newer = await _add(db, tenant_id, NOW - timedelta(days=2), "newer")
+    pending = await _add(db, tenant_id, NOW + timedelta(days=1), "pending")
+    async with db.tenant_session(TenantId(tenant_id)) as session:
+        for rid in (old, newer):
+            assert await reminders.finish_reminder(session, tenant_id, rid, status="sent")
+        sent = await reminders.recent_sent(session, tenant_id)
+        assert [r.id for r in sent] == [newer, old]
+        assert pending not in [r.id for r in sent]
+        assert [r.id for r in await reminders.recent_sent(session, tenant_id, limit=1)] == [newer]
+
+
+async def test_recent_sent_keeps_one_per_series(db: Database) -> None:
+    """Two daily series would fill the last five in three days; the older one-off stays."""
+    tenant_id = await _tenant(db, "+972500000001")
+    one_off = await _add(db, tenant_id, NOW - timedelta(days=10), "old")
+    latest = []
+    async with db.tenant_session(TenantId(tenant_id)) as session:
+        assert await reminders.finish_reminder(session, tenant_id, one_off, status="sent")
+    for _ in range(2):
+        rid = await _add_rule(db, tenant_id, NOW - timedelta(days=3), DAILY)
+        for _ in range(3):
+            async with db.tenant_session(TenantId(tenant_id)) as session:
+                reminder = await reminders.get_reminder(session, tenant_id, rid)
+                assert reminder is not None
+                assert await reminders.finish_reminder(session, tenant_id, rid, status="sent")
+                nxt = await reminders.schedule_next(
+                    session, tenant_id, reminder, JERUSALEM, after=reminder.due_at
+                )
+            assert nxt is not None
+            last, rid = rid, nxt
+        latest.append(last)
+    async with db.tenant_session(TenantId(tenant_id)) as session:
+        sent = await reminders.recent_sent(session, tenant_id)
+    assert sorted(r.id for r in sent[:2]) == sorted(latest)
+    assert [r.id for r in sent[2:]] == [one_off]
+
+
+async def test_due_reminders_keeps_stale_repeating_rows(db: Database) -> None:
+    tenant_id = await _tenant(db, "+972500000001")
+    stale = NOW - timedelta(hours=20)
+    repeating = await _add_rule(db, tenant_id, stale, DAILY)
+    await _add_rule(db, tenant_id, stale, None)
+    assert await _due_reminders(db) == [(repeating, tenant_id)]
+
+
+async def test_tenant_schedule_skips_one_in_the_tenants_zone(db: Database) -> None:
+    """``just_once`` cancels this time and sets the next, at 08:00 in Jerusalem after DST ends."""
+    tenant_id = await _tenant(db, "+972500000001")
+    sunday = datetime(2026, 10, 18, 5, 0, tzinfo=UTC)  # 08:00 in Jerusalem
+    first = await _add_rule(db, tenant_id, sunday, "FREQ=WEEKLY;BYDAY=SU")
+    schedule = TenantSchedule(db, tenant_id, NOW)
+    assert await schedule.cancel(first, just_once=True) is True
+    [nxt] = await schedule.upcoming()
+    assert nxt.due_at == datetime(2026, 10, 25, 6, 0, tzinfo=UTC)
+    assert nxt.series_id == first
+    assert await schedule.cancel(nxt.id) is True
+    assert await schedule.upcoming() == []

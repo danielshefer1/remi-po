@@ -28,6 +28,7 @@ dependencies = [
     "pydantic>=2.13.5",
     "pydantic-settings>=2.15.0",
     "pypdf>=6.19.0",
+    "python-dateutil>=2.9.0",
     "python-docx>=1.2.0",
     "sentry-sdk>=2.70.0",
     "sqlalchemy[asyncio]>=2.1.0",
@@ -58,6 +59,7 @@ dev = [
     "pytest-asyncio>=1.4.0",
     "pytest-cov>=7.0.0",
     "ruff>=0.16.9",
+    "types-python-dateutil>=2.9.0",
 ]
 
 [tool.ruff]
