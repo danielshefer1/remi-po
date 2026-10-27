@@ -4,7 +4,7 @@
 calendar in their own tenant session and keeps only start, end and all-day, merged into
 :func:`busy_blocks`; titles and locations are dropped before the model sees anything, so no
 prompt or reply can leak them. Members who haven't okayed this group are never read: only
-their names come back, in ``not_shared``.
+their names come back, in ``not_shared`` (asked to okay it) or ``stopped`` (said to stop).
 
 **Details, privately.** After a turn in which ``who_is_free`` ran, an asker who is a member
 gets the events of the people who granted them details, read then from ``detail_grantors``
@@ -97,8 +97,9 @@ GROUP_TOOLS: Final[tuple[Mapping[str, Any], ...]] = (
         "description": (
             "When each person in this group who okayed sharing here is busy within [start, "
             "end): their name and busy times, never what the events are. not_shared names the "
-            "members who haven't okayed. start and end are local times, ISO 8601 with no "
-            "offset, e.g. 2026-10-23T00:00; for one day, that day's 00:00 to the next day's. "
+            "members who haven't okayed, stopped those who said to stop sharing here. start and "
+            "end are local times, ISO 8601 with no offset, e.g. 2026-10-23T00:00; for one day, "
+            "that day's 00:00 to the next day's. "
             "An all-day block's start and end are dates, end being its last day."
         ),
         "input_schema": {
@@ -210,28 +211,29 @@ async def free_busy(
     now: datetime,
 ) -> dict[str, object]:
     """Who is busy when in ``[start, end)``, among the group's members who okayed it; the
-    others by name only, in ``not_shared``, and asked to okay it. Times are in ``start``'s zone."""
+    others by name only: in ``not_shared``, and asked to okay it, or in ``stopped`` if they said
+    to stop. Times are in ``start``'s zone."""
     zone = start.tzinfo
     assert isinstance(zone, ZoneInfo), "start carries its zone"
     async with db.system_session() as session:
         members = await group_tenants(session, group_id)
     people: list[dict[str, object]] = []
     not_shared: list[str] = []
+    stopped: list[str] = []
     for tenant_id, sharing in members:
         async with db.tenant_session(TenantId(tenant_id)) as session:
             name = _name(await get_tenant(session, tenant_id))
             account = await active_connection(session, tenant_id) if sharing else None
-            if not sharing:
-                await ask(session, tenant_id, group_id, now)
+            asked = not sharing and await ask(session, tenant_id, group_id, now)
         if not sharing:
-            not_shared.append(name)
+            (not_shared if asked else stopped).append(name)
             continue
         events = await _events(calendar, account, start, end)
         if isinstance(events, str):
             people.append({"name": name, "busy": None, "note": events})
         else:
             people.append({"name": name, "busy": busy_blocks(events, zone)})
-    return {"people": people, "not_shared": not_shared}
+    return {"people": people, "not_shared": not_shared, "stopped": stopped}
 
 
 def _detail(name: str, event: CalendarEvent, zone: ZoneInfo, language: str) -> str:

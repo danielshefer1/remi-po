@@ -107,7 +107,8 @@ async def _member(
         )
         await groups.set_display_name(session, tenant_id, name)
         await groups.touch_member(session, tenant_id, group_id, NOW)
-        await groups.set_sharing(session, tenant_id, group_id, sharing)
+        if sharing:  # a member starts out not sharing; set_sharing(False) is an explicit stop
+            await groups.set_sharing(session, tenant_id, group_id, True)
     return tenant_id
 
 
@@ -383,6 +384,25 @@ async def test_details_follow_current_grants(
     channel, _ = await _say(db, owner_conn, onboarding_settings, llm)
 
     assert [message.recipient for message in channel.sent] == [JID]
+
+
+async def test_free_busy_doesnt_ask_who_stopped(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    await _member(db, group, DANA, "Dana", "ca_dana", sharing=True)
+    eden = await _member(db, group, EDEN, "Eden", "ca_eden", sharing=True)
+    await _member(db, group, NOA, "Noa", "ca_noa", sharing=False)
+    async with db.tenant_session(TenantId(eden)) as session:
+        await groups.set_sharing(session, eden, group, False)
+    llm = ScriptedLLM(said("", FRIDAY), said("Dana's busy 9 to 10."))
+
+    _, calendar = await _say(db, owner_conn, onboarding_settings, llm)
+
+    result = _tool_result(llm)
+    assert (result["not_shared"], result["stopped"]) == (["Noa"], ["Eden"])
+    assert [account for account, *_ in calendar.calls] == ["ca_dana"]
+    async with db.tenant_session(TenantId(eden)) as session:
+        assert not await groups.open_ask(session, eden, group, NOW)
 
 
 async def test_unaddressed_message_calls_no_model(

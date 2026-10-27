@@ -119,8 +119,9 @@ async def set_sharing(
     session: AsyncSession, tenant_id: UUID, group_id: UUID, sharing: bool, *, close_ask: bool = True
 ) -> None:
     """Okay (or stop) showing busy/free in the group; either answers any open ask, unless
-    ``close_ask`` is false. :func:`touch_member` comes first."""
-    values: dict[str, object] = {"sharing": sharing}
+    ``close_ask`` is false. Stopping is always the person's own say, so :func:`ask` skips them
+    until they share again. :func:`touch_member` comes first."""
+    values: dict[str, object] = {"sharing": sharing, "stopped_at": None if sharing else func.now()}
     if close_ask:
         values["asked_at"] = None
     await session.execute(
@@ -130,13 +131,20 @@ async def set_sharing(
     )
 
 
-async def ask(session: AsyncSession, tenant_id: UUID, group_id: UUID, now: datetime) -> None:
-    """Remi asked this member, in the group, to okay sharing. A sharing member is left alone."""
-    await session.execute(
+async def ask(session: AsyncSession, tenant_id: UUID, group_id: UUID, now: datetime) -> bool:
+    """Remi asked this member, in the group, to okay sharing. ``False``, and left alone, if
+    they share or said to stop."""
+    result = await session.execute(
         scoped(update(GroupMember), GroupMember, tenant_id)
-        .where(GroupMember.group_id == group_id, GroupMember.sharing.is_(False))
+        .where(
+            GroupMember.group_id == group_id,
+            GroupMember.sharing.is_(False),
+            GroupMember.stopped_at.is_(None),
+        )
         .values(asked_at=now)
+        .returning(GroupMember.id)
     )
+    return result.first() is not None
 
 
 async def clear_ask(session: AsyncSession, tenant_id: UUID, group_id: UUID) -> None:

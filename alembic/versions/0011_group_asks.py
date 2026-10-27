@@ -1,7 +1,10 @@
-"""Okaying calendar sharing in the group (issue #51): ``group_members.asked_at``.
+"""Okaying calendar sharing in the group (issue #51): ``group_members.asked_at`` and
+``stopped_at``.
 
 When Remi can't see a member's calendar it asks them, in the group, to okay it; ``asked_at`` is
 when. An "ok" counts only while the ask is open, and sharing (or stopping) clears it.
+``stopped_at`` is when the member said to stop sharing: they aren't asked again, until they
+share again.
 
 Hand-written to match ``personal_organizer.db.models``;
 ``tests/db/test_models_match_migrations.py`` fails if the two drift.
@@ -22,7 +25,11 @@ depends_on: str | Sequence[str] | None = None
 
 def upgrade() -> None:
     op.add_column("group_members", sa.Column("asked_at", sa.DateTime(timezone=True), nullable=True))
+    op.add_column(
+        "group_members", sa.Column("stopped_at", sa.DateTime(timezone=True), nullable=True)
+    )
 
 
 def downgrade() -> None:
+    op.drop_column("group_members", "stopped_at")
     op.drop_column("group_members", "asked_at")
