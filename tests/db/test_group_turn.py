@@ -685,3 +685,20 @@ async def test_okay_already_answered_closes_the_ask(
     assert len(channel.sent) == 2
     assert not await _asked_now(db, group, eden)
     assert (await _sharing(db, group))[eden] is True
+
+
+async def test_okay_needs_the_whole_name_asked(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    """Remi asked Dana, not Dan: "Dan" inside "Dana" is no ask of his."""
+    dan = await _asked(db, group, STRANGER, "Dan", "ca_dan", asking_at=None)
+    async with db.system_session() as session:
+        await groups.add_context(
+            session, group, sender_name=REMI, body="Dana, I need your okay first.", sent_at=NOW
+        )
+
+    channel, _ = await _say(db, owner_conn, onboarding_settings, NoLLM(), phone=STRANGER, body="ok")
+
+    assert channel.sent == []
+    assert (await _sharing(db, group))[dan] is False
+    assert await _asked_now(db, group, dan)

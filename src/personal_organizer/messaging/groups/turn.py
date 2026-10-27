@@ -31,6 +31,7 @@ the fixed ``agent_unavailable`` line, as the agent does.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping, Sequence
 from datetime import datetime
 from typing import Any, Final
@@ -392,8 +393,8 @@ async def _okayed(row: InboxRow, turn: GroupTurn, *, db: Database, llm: LLMProvi
         return False
     context = await _history(db, row, turn)
     # Remi asked by the name free_busy gave; without that line in view an "ok" can't be read.
-    asked_as = _name(tenant).casefold()
-    if not any(m.role == "assistant" and asked_as in m.content.casefold() for m in context):
+    asked_as = re.compile(rf"\b{re.escape(_name(tenant).casefold())}\b")
+    if not any(m.role == "assistant" and asked_as.search(m.content.casefold()) for m in context):
         return False
     name = (tenant.display_name if tenant else None) or row.sender_name or SOMEONE
     if not await approves(f"{name}: {row.body}", context=context, llm=llm):

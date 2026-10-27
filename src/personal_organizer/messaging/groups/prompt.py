@@ -43,7 +43,7 @@ look at your calendars. Just say so here." / "עומר, תמר, אני צריך 
 מסתכל ביומנים שלכם, רק תכתבו כאן שזה בסדר."; to one person: "עומר, כדי להציץ ביומן שלך אני \
 צריך אישור, מספיק לכתוב כאן שזה בסדר."). Never ask for exact words. Answer now, in the same \
 message, with who you can see. "Everyone" only ever means everyone in the group: while someone \
-is in not_shared, name the people you can see instead.
+is in not_shared or stopped, name the people you can see instead.
 - stopped lists the people here who said to stop sharing. Say you can't see their calendars, \
 and don't ask them for an okay: it's their call to share again.
 - A person whose calendar isn't connected: say you can't see it right now.
