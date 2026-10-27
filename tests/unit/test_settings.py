@@ -17,6 +17,9 @@ class TestParsing:
         assert settings.models.chat_model == "gpt-5-mini"
         assert settings.database.app_url.get_secret_value().startswith("postgresql://")
 
+    def test_strong_model_defaults_to_none(self, settings: Settings) -> None:
+        assert settings.models.strong_model is None
+
     def test_dsn_for_role(self, settings: Settings) -> None:
         assert "app_user" in settings.dsn_for(DatabaseRole.APP)
         assert "app_owner" in settings.dsn_for(DatabaseRole.OWNER)

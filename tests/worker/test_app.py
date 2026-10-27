@@ -171,8 +171,9 @@ class TestLastAttempt:
 
 class TestOnAllowed:
     def test_the_agent_when_enabled(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        llm, calendar, settings = object(), object(), object()
+        llm, strong, calendar, settings = object(), object(), object(), object()
         monkeypatch.setattr(channel_tasks, "agent_llm", lambda: llm)
+        monkeypatch.setattr(channel_tasks, "strong_llm", lambda: strong)
         monkeypatch.setattr(channel_tasks, "agent_calendar", lambda: calendar)
         monkeypatch.setattr(channel_tasks, "get_settings", lambda: settings)
         db = cast(Database, object())
@@ -182,6 +183,7 @@ class TestOnAllowed:
         assert handoff.keywords == {
             "db": db,
             "llm": llm,
+            "strong": strong,
             "calendar": calendar,
             "settings": settings,
             "last_attempt": True,
@@ -199,6 +201,22 @@ class TestOnAllowed:
         row: Any = object()
         assert await handoff(row, cast(Any, None), cast(Any, None), datetime.now(UTC)) is None
         assert acked == [row]
+
+
+class TestStrongLLM:
+    @pytest.mark.parametrize("strong_model", [None, ""])
+    def test_off_without_a_strong_model(
+        self, monkeypatch: pytest.MonkeyPatch, strong_model: str | None
+    ) -> None:
+        settings = SimpleNamespace(
+            agent=SimpleNamespace(enabled=True), models=SimpleNamespace(strong_model=strong_model)
+        )
+        monkeypatch.setattr(channel_tasks, "get_settings", lambda: settings)
+        channel_tasks.strong_llm.cache_clear()
+        try:
+            assert channel_tasks.strong_llm() is None
+        finally:
+            channel_tasks.strong_llm.cache_clear()
 
 
 class TestOnGroup:

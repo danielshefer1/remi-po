@@ -1,0 +1,53 @@
+name: Evals
+
+# Live evals call the real model, so they cost money and never run on every push. Run them
+# from the Actions tab (pick the branch), or add the `run-evals` label to a PR. Three runs go
+# side by side because a PR's eval gate is "each case passes at least 2 of 3".
+on:
+  workflow_dispatch:
+    inputs:
+      filter:
+        description: "pytest -k expression (empty runs every eval)"
+        required: false
+        default: ""
+  pull_request:
+    types: [labeled]
+
+concurrency:
+  group: evals-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_FROZEN: "1"
+
+jobs:
+  evals:
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'run-evals'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        run: [1, 2, 3]
+    name: evals (run ${{ matrix.run }})
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv python install
+      - run: uv sync --all-groups
+      - name: Live evals
+        env:
+          AGENT__API_KEY: ${{ secrets.AGENT__API_KEY }}
+          FILTER: ${{ inputs.filter }}
+        run: |
+          # Without the key every eval skips, which would read as a pass.
+          if [ -z "$AGENT__API_KEY" ]; then
+            echo "::error::the AGENT__API_KEY repo secret is not set"
+            exit 1
+          fi
+          if [ -n "$FILTER" ]; then
+            uv run pytest -m eval tests/evals -k "$FILTER"
+          else
+            uv run pytest -m eval tests/evals
+          fi

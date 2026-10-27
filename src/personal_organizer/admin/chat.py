@@ -180,6 +180,7 @@ async def agent_chat(
                 schedule=schedule,
                 notes=notes,
                 connect_link=connect_link,
+                strong=None,
             )
         write(f"bot [{AGENT_REPLY}]> {text or NO_ANSWER}")
         history += [Message("user", line), Message("assistant", text)]
