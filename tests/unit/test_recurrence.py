@@ -58,6 +58,7 @@ def test_monthly_and_yearly_step() -> None:
         "FREQ=DAILY;INTERVAL=53",
         "FREQ=DAILY;COUNT=401",
         "FREQ=DAILY;UNTIL=tomorrow",
+        "FREQ=DAILY;UNTIL=20261399T000000",
         "FREQ=DAILY;FREQ=WEEKLY",
         "DTSTART=20260101T000000;FREQ=DAILY",
         "FREQ=DAILY;COUNT=2;UNTIL=20270101T000000",

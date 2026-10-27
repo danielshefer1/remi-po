@@ -66,8 +66,15 @@ def check_rule(rule: str, first: datetime) -> str:
             raise ValueError("BYMONTHDAY must be 1 to 31, or -1 for the last day")
     if "UNTIL" in parts and "COUNT" in parts:
         raise ValueError("use UNTIL or COUNT, not both")
-    if "UNTIL" in parts and not _UNTIL.fullmatch(parts["UNTIL"]):
-        raise ValueError("UNTIL must look like 20270630T090000 (local time, no Z)")
+    if "UNTIL" in parts:
+        try:
+            if not _UNTIL.fullmatch(parts["UNTIL"]):
+                raise ValueError
+            datetime.strptime(parts["UNTIL"], "%Y%m%dT%H%M%S")  # noqa: DTZ007 - local wall time
+        except ValueError:
+            raise ValueError(
+                "UNTIL must be a real date like 20270630T090000 (local time, no Z)"
+            ) from None
     if "COUNT" in parts:
         count = _int(parts, "COUNT")
         if not 1 <= count <= _MAX_COUNT:
