@@ -463,6 +463,119 @@ async def test_a_fired_reminder_is_not_set_again(llm: AnthropicLLM) -> None:
     assert detect_language(reply) == "he", reply
 
 
+def _rule(rule: str | None) -> dict[str, str]:
+    """A stored RRULE's keys, so extra ones (INTERVAL=1, a different order) still pass."""
+    assert rule, "not a repeating reminder"
+    return dict(part.split("=", 1) for part in rule.split(";"))
+
+
+def _local_time(reminder: Reminder) -> tuple[int, int]:
+    local = reminder.due_at.astimezone(ZoneInfo(JERUSALEM))
+    return local.hour, local.minute
+
+
+async def test_weekly_trash_is_one_repeating_reminder(llm: AnthropicLLM) -> None:
+    schedule = InMemorySchedule(NOW)
+    reply = await _turn("remind me every Sunday evening to take out the trash", "en", schedule, llm)
+    [reminder] = schedule.reminders
+    rule = _rule(reminder.rule)
+    assert (rule["FREQ"], rule["BYDAY"]) == ("WEEKLY", "SU"), (reminder.rule, reply)
+    local = reminder.due_at.astimezone(ZoneInfo(JERUSALEM))
+    assert (local.weekday(), local.hour >= 17) == (6, True), (reminder, reply)
+    assert detect_language(reply) == "en", reply
+
+
+async def test_hebrew_daily_pills(llm: AnthropicLLM) -> None:
+    schedule = InMemorySchedule(NOW)
+    reply = await _turn("תזכירי לי כל יום ב-9 לקחת כדורים", "he", schedule, llm)
+    [reminder] = schedule.reminders
+    assert _rule(reminder.rule)["FREQ"] == "DAILY", (reminder.rule, reply)
+    assert _local_time(reminder) == (9, 0), (reminder, reply)
+    assert detect_language(reply) == "he", reply
+
+
+WEEKLY = "FREQ=WEEKLY;BYDAY=SU"
+#: The series was set earlier and listed, so "the trash one" is on the table.
+SERIES = (
+    Message("user", "remind me every Sunday at 8pm to take out the trash"),
+    Message("assistant", "Done, I'll remind you every Sunday at 8pm."),
+    Message("user", "what reminders do I have?"),
+    Message("assistant", "Just one: take out the trash, every Sunday at 8pm. Next is this Sunday."),
+)
+SERIES_HE = (
+    Message("user", "תזכירי לי כל יום ראשון ב-20:00 להוציא את הזבל"),
+    Message("assistant", "סגור, אזכיר לך כל יום ראשון ב-20:00."),
+    Message("user", "אילו תזכורות יש לי?"),
+    Message("assistant", "אחת: להוציא את הזבל, כל יום ראשון ב-20:00. הבאה ביום ראשון."),
+)
+
+
+async def _series() -> InMemorySchedule:
+    schedule = InMemorySchedule(NOW)
+    first = datetime(2026, 10, 18, 20, 0, tzinfo=ZoneInfo(JERUSALEM))
+    await schedule.add("להוציא את הזבל", first, WEEKLY)
+    return schedule
+
+
+@pytest.mark.parametrize(
+    ("text", "language", "history"),
+    [
+        ("stop reminding me about the trash", "en", SERIES),
+        ("אין צורך יותר להזכיר לי על הזבל", "he", SERIES_HE),
+    ],
+)
+async def test_stop_reminding_cancels_series(
+    text: str, language: str, history: tuple[Message, ...], llm: AnthropicLLM
+) -> None:
+    schedule = await _series()
+    reply = await _turn(text, language, schedule, llm, history=history)
+    assert schedule.reminders, reply
+    assert not [r for r in schedule.reminders if r.status == "pending"], (schedule.reminders, reply)
+    assert [r.status for r in schedule.reminders].count("cancelled") == 1, schedule.reminders
+
+
+@pytest.mark.parametrize(
+    ("text", "language", "history"),
+    [
+        ("skip the trash this week, I'm away", "en", SERIES),
+        ("השבוע לא צריך להזכיר לי על הזבל, אני לא בבית", "he", SERIES_HE),
+    ],
+)
+async def test_skip_this_week_keeps_series(
+    text: str, language: str, history: tuple[Message, ...], llm: AnthropicLLM
+) -> None:
+    schedule = await _series()
+    reply = await _turn(text, language, schedule, llm, history=history)
+    cancelled = [r for r in schedule.reminders if r.status == "cancelled"]
+    pending = [r for r in schedule.reminders if r.status == "pending"]
+    assert [r.due_at.day for r in cancelled] == [18], (schedule.reminders, reply)
+    [after] = pending
+    assert (after.due_at.day, after.rule) == (25, WEEKLY), (schedule.reminders, reply)
+
+
+class Counted(InMemorySchedule):
+    """Counts ``add`` calls, to tell one repeating reminder from a pile of single ones."""
+
+    adds = 0
+
+    async def add(self, text: str, due_at: datetime, rule: str | None = None) -> None:
+        self.adds += 1
+        await super().add(text, due_at, rule)
+
+
+async def test_month_of_class_reminders_is_repeating(llm: AnthropicLLM) -> None:
+    """Staging, 2026-10-26: a month of reminders for a weekly class took dozens of calls."""
+    schedule = Counted(NOW)
+    reply = await _turn(
+        "יש לי שיעור יוגה בימי שלישי ב-18:00 במשך החודש הקרוב, תזכירי לי שעה לפני כל שיעור",
+        "he",
+        schedule,
+        llm,
+    )
+    assert 0 < schedule.adds < 10, (schedule.adds, reply)
+    assert any(r.rule for r in schedule.reminders), (schedule.reminders, reply)
+
+
 @pytest.mark.parametrize(
     ("text", "language", "expected"),
     [
