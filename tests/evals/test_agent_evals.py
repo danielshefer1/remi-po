@@ -188,12 +188,7 @@ SCENARIOS = [
 
 @pytest.fixture
 def llm() -> AnthropicLLM:
-    # Like production's strong client: its own timeout, no SDK retries.
-    client = anthropic.AsyncAnthropic(
-        api_key=os.environ["AGENT__API_KEY"],
-        timeout=AgentSettings().strong_timeout_s,
-        max_retries=0,
-    )
+    client = anthropic.AsyncAnthropic(api_key=os.environ["AGENT__API_KEY"], max_retries=2)
     return AnthropicLLM(client, model=os.environ.get("MODELS__CHAT_MODEL", "claude-haiku-5-5"))
 
 
@@ -732,7 +727,12 @@ class Recording:
 
 @pytest.fixture
 def strong() -> AnthropicLLM:
-    client = anthropic.AsyncAnthropic(api_key=os.environ["AGENT__API_KEY"], max_retries=2)
+    # Like production's strong client: its own timeout, no SDK retries.
+    client = anthropic.AsyncAnthropic(
+        api_key=os.environ["AGENT__API_KEY"],
+        timeout=AgentSettings().strong_timeout_s,
+        max_retries=0,
+    )
     return AnthropicLLM(client, model=os.environ.get("MODELS__STRONG_MODEL", "claude-sonnet-5-5"))
 
 
