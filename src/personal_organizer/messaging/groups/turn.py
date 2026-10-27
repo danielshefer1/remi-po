@@ -374,7 +374,7 @@ async def group_turn(
 async def _okayed(row: InboxRow, turn: GroupTurn, *, db: Database, llm: LLMProvider) -> bool:
     """Did ``row``, not for Remi, okay sharing after Remi asked its sender? Saved if so, for
     the sender only, with the ask left open until the answer is out. Costs no model call
-    unless they have an open ask."""
+    unless they have an open ask and Remi's asking line, naming them, is still in the context."""
     if turn.tenant_id is None or not row.body:
         return False
     tenant_id = TenantId(turn.tenant_id)
@@ -383,8 +383,17 @@ async def _okayed(row: InboxRow, turn: GroupTurn, *, db: Database, llm: LLMProvi
         tenant = await get_tenant(session, tenant_id)
     if not asked:
         return False
-    name = (tenant.display_name if tenant else None) or row.sender_name or SOMEONE
+    if await already_sent(db, row.id, GROUP_REPLY):
+        # A retry after the answer went out: only closing the ask was left.
+        async with db.tenant_session(tenant_id) as session:
+            await clear_ask(session, tenant_id, turn.group_id)
+        return False
     context = await _history(db, row, turn)
+    # Remi asked by the name free_busy gave; without that line in view an "ok" can't be read.
+    asked_as = _name(tenant).casefold()
+    if not any(m.role == "assistant" and asked_as in m.content.casefold() for m in context):
+        return False
+    name = (tenant.display_name if tenant else None) or row.sender_name or SOMEONE
     if not await approves(f"{name}: {row.body}", context=context, llm=llm):
         return False
     async with db.tenant_session(tenant_id) as session:

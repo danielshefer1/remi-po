@@ -10,7 +10,7 @@ from __future__ import annotations
 import functools
 import json
 from collections.abc import AsyncIterator, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 from zoneinfo import ZoneInfo
@@ -29,7 +29,8 @@ from personal_organizer.db.repositories import groups
 from personal_organizer.db.repositories.connections import bind_connection
 from personal_organizer.db.repositories.tenants import set_timezone
 from personal_organizer.interfaces.calendar import CalendarEvent
-from personal_organizer.messaging.groups.gate import GROUP_REPLY
+from personal_organizer.messaging.groups import turn as turn_module
+from personal_organizer.messaging.groups.gate import GROUP_REPLY, REMI
 from personal_organizer.messaging.groups.turn import group_turn
 from personal_organizer.messaging.inbound import handle_inbound
 from personal_organizer.messaging.onboarding_text import t
@@ -395,11 +396,30 @@ async def test_unaddressed_message_calls_no_model(
     assert calendar.calls == []
 
 
-async def _asked(db: Database, group: UUID, phone: str, name: str, account: str) -> UUID:
-    """A member who doesn't share yet and was just asked to okay it."""
+async def _asked(
+    db: Database,
+    group: UUID,
+    phone: str,
+    name: str,
+    account: str,
+    *,
+    at: datetime = NOW,
+    asking_at: datetime | None = NOW,
+) -> UUID:
+    """A member who doesn't share yet and was asked to okay it at ``at``, by Remi's line in the
+    group at ``asking_at`` (none if ``None``)."""
     tenant_id = await _member(db, group, phone, name, account, sharing=False)
     async with db.tenant_session(TenantId(tenant_id)) as session:
-        await groups.ask(session, tenant_id, group, NOW)
+        await groups.ask(session, tenant_id, group, at)
+    if asking_at is not None:
+        async with db.system_session() as session:
+            await groups.add_context(
+                session,
+                group,
+                sender_name=REMI,
+                body=f"{name}, I need your okay before I look at your calendar.",
+                sent_at=asking_at,
+            )
     return tenant_id
 
 
@@ -582,3 +602,66 @@ async def test_approved_turn_can_still_turn_sharing_off(
     assert (await _sharing(db, group))[eden] is False
     assert not await _asked_now(db, group, eden)
     assert [message.body for message in channel.sent] == [t("group_shared_off", "en")]
+
+
+async def test_okay_without_the_ask_in_view_calls_no_model(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    """The ask is open, but Remi's asking line has left the context: "ok" can't be judged."""
+    eden = await _asked(db, group, EDEN, "Eden", "ca_eden", asking_at=NOW - timedelta(hours=7))
+
+    channel, _ = await _say(db, owner_conn, onboarding_settings, NoLLM(), phone=EDEN, body="ok")
+
+    assert channel.sent == []
+    assert (await _sharing(db, group))[eden] is False
+    assert await _asked_now(db, group, eden)
+
+
+async def test_okay_after_the_ask_expired_calls_no_model(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    eden = await _asked(db, group, EDEN, "Eden", "ca_eden", at=NOW - timedelta(hours=49))
+
+    channel, _ = await _say(db, owner_conn, onboarding_settings, NoLLM(), phone=EDEN, body="ok")
+
+    assert channel.sent == []
+    assert (await _sharing(db, group))[eden] is False
+
+
+async def test_okay_already_answered_closes_the_ask(
+    db: Database,
+    owner_conn: Any,
+    onboarding_settings: Settings,
+    group: UUID,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reply went out but the job died before the ask was closed: the retry just closes it."""
+    eden = await _asked(db, group, EDEN, "Eden", "ca_eden")
+    channel = FakeOutbound(name="gowa")
+
+    async def dies(*_: object) -> None:
+        raise ConnectionError("worker died")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(turn_module, "clear_ask", dies)
+        with pytest.raises(ConnectionError):
+            await _say(
+                db,
+                owner_conn,
+                onboarding_settings,
+                ScriptedLLM(said("YES"), said("Thanks, Eden!")),
+                phone=EDEN,
+                body="ok",
+                channel=channel,
+            )
+    [inbox_id] = await owner_conn.fetchval("SELECT array_agg(id) FROM channel_inbox")
+    assert await _asked_now(db, group, eden)
+    # Remi answered Dana in between, so the retried "ok" is no follow-up to Remi.
+    await _member(db, group, DANA, "Dana", "ca_dana", sharing=True)
+    await _say(db, owner_conn, onboarding_settings, ScriptedLLM(said("Hi!")), channel=channel)
+
+    await _say(db, owner_conn, onboarding_settings, NoLLM(), channel=channel, inbox_id=inbox_id)
+
+    assert len(channel.sent) == 2
+    assert not await _asked_now(db, group, eden)
+    assert (await _sharing(db, group))[eden] is True
