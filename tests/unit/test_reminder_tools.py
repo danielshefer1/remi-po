@@ -11,11 +11,18 @@ from dataclasses import replace
 from datetime import UTC, datetime, time
 from typing import Any
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 import pytest
 
 from personal_organizer.interfaces.llm import Completion
-from personal_organizer.messaging.agent import agent_prompt, respond
+from personal_organizer.messaging.agent import (
+    agent_prompt,
+    cancel,
+    list_reminders,
+    remind,
+    respond,
+)
 from personal_organizer.messaging.schedule import InMemorySchedule
 from personal_organizer.messaging.tenancy import TenantState
 from personal_organizer.providers.calendar.memory import InMemoryCalendar
@@ -116,7 +123,8 @@ async def test_list_reminders_shows_local_times_and_short_numbers() -> None:
         "reminders": [
             {"n": 1, "text": "call mom", "at": "2026-10-15T18:00"},
             {"n": 2, "text": "take the laundry out", "at": "2026-10-16T09:00"},
-        ]
+        ],
+        "went_off": [],
     }
     assert all(str(r.id) not in result for r in schedule.reminders)
 
@@ -210,3 +218,60 @@ async def test_respond_puts_the_tenants_morning_time_in_the_prompt() -> None:
     tenant = replace(TENANT, briefing_at=time(8, 15))
     await respond([], "hi", tenant, llm=llm, calendar=InMemoryCalendar(), account=None, now=NOW)
     assert "now set for 08:15" in llm.calls[0][0].content
+
+
+J = ZoneInfo("Asia/Jerusalem")
+SUNDAYS = "FREQ=WEEKLY;BYDAY=SU"
+
+
+async def test_set_repeating() -> None:
+    schedule = InMemorySchedule(NOW)
+    arguments = {"text": "trash", "at": "2026-11-01T08:00", "repeat": SUNDAYS}
+    out = await remind(arguments, schedule=schedule, zone=J, now=NOW)
+    assert out.startswith("ok")
+    assert schedule.reminders[0].rule == SUNDAYS
+
+
+async def test_bad_rule_is_an_error() -> None:
+    schedule = InMemorySchedule(NOW)
+    arguments = {"text": "trash", "at": "2026-11-01T08:00", "repeat": "FREQ=HOURLY"}
+    out = await remind(arguments, schedule=schedule, zone=J, now=NOW)
+    assert out.startswith("error:")
+    assert schedule.reminders == []
+
+
+async def test_list_shows_repeat_in_words() -> None:
+    schedule = InMemorySchedule(NOW)
+    await schedule.add("trash", datetime(2026, 11, 1, 8, 0, tzinfo=J), SUNDAYS)
+    out = json.loads(await list_reminders(schedule, J, []))
+    assert out["reminders"][0]["repeats"] == "every Sunday"
+
+
+async def test_list_reminders_shows_recently_sent() -> None:
+    """Else the model reads a reminder that fired as one never set, and sets it again (PR #43)."""
+    schedule = InMemorySchedule(datetime(2026, 10, 17, 9, 0, tzinfo=UTC))
+    await schedule.add("Eden", datetime(2026, 10, 16, 15, 0, tzinfo=UTC))
+    schedule.reminders[0].status = "sent"
+    out = await list_reminders(schedule, J, [])
+    assert json.loads(out)["went_off"] == [{"text": "Eden", "at": "2026-10-16T18:00"}]
+
+
+async def _series() -> tuple[InMemorySchedule, list[UUID]]:
+    schedule = InMemorySchedule(NOW)
+    await schedule.add("trash", datetime(2026, 11, 1, 8, 0, tzinfo=J), SUNDAYS)
+    listed: list[UUID] = []
+    await list_reminders(schedule, J, listed)
+    return schedule, listed
+
+
+async def test_skip_one_keeps_series() -> None:
+    schedule, listed = await _series()
+    assert (await cancel({"n": 1, "just_this_one": True}, schedule, listed)).startswith("ok")
+    assert [r.status for r in schedule.reminders] == ["cancelled", "pending"]
+    assert schedule.reminders[1].due_at == datetime(2026, 11, 8, 8, 0, tzinfo=J)
+
+
+async def test_stop_series() -> None:
+    schedule, listed = await _series()
+    assert (await cancel({"n": 1}, schedule, listed)).startswith("ok")
+    assert all(r.status != "pending" for r in schedule.reminders)

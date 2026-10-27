@@ -20,6 +20,7 @@ from personal_organizer.core.types import TenantId
 from personal_organizer.db.engine import Database
 from personal_organizer.db.repositories import messages, reminders
 from personal_organizer.db.repositories.tenants import set_timezone
+from personal_organizer.messaging.schedule import TenantSchedule
 from personal_organizer.settings import Settings
 from tests.fixtures.connect import TRUNCATE_CONNECT_TABLES, make_active, seed_tenant
 
@@ -257,3 +258,17 @@ async def test_due_reminders_keeps_stale_repeating_rows(db: Database) -> None:
     repeating = await _add_rule(db, tenant_id, stale, DAILY)
     await _add_rule(db, tenant_id, stale, None)
     assert await _due_reminders(db) == [(repeating, tenant_id)]
+
+
+async def test_tenant_schedule_skips_one_in_the_tenants_zone(db: Database) -> None:
+    """``just_once`` cancels this time and sets the next, at 08:00 in Jerusalem after DST ends."""
+    tenant_id = await _tenant(db, "+972500000001")
+    sunday = datetime(2026, 10, 18, 5, 0, tzinfo=UTC)  # 08:00 in Jerusalem
+    first = await _add_rule(db, tenant_id, sunday, "FREQ=WEEKLY;BYDAY=SU")
+    schedule = TenantSchedule(db, tenant_id, NOW)
+    assert await schedule.cancel(first, just_once=True) is True
+    [nxt] = await schedule.upcoming()
+    assert nxt.due_at == datetime(2026, 10, 25, 6, 0, tzinfo=UTC)
+    assert nxt.series_id == first
+    assert await schedule.cancel(nxt.id) is True
+    assert await schedule.upcoming() == []

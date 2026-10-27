@@ -68,7 +68,7 @@ from personal_organizer.core.errors import (
 from personal_organizer.core.types import TenantId
 from personal_organizer.db.engine import Database
 from personal_organizer.db.models.group import GroupPoll
-from personal_organizer.db.models.tenant import CalendarConnection
+from personal_organizer.db.models.tenant import CalendarConnection, Reminder
 from personal_organizer.db.repositories import pending
 from personal_organizer.db.repositories.connections import active_connection
 from personal_organizer.interfaces.calendar import CalendarEvent, CalendarProvider
@@ -84,6 +84,7 @@ from personal_organizer.messaging.notes import Notes, TenantNotes
 from personal_organizer.messaging.onboarding import LINK_PLACEHOLDER, Advance
 from personal_organizer.messaging.onboarding_text import t
 from personal_organizer.messaging.outbox import already_sent, send_once
+from personal_organizer.messaging.recurrence import check_rule, describe_rule
 from personal_organizer.messaging.schedule import Schedule, TenantSchedule
 from personal_organizer.messaging.tenancy import TenantState, load_history, phone_of
 from personal_organizer.messaging.text import WHATSAPP_TEXT_LIMIT, split_text
@@ -216,13 +217,22 @@ TOOLS: Final[tuple[Mapping[str, Any], ...]] = (
         "description": (
             "Set a reminder: at that time, the person gets a WhatsApp message with the text. "
             "at is a local time in their time zone, ISO 8601 with no offset, for example "
-            "2026-10-13T18:00, later than now and at most a year ahead."
+            "2026-10-13T18:00, later than now and at most a year ahead. For one that repeats, "
+            "repeat is an RRULE such as FREQ=WEEKLY;BYDAY=SU, or "
+            "FREQ=MONTHLY;BYMONTHDAY=1;UNTIL=20270630T235900; at is the first time."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "text": {"type": "string", "description": "What to remind them of, short"},
                 "at": {"type": "string", "description": "Local time, e.g. 2026-10-13T18:00"},
+                "repeat": {
+                    "type": "string",
+                    "description": (
+                        "Only if it repeats: an RRULE, at most daily. COUNT counts reminders, "
+                        "not weeks; BYMONTHDAY=-1 is the last day (31 skips short months)."
+                    ),
+                },
             },
             "required": ["text", "at"],
         },
@@ -230,8 +240,8 @@ TOOLS: Final[tuple[Mapping[str, Any], ...]] = (
     {
         "name": "list_reminders",
         "description": (
-            "The person's upcoming reminders, soonest first, each with a number n, its text and "
-            "its local time."
+            "The person's upcoming reminders, soonest first, each with a number n, its text, "
+            "its local time and, if it repeats, how. went_off has the last few already sent."
         ),
         "input_schema": {"type": "object", "properties": {}},
     },
@@ -239,12 +249,17 @@ TOOLS: Final[tuple[Mapping[str, Any], ...]] = (
         "name": "cancel_reminder",
         "description": (
             "Cancel one upcoming reminder. In this same message, call list_reminders first and "
-            "pass its n for the one they mean."
+            "pass its n for the one they mean. A repeating one stops for good, unless "
+            "just_this_one skips only this time."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "n": {"type": "integer", "description": "The reminder's n from list_reminders"},
+                "just_this_one": {
+                    "type": "boolean",
+                    "description": "Skip only this time of a repeating one; it goes on after",
+                },
             },
             "required": ["n"],
         },
@@ -391,11 +406,13 @@ question asking them to confirm are put below your reply automatically, and it i
 they agree. So say in a few words what you are proposing; never say it was added, and never \
 write the summary or the question yourself.
 - You can't change or delete events yet; if asked, say so.
-- Reminders: set_reminder sets one for a local time, list_reminders shows the upcoming ones, \
-cancel_reminder cancels one from that list. A vague time gets a sensible default you state \
+- Reminders: set_reminder sets one for a local time, once or repeating, and cancel_reminder \
+cancels one from list_reminders. A vague time gets a sensible default you state \
 ("tonight" is 20:00, "in the morning" 09:00). Never say a reminder is set unless set_reminder \
-returned ok. list_reminders shows only reminders still to come: one that isn't there already went \
-off or was cancelled, so say that, and never set it again unless they ask.
+returned ok. list_reminders shows the upcoming ones, and under went_off the last few that \
+already went off. One there was sent, so never set it again unless they ask. 'Skip this week' \
+is cancel_reminder with just_this_one, and 'stop reminding me' cancels the whole series. Say a \
+repeat in plain words.
 - {briefing}
 - Memory: remember saves a lasting fact, list_notes shows what is saved, forget deletes one \
 from that list. Save when they ask, or when they state a clear, lasting fact about themselves or \
@@ -696,19 +713,32 @@ async def remind(
         return "error: that time has passed"
     if at - now > MAX_AHEAD:
         return "error: at most a year ahead"
-    await schedule.add(text.strip(), at)
-    return f"ok: set for {at:%Y-%m-%dT%H:%M}"
+    repeat, rule = arguments.get("repeat"), None
+    if repeat:
+        try:
+            rule = check_rule(str(repeat), at)
+        except ValueError as error:
+            return f"error: repeat: {error}"
+    await schedule.add(text.strip(), at, rule)
+    if rule is None:
+        return f"ok: set for {at:%Y-%m-%dT%H:%M}"
+    return f"ok: set for {at:%Y-%m-%dT%H:%M}, repeating {describe_rule(rule)}"
 
 
 async def list_reminders(schedule: Schedule, zone: ZoneInfo, listed: list[UUID]) -> str:
     """``list_reminders``: numbered from 1, no ids. ``listed`` keeps the ids by number."""
     upcoming = await schedule.upcoming()
     listed[:] = [r.id for r in upcoming]
-    shown = [
-        {"n": n, "text": r.text, "at": f"{r.due_at.astimezone(zone):%Y-%m-%dT%H:%M}"}
+
+    def shown(r: Reminder) -> dict[str, object]:
+        return {"text": r.text, "at": f"{r.due_at.astimezone(zone):%Y-%m-%dT%H:%M}"}
+
+    reminders = [
+        {"n": n, **shown(r), **({"repeats": describe_rule(r.rule)} if r.rule else {})}
         for n, r in enumerate(upcoming, 1)
     ]
-    return json.dumps({"reminders": shown}, ensure_ascii=False)
+    went_off = [shown(r) for r in await schedule.recent_sent()]
+    return json.dumps({"reminders": reminders, "went_off": went_off}, ensure_ascii=False)
 
 
 async def cancel(arguments: Mapping[str, Any], schedule: Schedule, listed: list[UUID]) -> str:
@@ -718,7 +748,7 @@ async def cancel(arguments: Mapping[str, Any], schedule: Schedule, listed: list[
     n = arguments.get("n")
     if not isinstance(n, int) or isinstance(n, bool) or not 1 <= n <= len(listed):
         return f"error: no reminder {n} in the list"
-    if not await schedule.cancel(listed[n - 1]):
+    if not await schedule.cancel(listed[n - 1], just_once=arguments.get("just_this_one") is True):
         return "error: that one was already sent or cancelled"
     return "ok: cancelled"
 
