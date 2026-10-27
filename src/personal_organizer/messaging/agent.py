@@ -380,6 +380,9 @@ TOOLS: Final[tuple[Mapping[str, Any], ...]] = (
     },
 )
 
+#: Why a turn is handed off. A code, never the model's words: those could repeat theirs.
+HAND_OFF_REASONS: Final = ("many_items", "timetable", "multi_step", "other")
+
 HAND_OFF_TOOL: Final[Mapping[str, Any]] = {
     "name": "hand_off",
     "description": (
@@ -388,7 +391,16 @@ HAND_OFF_TOOL: Final[Mapping[str, Any]] = {
     ),
     "input_schema": {
         "type": "object",
-        "properties": {"reason": {"type": "string", "description": "Why, in a few words"}},
+        "properties": {
+            "reason": {
+                "type": "string",
+                "enum": list(HAND_OFF_REASONS),
+                "description": (
+                    "The closest one: many_items for many things at once, timetable for a "
+                    "whole schedule, multi_step for planning in several steps, other otherwise"
+                ),
+            }
+        },
         "required": ["reason"],
     },
 }
@@ -484,7 +496,7 @@ coming, mention that in passing. Never say their answer is noted unless answer_o
 ok. Don't bring these up unless they do, or you asked about one just before."""
 _HAND_OFF: Final = """
 - If what they ask is big or tricky (a whole timetable, many items at once, planning in several \
-steps), call hand_off first, before any other tool, with a few words on why."""
+steps), call hand_off first, before any other tool, with the reason closest to it."""
 
 
 def week_of(day: date) -> tuple[date, date]:
@@ -958,7 +970,9 @@ async def respond(
         if name == "hand_off" and strong is not None:
             if wrote:
                 return "error: too late to hand off; finish it yourself"
-            raise _HandOff(str(arguments.get("reason", ""))[:MAX_FIELD])
+            reason = arguments.get("reason")
+            # The model's input isn't trusted: anything off the list is logged as other.
+            raise _HandOff(reason if reason in HAND_OFF_REASONS else "other")
         # A call counts even when it fails: what it did is the tool's to say, not ours.
         wrote = wrote or name in _WRITE_TOOLS
         if name == "answer_outing":
@@ -1252,6 +1266,7 @@ __all__ = [
     "BRIEFING_EARLIEST",
     "BRIEFING_LATEST",
     "CREATE_EVENT",
+    "HAND_OFF_REASONS",
     "HAND_OFF_TOOL",
     "LANGUAGE_NAMES",
     "MAX_AHEAD",

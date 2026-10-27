@@ -626,7 +626,7 @@ async def test_without_grants_the_sharing_tools_say_so() -> None:
     assert llm.calls[1][-1].content == "error: sharing details is not available here"
 
 
-TIMETABLE = call("hand_off", reason="a whole timetable")
+TIMETABLE = call("hand_off", reason="timetable")
 
 
 def _tool_names(llm: ScriptedLLM) -> list[str]:
@@ -699,14 +699,35 @@ class TestHandOff:
         with pytest.raises(LLMUnavailableError):
             await self._respond(cheap, ScriptedLLM(LLMUnavailableError("down")))
 
-    async def test_hand_off_logs_reason(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    @pytest.mark.parametrize(
+        ("reason", "logged"),
+        [
+            ("timetable", "timetable"),
+            ("multi_step", "multi_step"),
+            # The model's own words could repeat theirs: only a code is ever logged.
+            ("Dana's chemo timetable", "other"),
+            (3, "other"),
+        ],
+    )
+    async def test_hand_off_logs_reason(
+        self, monkeypatch: pytest.MonkeyPatch, reason: object, logged: str
+    ) -> None:
         tags: list[tuple[str, str]] = []
         monkeypatch.setattr(sentry_sdk, "set_tag", lambda key, value: tags.append((key, value)))
+        cheap = ScriptedLLM(said("", call("hand_off", reason=reason)))
         with capture_logs() as logs:
-            await self._respond(ScriptedLLM(said("", TIMETABLE)), ScriptedLLM(said("done")))
+            await self._respond(cheap, ScriptedLLM(said("done")))
         [entry] = [entry for entry in logs if entry["event"] == "agent.handoff"]
-        assert entry["reason"] == "a whole timetable"
+        assert entry["reason"] == logged
         assert tags == [("agent.handoff", "yes")]
+
+    async def test_the_reason_is_one_of_the_codes(self) -> None:
+        cheap = ScriptedLLM(said("hi"))
+        await self._respond(cheap, ScriptedLLM())
+        [tool] = [tool for tool in cheap.tools[0] or () if tool["name"] == "hand_off"]
+        reason = tool["input_schema"]["properties"]["reason"]
+        assert reason["enum"] == ["many_items", "timetable", "multi_step", "other"]
+        assert tool["input_schema"]["required"] == ["reason"]
 
     async def test_the_tag_stays_with_the_turn(self) -> None:
         await self._respond(ScriptedLLM(said("", TIMETABLE)), ScriptedLLM(said("done")))
