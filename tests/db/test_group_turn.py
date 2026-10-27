@@ -566,3 +566,19 @@ async def test_approval_is_read_in_its_chat(
     assert (messages[-1].role, messages[-1].content) == ("user", "Eden: ok")
     assert channel.sent == []
     assert (await _sharing(db, group))[eden] is False
+
+
+async def test_approved_turn_can_still_turn_sharing_off(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    """The okay is read, but the model hears "not yet" and stops: closing the ask leaves it off."""
+    eden = await _asked(db, group, EDEN, "Eden", "ca_eden")
+    llm = ScriptedLLM(said("YES"), said("", call("share_my_calendar", on=False)), said(""))
+
+    channel, _ = await _say(
+        db, owner_conn, onboarding_settings, llm, phone=EDEN, body="ok, but not yet"
+    )
+
+    assert (await _sharing(db, group))[eden] is False
+    assert not await _asked_now(db, group, eden)
+    assert [message.body for message in channel.sent] == [t("group_shared_off", "en")]

@@ -294,3 +294,14 @@ async def test_ask_ignores_sharing_member(db: Database) -> None:
     eden = await _member(db, "+972501110001", group_id, sharing=True)
     await _ask(db, eden, group_id, NOW)
     assert not await _open_ask(db, eden, group_id, NOW)
+
+
+async def test_clear_ask_leaves_sharing(db: Database) -> None:
+    group_id = await _group(db)
+    eden = await _member(db, "+972501110001", group_id, sharing=False)
+    await _ask(db, eden, group_id, NOW)
+    async with db.tenant_session(TenantId(eden)) as session:
+        await groups.clear_ask(session, eden, group_id)
+    assert not await _open_ask(db, eden, group_id, NOW)
+    async with db.system_session() as session:
+        assert await groups.group_tenants(session, group_id) == [(eden, False)]

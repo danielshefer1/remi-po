@@ -53,6 +53,7 @@ from personal_organizer.db.repositories.connections import active_connection
 from personal_organizer.db.repositories.groups import (
     add_context,
     ask,
+    clear_ask,
     detail_grantors,
     group_tenants,
     open_ask,
@@ -365,8 +366,9 @@ async def group_turn(
     )
     if okayed and turn.tenant_id is not None:
         # Answered (or already was): the ask is done. Until now a retry reads the okay again.
+        # Sharing stays as the turn left it: the model may have turned it off again.
         async with db.tenant_session(TenantId(turn.tenant_id)) as session:
-            await set_sharing(session, turn.tenant_id, turn.group_id, True)
+            await clear_ask(session, turn.tenant_id, turn.group_id)
 
 
 async def _okayed(row: InboxRow, turn: GroupTurn, *, db: Database, llm: LLMProvider) -> bool:

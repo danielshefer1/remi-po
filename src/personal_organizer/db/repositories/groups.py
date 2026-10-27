@@ -139,6 +139,15 @@ async def ask(session: AsyncSession, tenant_id: UUID, group_id: UUID, now: datet
     )
 
 
+async def clear_ask(session: AsyncSession, tenant_id: UUID, group_id: UUID) -> None:
+    """The member's ask is answered; their sharing is left as it is."""
+    await session.execute(
+        scoped(update(GroupMember), GroupMember, tenant_id)
+        .where(GroupMember.group_id == group_id)
+        .values(asked_at=None)
+    )
+
+
 async def open_ask(session: AsyncSession, tenant_id: UUID, group_id: UUID, now: datetime) -> bool:
     """Was the member asked, less than ``ASK_TTL`` ago, and not answered yet? An okay read in
     the group keeps it open until Remi's answer is out (``set_sharing(close_ask=False)``)."""
@@ -224,6 +233,7 @@ __all__ = [
     "CONTEXT_LIMIT",
     "add_context",
     "ask",
+    "clear_ask",
     "detail_grantors",
     "due_nudges",
     "ensure_group",
