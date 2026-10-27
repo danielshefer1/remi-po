@@ -15,29 +15,39 @@ from __future__ import annotations
 
 from datetime import date, datetime, time
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import Date, Uuid, column, func, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from personal_organizer.db.models.tenant import Reminder, Tenant
 from personal_organizer.db.repositories.scope import scoped
+from personal_organizer.messaging.recurrence import next_after
 
 
 async def add_reminder(
-    session: AsyncSession, tenant_id: UUID, *, text: str, due_at: datetime
+    session: AsyncSession,
+    tenant_id: UUID,
+    *,
+    text: str,
+    due_at: datetime,
+    rule: str | None = None,
 ) -> UUID:
     """Add a reminder, or return the identical pending one: a turn retried after its
     ``set_reminder`` must not set it twice. The sender lock serialises a tenant's turns."""
     same: UUID | None = await session.scalar(
         scoped(select(Reminder.id), Reminder, tenant_id).where(
-            Reminder.status == "pending", Reminder.text == text, Reminder.due_at == due_at
+            Reminder.status == "pending",
+            Reminder.text == text,
+            Reminder.due_at == due_at,
+            Reminder.rule.is_not_distinct_from(rule),
         )
     )
     if same is not None:
         return same
     result = await session.execute(
         insert(Reminder)
-        .values(tenant_id=tenant_id, text=text, due_at=due_at)
+        .values(tenant_id=tenant_id, text=text, due_at=due_at, rule=rule)
         .returning(Reminder.id)
     )
     reminder_id: UUID = result.scalar_one()
@@ -63,6 +73,55 @@ async def get_reminder(
         scoped(select(Reminder), Reminder, tenant_id).where(Reminder.id == reminder_id)
     )
     return reminder
+
+
+async def schedule_next(
+    session: AsyncSession,
+    tenant_id: UUID,
+    reminder: Reminder,
+    zone: ZoneInfo,
+    *,
+    after: datetime,
+) -> UUID | None:
+    """Insert the next pending occurrence of a repeating ``reminder``, strictly after both its
+    own time and ``after``. ``None`` for a one-off, or once the rule's ``UNTIL`` has passed.
+
+    Steps from the occurrence's own local time, so a skipped one keeps its 08:00 rather than
+    taking the clock time of ``after``. Rules are at least daily, so the loop is short."""
+    if reminder.rule is None:
+        return None
+    floor = max(reminder.due_at, after)
+    start = reminder.due_at.astimezone(zone)
+    nxt = next_after(reminder.rule, start)
+    while nxt is not None and nxt <= floor:
+        nxt = next_after(reminder.rule, nxt)
+    if nxt is None:
+        return None
+    result = await session.execute(
+        insert(Reminder)
+        .values(
+            tenant_id=tenant_id,
+            text=reminder.text,
+            due_at=nxt,
+            rule=reminder.rule,
+            series_id=reminder.series_id or reminder.id,
+        )
+        .returning(Reminder.id)
+    )
+    next_id: UUID = result.scalar_one()
+    return next_id
+
+
+async def recent_sent(session: AsyncSession, tenant_id: UUID, *, limit: int = 5) -> list[Reminder]:
+    """The last ``limit`` reminders that went off, newest first, of any age."""
+    return list(
+        await session.scalars(
+            scoped(select(Reminder), Reminder, tenant_id)
+            .where(Reminder.status == "sent")
+            .order_by(Reminder.due_at.desc())
+            .limit(limit)
+        )
+    )
 
 
 async def _leave_pending(
@@ -134,6 +193,8 @@ __all__ = [
     "finish_reminder",
     "get_reminder",
     "mark_briefed",
+    "recent_sent",
+    "schedule_next",
     "set_briefing",
     "upcoming_reminders",
 ]
