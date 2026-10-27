@@ -131,7 +131,11 @@ def register(app: procrastinate.App) -> None:
     @app.task(queue=Queue.WEBHOOKS.value, name=REMINDER_TASK, retry=INBOUND_RETRY)
     async def reminder(reminder_id: str, tenant_id: str) -> None:
         await send_reminder(
-            UUID(reminder_id), UUID(tenant_id), db=get_database(), channels=get_outbound_channel
+            UUID(reminder_id),
+            UUID(tenant_id),
+            db=get_database(),
+            channels=get_outbound_channel,
+            now=datetime.now(UTC),
         )
 
     @app.task(

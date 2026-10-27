@@ -8,7 +8,7 @@ kept in the history as an ``out`` message.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
@@ -76,7 +76,9 @@ async def test_it_sends_the_fixed_line_once_and_records_it(db: Database, owner_c
     reminder_id = await _add(db, tenant_id)
     gowa = FakeOutbound(name="gowa")
 
-    status = await send_reminder(reminder_id, tenant_id, db=db, channels=resolver(gowa))
+    status = await send_reminder(
+        reminder_id, tenant_id, db=db, channels=resolver(gowa), now=datetime.now(UTC)
+    )
 
     assert status == "accepted"
     line = t("reminder", "he", text=TEXT)
@@ -100,8 +102,12 @@ async def test_a_rerun_sends_nothing_new(db: Database) -> None:
     reminder_id = await _add(db, tenant_id)
     gowa = FakeOutbound(name="gowa")
 
-    await send_reminder(reminder_id, tenant_id, db=db, channels=resolver(gowa))
-    again = await send_reminder(reminder_id, tenant_id, db=db, channels=resolver(gowa))
+    await send_reminder(
+        reminder_id, tenant_id, db=db, channels=resolver(gowa), now=datetime.now(UTC)
+    )
+    again = await send_reminder(
+        reminder_id, tenant_id, db=db, channels=resolver(gowa), now=datetime.now(UTC)
+    )
 
     assert again is None
     assert len(gowa.sent) == 1
@@ -127,7 +133,9 @@ async def test_a_rerun_after_the_send_but_before_the_update_finishes_the_row(
         idempotency_key=reminder_key(reminder_id),
     )
 
-    status = await send_reminder(reminder_id, tenant_id, db=db, channels=resolver(gowa))
+    status = await send_reminder(
+        reminder_id, tenant_id, db=db, channels=resolver(gowa), now=datetime.now(UTC)
+    )
 
     assert status == "accepted"
     assert len(gowa.sent) == 1
@@ -144,13 +152,17 @@ async def test_a_run_racing_another_records_the_message_once(
     async with db.tenant_session(TenantId(tenant_id)) as session:
         stale = await reminders.get_reminder(session, tenant_id, reminder_id)
     gowa = FakeOutbound(name="gowa")
-    await send_reminder(reminder_id, tenant_id, db=db, channels=resolver(gowa))
+    await send_reminder(
+        reminder_id, tenant_id, db=db, channels=resolver(gowa), now=datetime.now(UTC)
+    )
 
     async def still_pending(*args: Any) -> Any:
         return stale
 
     monkeypatch.setattr(delivery, "get_reminder", still_pending)
-    status = await send_reminder(reminder_id, tenant_id, db=db, channels=resolver(gowa))
+    status = await send_reminder(
+        reminder_id, tenant_id, db=db, channels=resolver(gowa), now=datetime.now(UTC)
+    )
 
     assert status == "accepted"
     assert len(gowa.sent) == 1
@@ -164,7 +176,12 @@ async def test_a_cancelled_reminder_is_not_sent(db: Database) -> None:
         await reminders.cancel_reminder(session, tenant_id, reminder_id)
     gowa = FakeOutbound(name="gowa")
 
-    assert await send_reminder(reminder_id, tenant_id, db=db, channels=resolver(gowa)) is None
+    assert (
+        await send_reminder(
+            reminder_id, tenant_id, db=db, channels=resolver(gowa), now=datetime.now(UTC)
+        )
+        is None
+    )
     assert gowa.attempts == []
     assert await _status(db, tenant_id, reminder_id) == "cancelled"
 
@@ -174,7 +191,12 @@ async def test_no_channel_or_phone_marks_it_failed(db: Database) -> None:
     reminder_id = await _add(db, tenant_id)
     gowa = FakeOutbound(name="gowa")
 
-    assert await send_reminder(reminder_id, tenant_id, db=db, channels=resolver(gowa)) is None
+    assert (
+        await send_reminder(
+            reminder_id, tenant_id, db=db, channels=resolver(gowa), now=datetime.now(UTC)
+        )
+        is None
+    )
     assert gowa.attempts == []
     assert await _status(db, tenant_id, reminder_id) == "failed"
 
@@ -184,7 +206,9 @@ async def test_a_refused_send_marks_it_failed(db: Database) -> None:
     reminder_id = await _add(db, tenant_id)
     gowa = FakeOutbound(RejectedChannelError(131026), name="gowa")
 
-    status = await send_reminder(reminder_id, tenant_id, db=db, channels=resolver(gowa))
+    status = await send_reminder(
+        reminder_id, tenant_id, db=db, channels=resolver(gowa), now=datetime.now(UTC)
+    )
 
     assert status == "failed"
     assert await _status(db, tenant_id, reminder_id) == "failed"
@@ -197,7 +221,90 @@ async def test_a_transient_failure_is_raised_for_the_retry(db: Database) -> None
     gowa = FakeOutbound(TransientChannelError("gateway down"), name="gowa")
 
     with pytest.raises(TransientChannelError):
-        await send_reminder(reminder_id, tenant_id, db=db, channels=resolver(gowa))
+        await send_reminder(
+            reminder_id, tenant_id, db=db, channels=resolver(gowa), now=datetime.now(UTC)
+        )
 
     assert await _status(db, tenant_id, reminder_id) == "pending"
     assert await _sent_messages(db, tenant_id) == []
+
+
+async def _repeating(db: Database, tenant_id: UUID, due_at: datetime) -> UUID:
+    async with db.tenant_session(TenantId(tenant_id)) as session:
+        return await reminders.add_reminder(
+            session, tenant_id, text=TEXT, due_at=due_at, rule="FREQ=DAILY"
+        )
+
+
+async def _pending(db: Database, tenant_id: UUID) -> list[datetime]:
+    async with db.tenant_session(TenantId(tenant_id)) as session:
+        return [
+            r.due_at
+            for r in await reminders.upcoming_reminders(
+                session, tenant_id, after=datetime.min.replace(tzinfo=UTC)
+            )
+        ]
+
+
+async def test_sent_repeating_reminder_schedules_next(db: Database) -> None:
+    tenant_id = await _tenant(db)
+    now = datetime.now(UTC).replace(microsecond=0)
+    reminder_id = await _repeating(db, tenant_id, now)
+    gowa = FakeOutbound(name="gowa")
+
+    await send_reminder(reminder_id, tenant_id, db=db, channels=resolver(gowa), now=now)
+
+    assert await _status(db, tenant_id, reminder_id) == "sent"
+    assert await _pending(db, tenant_id) == [now + timedelta(days=1)]
+
+
+async def test_failed_send_still_schedules_next(db: Database) -> None:
+    tenant_id = await _tenant(db)
+    now = datetime.now(UTC).replace(microsecond=0)
+    reminder_id = await _repeating(db, tenant_id, now)
+    gowa = FakeOutbound(RejectedChannelError(131026), name="gowa")
+
+    await send_reminder(reminder_id, tenant_id, db=db, channels=resolver(gowa), now=now)
+
+    assert await _status(db, tenant_id, reminder_id) == "failed"
+    assert await _pending(db, tenant_id) == [now + timedelta(days=1)]
+
+
+async def test_no_target_still_schedules_next(db: Database) -> None:
+    tenant_id = await _tenant(db, inbound=False)
+    now = datetime.now(UTC).replace(microsecond=0)
+    reminder_id = await _repeating(db, tenant_id, now)
+    gowa = FakeOutbound(name="gowa")
+
+    await send_reminder(reminder_id, tenant_id, db=db, channels=resolver(gowa), now=now)
+
+    assert await _status(db, tenant_id, reminder_id) == "failed"
+    assert await _pending(db, tenant_id) == [now + timedelta(days=1)]
+
+
+async def test_rerun_schedules_one_next(db: Database) -> None:
+    tenant_id = await _tenant(db)
+    now = datetime.now(UTC).replace(microsecond=0)
+    reminder_id = await _repeating(db, tenant_id, now)
+    gowa = FakeOutbound(name="gowa")
+
+    for _ in range(2):
+        await send_reminder(reminder_id, tenant_id, db=db, channels=resolver(gowa), now=now)
+
+    assert len(gowa.sent) == 1
+    assert await _pending(db, tenant_id) == [now + timedelta(days=1)]
+
+
+async def test_stale_occurrence_skips_to_next(db: Database) -> None:
+    tenant_id = await _tenant(db)
+    now = datetime.now(UTC).replace(microsecond=0)
+    reminder_id = await _repeating(db, tenant_id, now - timedelta(hours=13))
+    gowa = FakeOutbound(name="gowa")
+
+    status = await send_reminder(reminder_id, tenant_id, db=db, channels=resolver(gowa), now=now)
+
+    assert status is None
+    assert gowa.attempts == []
+    assert await _status(db, tenant_id, reminder_id) == "failed"
+    [nxt] = await _pending(db, tenant_id)
+    assert nxt > now
