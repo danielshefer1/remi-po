@@ -28,6 +28,7 @@ from personal_organizer.interfaces.calendar import CalendarEvent
 from personal_organizer.interfaces.llm import Message
 from personal_organizer.messaging.agent import respond
 from personal_organizer.messaging.conversation import converse
+from personal_organizer.messaging.groups.approval import approves
 from personal_organizer.messaging.groups.outings import POSTED, classify
 from personal_organizer.messaging.groups.prompt import group_prompt
 from personal_organizer.messaging.groups.turn import GROUP_TOOLS, busy_blocks
@@ -68,8 +69,13 @@ EVENTS: dict[str, list[CalendarEvent]] = {
 class Group:
     """The group tools over fakes; records the calls."""
 
-    def __init__(self, not_shared: Sequence[str] = ()) -> None:
+    def __init__(
+        self,
+        not_shared: Sequence[str] = (),
+        events: Mapping[str, list[CalendarEvent]] = EVENTS,
+    ) -> None:
         self.not_shared = list(not_shared)
+        self.events = events
         self.windows: list[Mapping[str, Any]] = []
         self.outings: list[Mapping[str, Any]] = []
 
@@ -77,7 +83,8 @@ class Group:
         if name == "who_is_free":
             self.windows.append(arguments)
             people = [
-                {"name": who, "busy": busy_blocks(events, ZONE)} for who, events in EVENTS.items()
+                {"name": who, "busy": busy_blocks(events, ZONE)}
+                for who, events in self.events.items()
             ]
             return json.dumps({"people": people, "not_shared": self.not_shared}, ensure_ascii=False)
         if name == "set_up_outing":
@@ -93,8 +100,9 @@ async def _group_turn(
     *,
     history: tuple[Message, ...] = (),
     asker: str = "Dana",
+    approved: bool = False,
 ) -> str:
-    system = group_prompt(detect_language(text), LOCAL_NOW, asker, True)
+    system = group_prompt(detect_language(text), LOCAL_NOW, asker, True, approved=approved)
     reply = await converse(
         history,
         f"{asker}: {text}",
@@ -312,3 +320,76 @@ async def test_mom_can_see_my_events_uses_the_name_in_my_notes(
         reply,
     )
     assert not grants.stopped
+
+
+@pytest.mark.parametrize(
+    ("text", "not_shared"),
+    [
+        ("Remi, who's free Friday evening?", "Eden"),
+        ("רמי, מי פנוי ביום שישי בערב?", "עדן"),
+    ],
+)
+async def test_free_with_non_sharer_asks_them_by_name(
+    text: str, not_shared: str, llm: AnthropicLLM
+) -> None:
+    """Remi asks the one who doesn't share yet, by name and in plain words, and answers anyway."""
+    group = Group(not_shared=[not_shared])
+    reply = await _group_turn(text, llm, group)
+    assert group.windows, "who_is_free must be asked"
+    assert not_shared in reply, reply
+    assert not any(word in reply.casefold() for word in ("reply", "השב", "1.")), reply
+    assert any(name in reply for name in ("Dana", "Noa", "דנה", "נועה")), reply
+    _no_secrets(reply)
+
+
+#: Eden's Friday, once she okays: busy 18:00-20:00.
+EDEN_EVENTS = {**EVENTS, "Eden": [CalendarEvent("e1", "Pilates", _friday(18), _friday(20))]}
+EDEN_EVENTS_HE = {**EVENTS, "עדן": EDEN_EVENTS["Eden"]}
+ASKED_EDEN = (
+    Message("user", "Dana: Remi, who's free Friday evening?"),
+    Message(
+        "assistant",
+        "Dana and Noa are both free Friday evening. Eden, I need your okay before I look at "
+        "your calendar. Just say so here.",
+    ),
+)
+ASKED_EDEN_HE = (
+    Message("user", "דנה: רמי, מי פנוי ביום שישי בערב?"),
+    Message(
+        "assistant",
+        "ביום שישי בערב דנה ונועה פנויות. עדן, כדי להציץ ביומן שלך אני צריך אישור, "
+        "מספיק לכתוב כאן שזה בסדר.",
+    ),
+)
+
+
+async def _okay_then_answer(
+    text: str,
+    asker: str,
+    history: tuple[Message, ...],
+    events: Mapping[str, list[CalendarEvent]],
+    llm: AnthropicLLM,
+) -> tuple[Group, str]:
+    """An asked member's okay, read by the real classifier, then answered as ``_answer``
+    answers one: with ``approved``, and their calendar now in who_is_free."""
+    assert await approves(f"{asker}: {text}", context=history, llm=llm), text
+    group = Group(events=events)
+    reply = await _group_turn(text, llm, group, history=history, asker=asker, approved=True)
+    return group, reply
+
+
+async def test_hebrew_approval_answers_again(llm: AnthropicLLM) -> None:
+    group, reply = await _okay_then_answer("מאשרת", "עדן", ASKED_EDEN_HE, EDEN_EVENTS_HE, llm)
+    assert group.windows, "the question is answered again"
+    assert "עדן" in reply, reply
+    assert re.search(r"18|20|\b(6|8)\b|שש|שמונה", reply), f"her busy times expected: {reply}"
+    assert detect_language(reply) == "he", reply
+    _no_secrets(reply)
+
+
+async def test_ok_go_ahead_counts(llm: AnthropicLLM) -> None:
+    group, reply = await _okay_then_answer("ok go ahead", "Eden", ASKED_EDEN, EDEN_EVENTS, llm)
+    assert group.windows, "the question is answered again"
+    assert "Eden" in reply, reply
+    assert re.search(r"18|20|\b(6|8)\b|six|eight", reply, re.I), f"her busy times: {reply}"
+    _no_secrets(reply)
