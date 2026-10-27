@@ -250,7 +250,11 @@ TOOLS: Final[tuple[Mapping[str, Any], ...]] = (
                     "type": "string",
                     "description": (
                         "Only if it repeats: an RRULE, at most daily. COUNT counts reminders, "
-                        "not weeks; BYMONTHDAY=-1 is the last day (31 skips short months)."
+                        "not weeks; BYMONTHDAY=-1 is the last day (31 skips short months). "
+                        "A timetable, or anything on given weekdays (classes, lessons, shifts), "
+                        "repeats weekly by default: FREQ=WEEKLY;BYDAY=…, a day already past "
+                        "starts next week. Don't ask first; say it repeats and a word stops it. "
+                        "Something said as a one-time thing stays one-time."
                     ),
                 },
             },
@@ -458,11 +462,7 @@ returned ok. list_reminders shows the upcoming ones, and under went_off the last
 already went off. One there was sent, so never set it again unless they ask. One in neither \
 list went off longer ago or was cancelled: say so, and never set it again unless they ask. \
 'Skip this week' is cancel_reminder with just_this_one, and 'stop reminding me' cancels the \
-whole series. Say a repeat in plain words. A timetable, or anything they describe as happening \
-on given weekdays (classes, lessons, practice, shifts), gets weekly repeating reminders by \
-default (repeat FREQ=WEEKLY;BYDAY=…), and a day already past this week starts next week instead \
-of being skipped; don't ask first, just mention that they repeat every week and a word stops \
-them. Something said as a one-time thing stays one-time.
+whole series. Say a repeat in plain words.
 - {briefing}
 - Memory: remember saves a lasting fact, list_notes shows what is saved, forget deletes one \
 from that list. Save when they ask, or when they state a clear, lasting fact about themselves or \
