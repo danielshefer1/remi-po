@@ -83,6 +83,18 @@ def agent_llm() -> AnthropicLLM | None:
 
 
 @functools.cache
+def strong_llm() -> AnthropicLLM | None:
+    """The stronger model's client, built on first use: off unless the agent and it are set."""
+    settings = get_settings()
+    # An empty value is unset too: it would build a client on the chat model.
+    if not settings.agent.enabled or not settings.models.strong_model:
+        return None
+    return AnthropicLLM.from_settings(
+        settings, model=settings.models.strong_model, timeout=settings.agent.strong_timeout_s
+    )
+
+
+@functools.cache
 def agent_calendar() -> ComposioConnector:
     """One Composio client for the process; the agent being on implies Composio is."""
     return ComposioConnector.from_settings(get_settings().composio)
@@ -103,6 +115,7 @@ def _on_allowed(db: Database, *, last_attempt: bool) -> OnAllowed:
             agent_turn,
             db=db,
             llm=llm,
+            strong=strong_llm(),
             calendar=agent_calendar(),
             settings=get_settings(),
             last_attempt=last_attempt,
@@ -161,5 +174,6 @@ __all__ = [
     "agent_llm",
     "is_last_attempt",
     "register",
+    "strong_llm",
     "voice_transcriber",
 ]

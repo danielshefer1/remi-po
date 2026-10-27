@@ -15,6 +15,8 @@ from uuid import UUID
 from zoneinfo import ZoneInfo
 
 import pytest
+import sentry_sdk
+from structlog.testing import capture_logs
 
 from personal_organizer.core.errors import (
     CalendarNotConnectedError,
@@ -622,3 +624,112 @@ async def test_without_grants_the_sharing_tools_say_so() -> None:
     llm = ScriptedLLM(said("", ToolCall("c1", "let_see_details", {"name": "Rina"})), said("ok"))
     await respond([], "hi", TENANT, llm=llm, calendar=InMemoryCalendar(), account=None, now=NOW)
     assert llm.calls[1][-1].content == "error: sharing details is not available here"
+
+
+TIMETABLE = call("hand_off", reason="timetable")
+
+
+def _tool_names(llm: ScriptedLLM) -> list[str]:
+    return [tool["name"] for tool in llm.tools[0] or ()]
+
+
+class TestHandOff:
+    @staticmethod
+    async def _respond(
+        llm: ScriptedLLM,
+        strong: ScriptedLLM | None,
+        proposed: list[CalendarEvent] | None = None,
+        grants: _FakeGrants | None = None,
+    ) -> str:
+        return await respond(
+            [],
+            "הנה המערכת שלי, תזכיר לי לפני כל שיעור",
+            TENANT,
+            llm=llm,
+            calendar=InMemoryCalendar(),
+            account=ACCOUNT,
+            now=NOW,
+            proposed=proposed,
+            grants=grants,
+            strong=strong,
+        )
+
+    async def test_hand_off_reruns_on_strong(self) -> None:
+        cheap, strong = ScriptedLLM(said("", TIMETABLE)), ScriptedLLM(said("done"))
+        assert await self._respond(cheap, strong) == "done"
+        assert "hand_off" in _tool_names(cheap)
+        assert "call hand_off first" in cheap.calls[0][0].content
+        # The strong run starts the turn over, and can't hand it off again.
+        assert strong.calls[0][-1].content == "הנה המערכת שלי, תזכיר לי לפני כל שיעור"
+        assert "hand_off" not in _tool_names(strong)
+        assert "hand_off" not in strong.calls[0][0].content
+
+    async def test_hand_off_after_write_is_refused(self) -> None:
+        grants = _FakeGrants()
+        cheap = ScriptedLLM(
+            said("", call("stop_sharing_calendar")), said("", TIMETABLE), said("Stopped.")
+        )
+        strong = ScriptedLLM()
+        assert await self._respond(cheap, strong, grants=grants) == "Stopped."
+        assert cheap.calls[2][-1].content == "error: too late to hand off; finish it yourself"
+        assert grants.asked == [("stop_sharing", "")]  # written once, never again
+        assert strong.calls == []
+
+    async def test_no_strong_no_tool(self) -> None:
+        cheap = ScriptedLLM(said("hi"))
+        assert await self._respond(cheap, None) == "hi"
+        assert "hand_off" not in _tool_names(cheap)
+        assert "hand_off" not in cheap.calls[0][0].content
+
+    async def test_proposal_from_cheap_run_is_dropped(self) -> None:
+        proposed: list[CalendarEvent] = []
+        other = call(
+            "propose_event", title="other", start="2026-10-17T09:00", end="2026-10-17T10:00"
+        )
+        cheap = ScriptedLLM(said("", DENTIST), said("", TIMETABLE))
+        strong = ScriptedLLM(said("", other), said("ok"))
+        reply = await self._respond(cheap, strong, proposed=proposed)
+        # The caller's own list holds the strong run's proposal only.
+        assert [event.title for event in proposed] == ["other"]
+        assert reply.startswith("ok\n\nother\n")
+        assert "רופא שיניים" not in reply
+
+    async def test_strong_unavailable_raises_for_retry(self) -> None:
+        cheap = ScriptedLLM(said("", TIMETABLE))
+        with pytest.raises(LLMUnavailableError):
+            await self._respond(cheap, ScriptedLLM(LLMUnavailableError("down")))
+
+    @pytest.mark.parametrize(
+        ("reason", "logged"),
+        [
+            ("timetable", "timetable"),
+            ("multi_step", "multi_step"),
+            # The model's own words could repeat theirs: only a code is ever logged.
+            ("Dana's chemo timetable", "other"),
+            (3, "other"),
+        ],
+    )
+    async def test_hand_off_logs_reason(
+        self, monkeypatch: pytest.MonkeyPatch, reason: object, logged: str
+    ) -> None:
+        tags: list[tuple[str, str]] = []
+        monkeypatch.setattr(sentry_sdk, "set_tag", lambda key, value: tags.append((key, value)))
+        cheap = ScriptedLLM(said("", call("hand_off", reason=reason)))
+        with capture_logs() as logs:
+            await self._respond(cheap, ScriptedLLM(said("done")))
+        [entry] = [entry for entry in logs if entry["event"] == "agent.handoff"]
+        assert entry["reason"] == logged
+        assert tags == [("agent.handoff", "yes")]
+
+    async def test_the_reason_is_one_of_the_codes(self) -> None:
+        cheap = ScriptedLLM(said("hi"))
+        await self._respond(cheap, ScriptedLLM())
+        [tool] = [tool for tool in cheap.tools[0] or () if tool["name"] == "hand_off"]
+        reason = tool["input_schema"]["properties"]["reason"]
+        assert reason["enum"] == ["many_items", "timetable", "multi_step", "other"]
+        assert tool["input_schema"]["required"] == ["reason"]
+
+    async def test_the_tag_stays_with_the_turn(self) -> None:
+        await self._respond(ScriptedLLM(said("", TIMETABLE)), ScriptedLLM(said("done")))
+        # The worker's scope outlives the turn: a tag left there would mark every later event.
+        assert "agent.handoff" not in sentry_sdk.get_isolation_scope()._tags

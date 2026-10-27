@@ -20,8 +20,10 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, time, timedelta
+from typing import Any
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -30,7 +32,7 @@ import pytest
 
 from personal_organizer.db.models.tenant import CalendarConnection, Reminder
 from personal_organizer.interfaces.calendar import CalendarEvent
-from personal_organizer.interfaces.llm import Message
+from personal_organizer.interfaces.llm import Completion, LLMProvider, Message
 from personal_organizer.messaging.agent import respond
 from personal_organizer.messaging.confirm import (
     CONFIRM_ADD,
@@ -45,6 +47,7 @@ from personal_organizer.messaging.schedule import InMemorySchedule
 from personal_organizer.messaging.tenancy import TenantState
 from personal_organizer.providers.calendar.memory import InMemoryCalendar
 from personal_organizer.providers.llm.anthropic import AnthropicLLM
+from personal_organizer.settings import AgentSettings
 
 pytestmark = pytest.mark.eval
 
@@ -371,6 +374,7 @@ async def _turn(
     *,
     notes: InMemoryNotes | None = None,
     history: tuple[Message, ...] = (),
+    strong: LLMProvider | None = None,
 ) -> str:
     tenant = TenantState(
         id=UUID(int=1),
@@ -391,6 +395,7 @@ async def _turn(
         now=NOW,
         schedule=schedule,
         notes=notes,
+        strong=strong,
     )
     assert reply.strip(), "an empty reply falls back to the fixed text"
     assert "http" not in reply.lower(), reply
@@ -699,3 +704,64 @@ async def test_gender_from_how_they_write_is_saved(
 async def test_no_gender_cue_saves_nothing(text: str, llm: AnthropicLLM) -> None:
     reply, notes = await _remembered(text, "he", llm)
     assert not notes.notes, (notes.notes, reply)
+
+
+class Recording:
+    """Wraps a model and keeps the names of the tools it called."""
+
+    def __init__(self, inner: LLMProvider) -> None:
+        self.inner = inner
+        self.called: list[str] = []
+
+    async def complete(
+        self,
+        messages: Sequence[Message],
+        *,
+        tools: Sequence[Mapping[str, Any]] | None = None,
+        max_tokens: int,
+    ) -> Completion:
+        completion = await self.inner.complete(messages, tools=tools, max_tokens=max_tokens)
+        self.called += [call.name for call in completion.tool_calls]
+        return completion
+
+
+@pytest.fixture
+def strong() -> AnthropicLLM:
+    # Like production's strong client: its own timeout, no SDK retries.
+    client = anthropic.AsyncAnthropic(
+        api_key=os.environ["AGENT__API_KEY"],
+        timeout=AgentSettings().strong_timeout_s,
+        max_retries=0,
+    )
+    return AnthropicLLM(client, model=os.environ.get("MODELS__STRONG_MODEL", "claude-sonnet-5-5"))
+
+
+TIMETABLE = """\
+היי, זה מערכת השעות שלי השבוע:
+יום ראשון 08:30 אלגברה לינארית
+יום ראשון 12:15 מבוא לתכנות
+יום שני 10:00 פיזיקה 1
+יום שלישי 14:00 מבנים בדידים
+יום רביעי 09:15 חדו"א 1
+יום חמישי 11:30 סדנת כתיבה אקדמית
+תזכירי לי 20 דקות לפני כל שיעור, בבקשה"""
+
+
+async def test_timetable_hands_off(llm: AnthropicLLM, strong: AnthropicLLM) -> None:
+    cheap, hard = Recording(llm), Recording(strong)
+    schedule = InMemorySchedule(NOW)
+    reply = await _turn(TIMETABLE, "he", schedule, cheap, strong=hard)  # type: ignore[arg-type]
+    assert "hand_off" in cheap.called, (cheap.called, reply)
+    assert "set_reminder" in hard.called, (hard.called, reply)
+    assert any(r.rule for r in schedule.reminders), (schedule.reminders, reply)
+
+
+@pytest.mark.parametrize(
+    ("text", "language"), [("what do I have tomorrow?", "en"), ("מה יש לי מחר?", "he")]
+)
+async def test_simple_question_stays_cheap(
+    text: str, language: str, llm: AnthropicLLM, strong: AnthropicLLM
+) -> None:
+    cheap = Recording(llm)
+    await _turn(text, language, InMemorySchedule(NOW), cheap, strong=strong)  # type: ignore[arg-type]
+    assert "hand_off" not in cheap.called, cheap.called

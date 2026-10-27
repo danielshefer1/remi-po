@@ -30,6 +30,7 @@ class ScriptedLLM:
     def __init__(self, *script: Completion | Exception) -> None:
         self.script = list(script)
         self.calls: list[list[Message]] = []
+        self.tools: list[Sequence[Mapping[str, Any]] | None] = []
 
     async def complete(
         self,
@@ -39,6 +40,7 @@ class ScriptedLLM:
         max_tokens: int,
     ) -> Completion:
         self.calls.append(list(messages))
+        self.tools.append(tools)
         step = self.script.pop(0)
         if isinstance(step, Exception):
             raise step
