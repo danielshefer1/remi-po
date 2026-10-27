@@ -325,8 +325,8 @@ async def test_mom_can_see_my_events_uses_the_name_in_my_notes(
 @pytest.mark.parametrize(
     ("text", "not_shared"),
     [
-        ("Remi, who's free Friday evening?", "Eden"),
-        ("רמי, מי פנוי ביום שישי בערב?", "עדן"),
+        ("Remi, who's free Friday evening?", "Yael"),
+        ("רמי, מי פנוי ביום שישי בערב?", "יעל"),
     ],
 )
 async def test_free_with_non_sharer_asks_them_by_name(
@@ -342,22 +342,22 @@ async def test_free_with_non_sharer_asks_them_by_name(
     _no_secrets(reply)
 
 
-#: Eden's Friday, once she okays: busy 18:00-20:00.
-EDEN_EVENTS = {**EVENTS, "Eden": [CalendarEvent("e1", "Pilates", _friday(18), _friday(20))]}
-EDEN_EVENTS_HE = {**EVENTS, "עדן": EDEN_EVENTS["Eden"]}
-ASKED_EDEN = (
+#: Yael's Friday, once she okays: busy 18:00-20:00.
+YAEL_EVENTS = {**EVENTS, "Yael": [CalendarEvent("e1", "Pilates", _friday(18), _friday(20))]}
+YAEL_EVENTS_HE = {**EVENTS, "יעל": YAEL_EVENTS["Yael"]}
+ASKED_YAEL = (
     Message("user", "Dana: Remi, who's free Friday evening?"),
     Message(
         "assistant",
-        "Dana and Noa are both free Friday evening. Eden, I need your okay before I look at "
+        "Dana and Noa are both free Friday evening. Yael, I need your okay before I look at "
         "your calendar. Just say so here.",
     ),
 )
-ASKED_EDEN_HE = (
+ASKED_YAEL_HE = (
     Message("user", "דנה: רמי, מי פנוי ביום שישי בערב?"),
     Message(
         "assistant",
-        "ביום שישי בערב דנה ונועה פנויות. עדן, כדי להציץ ביומן שלך אני צריך אישור, "
+        "ביום שישי בערב דנה ונועה פנויות. יעל, כדי להציץ ביומן שלך אני צריך אישור, "
         "מספיק לכתוב כאן שזה בסדר.",
     ),
 )
@@ -379,17 +379,17 @@ async def _okay_then_answer(
 
 
 async def test_hebrew_approval_answers_again(llm: AnthropicLLM) -> None:
-    group, reply = await _okay_then_answer("מאשרת", "עדן", ASKED_EDEN_HE, EDEN_EVENTS_HE, llm)
+    group, reply = await _okay_then_answer("מאשרת", "יעל", ASKED_YAEL_HE, YAEL_EVENTS_HE, llm)
     assert group.windows, "the question is answered again"
-    assert "עדן" in reply, reply
+    assert "יעל" in reply, reply
     assert re.search(r"18|20|\b(6|8)\b|שש|שמונה", reply), f"her busy times expected: {reply}"
     assert detect_language(reply) == "he", reply
     _no_secrets(reply)
 
 
 async def test_ok_go_ahead_counts(llm: AnthropicLLM) -> None:
-    group, reply = await _okay_then_answer("ok go ahead", "Eden", ASKED_EDEN, EDEN_EVENTS, llm)
+    group, reply = await _okay_then_answer("ok go ahead", "Yael", ASKED_YAEL, YAEL_EVENTS, llm)
     assert group.windows, "the question is answered again"
-    assert "Eden" in reply, reply
+    assert "Yael" in reply, reply
     assert re.search(r"18|20|\b(6|8)\b|six|eight", reply, re.I), f"her busy times: {reply}"
     _no_secrets(reply)

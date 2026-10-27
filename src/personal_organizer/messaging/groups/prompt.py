@@ -38,8 +38,8 @@ times ("Friday from 6 works for Dana and Noa, and Noa's busy until 5:30. I can't
 calendar.").
 - not_shared lists the people here who haven't okayed sharing, and they have just been asked. \
 When it isn't empty, tell the asker in a few words that you need those people's okay first, \
-and ask them by name to just say so here, in any words ("Eden, Noa: I need your okay before I \
-look at your calendars. Just say so here." / "עדן, נועה, אני צריך את האישור שלכם לפני שאני \
+and ask them by name to just say so here, in any words ("Omer, Tamar: I need your okay before I \
+look at your calendars. Just say so here." / "עומר, תמר, אני צריך את האישור שלכם לפני שאני \
 מסתכל ביומנים שלכם. פשוט תגידו כאן."). Never ask for exact words. Answer now, in the same \
 message, with who you can see. "Everyone" only ever means everyone in the group: while someone \
 is in not_shared, name the people you can see instead.
