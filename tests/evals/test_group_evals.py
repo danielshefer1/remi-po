@@ -425,6 +425,15 @@ async def test_ok_go_ahead_counts(llm: AnthropicLLM) -> None:
             id="approves-something-else",
         ),
         pytest.param(
+            "נשמע טוב",
+            "יעל",
+            (
+                *ASKED_YAEL_HE,
+                Message("user", "שירה: אולי נזמין סושי במקום לבשל?"),
+            ),
+            id="answers-a-newer-suggestion-he",
+        ),
+        pytest.param(
             "sure",
             "Yael",
             (Message("user", "Gal: Dinner at ours on Friday, everyone?"),),
