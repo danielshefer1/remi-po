@@ -12,6 +12,12 @@ from typing import Final
 #: WhatsApp's text body limit.
 WHATSAPP_TEXT_LIMIT: Final = 4096
 
+#: A line holding only this ends one text and starts the next.
+BREAK: Final = "---"
+
+#: The most texts one reply becomes; the rest ride in the last.
+MAX_BUBBLES: Final = 3
+
 #: Preferred break points, best first: a paragraph, a line, a sentence, a word.
 _BREAKS: Final = ("\n\n", "\n", ". ", " ")
 
@@ -45,4 +51,24 @@ def split_text(body: str, limit: int = WHATSAPP_TEXT_LIMIT) -> list[str]:
     return chunks
 
 
-__all__ = ["WHATSAPP_TEXT_LIMIT", "split_text"]
+def bubbles(reply: str) -> list[str]:
+    """Split ``reply`` into the texts to send, at lines that are exactly :data:`BREAK`.
+
+    Parts are stripped and empty ones dropped; past :data:`MAX_BUBBLES` the rest is joined
+    into the last with a blank line. An empty reply is one empty part.
+    """
+    parts: list[str] = []
+    current: list[str] = []
+    for line in [*reply.splitlines(), BREAK]:
+        if line.strip() == BREAK:
+            if text := "\n".join(current).strip():
+                parts.append(text)
+            current = []
+        else:
+            current.append(line)
+    if len(parts) > MAX_BUBBLES:
+        parts[MAX_BUBBLES - 1 :] = ["\n\n".join(parts[MAX_BUBBLES - 1 :])]
+    return parts or [""]
+
+
+__all__ = ["BREAK", "MAX_BUBBLES", "WHATSAPP_TEXT_LIMIT", "bubbles", "split_text"]

@@ -144,3 +144,9 @@ def whatsapp_db_settings(db_settings: Settings) -> Settings:
 def onboarding_settings(db_settings: Settings) -> Settings:
     """The real database settings with Composio, and so onboarding, switched on."""
     return with_onboarding(db_settings)
+
+
+@pytest.fixture(autouse=True)
+def no_part_gap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The pause between a reply's texts is for people, not tests."""
+    monkeypatch.setattr("personal_organizer.messaging.outbox.PART_GAP_S", 0)

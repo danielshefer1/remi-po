@@ -19,13 +19,17 @@ from personal_organizer.core.errors import (
     CalendarProviderUnavailableError,
     LLMRejectedError,
     LLMUnavailableError,
+    RejectedChannelError,
+    TransientChannelError,
 )
 from personal_organizer.core.types import TenantId
 from personal_organizer.db.engine import Database
 from personal_organizer.db.repositories.connections import bind_connection
 from personal_organizer.db.repositories.messages import record_inbound, record_outbound
+from personal_organizer.db.repositories.pending import current
 from personal_organizer.db.repositories.tenants import set_timezone
 from personal_organizer.interfaces.calendar import CalendarEvent
+from personal_organizer.interfaces.channel import OutboundMessage
 from personal_organizer.interfaces.llm import Message
 from personal_organizer.messaging.agent import AGENT_REPLY, agent_turn
 from personal_organizer.messaging.inbound import handle_inbound
@@ -238,6 +242,88 @@ class TestFallbacks:
         assert len(sent.body) <= WHATSAPP_TEXT_LIMIT
         assert sent.body.endswith("…")
         assert advance.reply == sent.body
+
+
+class TestSplitReply:
+    async def test_confirm_is_its_own_last_part(self, db: Database, owner_conn: Any) -> None:
+        tenant = await _active(db)
+        propose = call(
+            "propose_event", title="Dentist", start="2026-10-13T09:00", end="2026-10-13T10:00"
+        )
+        # Hebrew, as the message is: an English reply would be redone in Hebrew (#62).
+        llm = ScriptedLLM(said("", propose), said("הבנתי.\n---\nמחר בתשע, אז."))
+        advance, channel, _ = await _turn(db, owner_conn, tenant, llm)
+        [first, second, last] = channel.sent
+        assert (first.body, second.body) == ("הבנתי.", "מחר בתשע, אז.")
+        assert last.body.startswith("Dentist\n")
+        assert last.body.endswith("להוסיף ליומן?")
+        assert advance.reply == f"{first.body}\n\n{second.body}\n\n{last.body}"
+        assert "---" not in advance.reply
+
+    async def test_a_later_part_going_down_still_records_the_reply(
+        self, db: Database, owner_conn: Any
+    ) -> None:
+        class SecondTransient(FakeOutbound):
+            async def send_text(self, message: OutboundMessage) -> str:
+                if len(self.attempts) == 1:
+                    self.attempts.append(message)
+                    raise TransientChannelError("down")
+                return await super().send_text(message)
+
+        tenant = await _active(db)
+        row_id = await insert_inbox(owner_conn, phone=IL_PHONE, body="hi")
+        row = await load_row(db, row_id)
+        assert row is not None
+        channel = SecondTransient(name="gowa")
+        advance = await agent_turn(
+            row,
+            channel,
+            tenant,
+            NOW,
+            db=db,
+            llm=ScriptedLLM(said("one\n---\ntwo\n---\nthree")),
+            calendar=InMemoryCalendar(),
+        )
+        assert [m.body for m in channel.sent] == ["one"]
+        assert advance.reply == "one\n\ntwo\n\nthree"
+
+    async def test_a_confirm_that_did_not_go_out_leaves_no_open_proposal(
+        self, db: Database, owner_conn: Any
+    ) -> None:
+        class SecondRefused(FakeOutbound):
+            async def send_text(self, message: OutboundMessage) -> str:
+                if len(self.attempts) == 1:
+                    self.attempts.append(message)
+                    raise RejectedChannelError(131)
+                return await super().send_text(message)
+
+        tenant = await _active(db)
+        propose = call(
+            "propose_event", title="Dentist", start="2026-10-13T09:00", end="2026-10-13T10:00"
+        )
+        row_id = await insert_inbox(owner_conn, phone=IL_PHONE, body="hi")
+        row = await load_row(db, row_id)
+        assert row is not None
+        channel = SecondRefused(name="gowa")
+        advance = await agent_turn(
+            row,
+            channel,
+            tenant,
+            NOW,
+            db=db,
+            llm=ScriptedLLM(said("", propose), said("Got it.")),
+            calendar=InMemoryCalendar(),
+        )
+        assert [m.body for m in channel.sent] == ["Got it."]
+        assert advance.reply is not None
+        assert advance.reply.startswith("Got it.\n\n")
+        async with db.tenant_session(TenantId(tenant.id)) as session:
+            assert await current(session, tenant.id, now=NOW) is None
+
+    async def test_only_break_lines_is_the_fallback(self, db: Database, owner_conn: Any) -> None:
+        tenant = await _active(db)
+        _, channel, _ = await _turn(db, owner_conn, tenant, ScriptedLLM(said("---")))
+        assert [m.body for m in channel.sent] == [t("agent_unavailable", "he")]
 
 
 class TestNoCalendar:
