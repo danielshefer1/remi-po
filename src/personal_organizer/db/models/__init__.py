@@ -7,6 +7,7 @@ from personal_organizer.db.models.invite import Invite
 from personal_organizer.db.models.tenant import (
     CalendarConnection,
     DetailGrant,
+    Event,
     GroupMember,
     Message,
     OnboardingLink,
@@ -21,6 +22,7 @@ __all__ = [
     "ChannelInbox",
     "ChannelOutbox",
     "DetailGrant",
+    "Event",
     "GroupContext",
     "GroupMember",
     "GroupPoll",

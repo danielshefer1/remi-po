@@ -138,6 +138,16 @@ async def _seed_note(conn: Any, tenant: UUID, tag: str) -> None:
     )
 
 
+async def _seed_event(conn: Any, tenant: UUID, tag: str) -> None:
+    await conn.execute(
+        "INSERT INTO events (tenant_id, title, starts_at, ends_at, source) "
+        "VALUES ($1, $2, $3, $3, 'remi')",
+        tenant,
+        f"secret event of {tag}",
+        NOW + timedelta(hours=1),
+    )
+
+
 #: The one poll every tenant answers. ``wa_groups`` and ``group_polls`` are not tenant tables,
 #: so a seed creates or reuses them under any GUC, or none.
 _POLL_INBOX_ID = UUID("00000000-0000-0000-0000-00000000e7e7")
@@ -198,6 +208,7 @@ SEEDS: dict[str, Seed] = {
     "messages": _seed_message,
     "reminders": _seed_reminder,
     "notes": _seed_note,
+    "events": _seed_event,
     "group_members": _seed_group_member,
     "detail_grants": _seed_detail_grant,
     "poll_answers": _seed_poll_answer,
