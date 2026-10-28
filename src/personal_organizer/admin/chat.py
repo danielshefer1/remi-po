@@ -45,6 +45,7 @@ from personal_organizer.messaging.onboarding import next_reply
 from personal_organizer.messaging.onboarding_text import t
 from personal_organizer.messaging.schedule import InMemorySchedule
 from personal_organizer.messaging.tenancy import TenantState, load_state, phone_of
+from personal_organizer.messaging.text import bubbles
 from personal_organizer.observability.logging import configure_logging
 from personal_organizer.onboarding.links import issue_or_reuse_link
 from personal_organizer.providers.calendar.composio import ComposioConnector
@@ -178,6 +179,7 @@ async def agent_chat(
                 connect_link=connect_link,
                 strong=None,
             )
+        text = "\n\n".join(bubbles(text))  # as production records it
         write(f"bot [{AGENT_REPLY}]> {text or NO_ANSWER}")
         history += [Message("user", line), Message("assistant", text)]
 

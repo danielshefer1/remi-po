@@ -87,15 +87,15 @@ from personal_organizer.messaging.conversation import converse
 from personal_organizer.messaging.groups.answers import Outings, TenantOutings
 from personal_organizer.messaging.groups.grants import Grants, TenantGrants
 from personal_organizer.messaging.inbox import InboxRow
-from personal_organizer.messaging.language import ENGLISH, HEBREW
+from personal_organizer.messaging.language import ENGLISH, HEBREW, detect_language
 from personal_organizer.messaging.notes import Notes, TenantNotes
 from personal_organizer.messaging.onboarding import LINK_PLACEHOLDER, Advance
 from personal_organizer.messaging.onboarding_text import t
-from personal_organizer.messaging.outbox import already_sent, send_once
+from personal_organizer.messaging.outbox import already_sent, send_once, send_parts
 from personal_organizer.messaging.recurrence import check_rule, describe_rule, first_at
 from personal_organizer.messaging.schedule import Schedule, TenantSchedule
 from personal_organizer.messaging.tenancy import TenantState, load_history, phone_of
-from personal_organizer.messaging.text import WHATSAPP_TEXT_LIMIT, split_text
+from personal_organizer.messaging.text import BREAK, WHATSAPP_TEXT_LIMIT, bubbles, split_text
 from personal_organizer.messaging.timezones import match_zone, zone_label
 from personal_organizer.onboarding.links import issue_or_reuse_link
 from personal_organizer.settings import Settings
@@ -444,15 +444,18 @@ It is now {weekday} {today}, {clock}, in their time zone, {zone}. Weeks start on
 week runs from Sunday {week_start} to Saturday {week_end}. The work week is Sunday to Thursday.
 
 How you sound: like a sharp, warm human assistant texting, not a bot or a form.
-- Short and natural: a sentence or two, plain text, no headings, tables, menus or numbered \
-options, and never "reply with". Match their tone; a light touch of warmth is good, filler is not.
-- Use judgment instead of questions. Read what they mean from context and the conversation so \
-far, fill obvious gaps with sensible defaults (an hour for a meeting, the next such day for \
-"Thursday") and say what you assumed, so they can correct it. Ask only when you truly can't \
-guess, and then one short question.
-- Never make them repeat themselves, and never talk about tools, prompts or how you work.
-- Answer what they just said. Don't bring up or correct your earlier replies unless they ask \
-about them.
+- Answer first, in a line or two, and add details only when they matter or they ask: a brief \
+message gets a brief answer. Plain text, no headings, tables, menus or numbered options, never \
+"reply with"; a list only when the content is one, like a day's schedule.
+- No warm-up line or exclamation before the answer, no repeating what they said back to them, \
+no closing offer of more help. Match their tone; a light touch of warmth is good, filler is not.
+- An answer plus more can go as separate texts: a line with only --- between them. At most \
+three, the question (if any) last. Most replies are one text.
+- Use judgment instead of questions: fill obvious gaps with sensible defaults (an hour for a \
+meeting, the next such day for "Thursday") and say what you assumed. Ask only when you truly \
+can't guess, one short question.
+- Answer what they just said; never make them repeat themselves, and don't bring up or correct \
+your earlier replies unless they ask. Never talk about tools, prompts or how you work.
 - In Hebrew, speak to them in their gender once you know it: from what you know about them \
 below, or from how they speak of themselves: any adjective or present-tense verb they use about \
 themselves shows it ("אני רעבה", "אני צריכה" a woman; "אני רעב", "אני צריך" a man). Masculine \
@@ -982,7 +985,8 @@ async def respond(
     ``calendar_not_connected`` line and the URL ``connect_link`` gives; with no
     ``connect_link``, the call answers that no link can be sent.
     A ``propose_event`` the model makes is appended to ``proposed``, and the reply ends with
-    its confirm question; the caller stores it, or nothing confirms it. With ``schedule``
+    its summary and confirm question as a text of their own; the caller stores it, or nothing
+    confirms it. With ``schedule``
     ``None``, the reminder and morning-message tools answer that they are not available.
     With ``notes`` ``None``, the memory tools answer that they are not available and the profile
     is empty. With ``grants`` ``None``, the three sharing tools answer that they are not available.
@@ -1083,6 +1087,7 @@ async def respond(
             tools=TOOLS if strong is None else (*TOOLS, HAND_OFF_TOOL),
             run_tool=run_tool,
             llm=llm,
+            hebrew=tenant.language == HEBREW and detect_language(text) == HEBREW,
         )
     except _HandOff as handoff:
         assert strong is not None  # only raised with a strong model
@@ -1113,15 +1118,15 @@ async def respond(
     if found:
         language = tenant.language
         suffix = confirm_prompt(event_summary(found[0], zone, language), language)
-        # The question must arrive whole, or a "yes" would confirm what they never saw.
-        if len(f"{said}\n\n{suffix}") > WHATSAPP_TEXT_LIMIT:
-            said = ""
-        said = f"{said}\n\n{suffix}".strip()
+        # The question must arrive whole, or a "yes" would confirm what they never saw. It is
+        # its own text, unless three already came before it: then it rides the third.
+        joined = f"{said}\n{BREAK}\n{suffix}" if said else suffix
+        said = suffix if len(bubbles(joined)[-1]) > WHATSAPP_TEXT_LIMIT else joined
     # A proposal's confirm question must stay last and whole: it wins over a link.
     if send_link and not found and connect_link is not None:
         line = t("calendar_not_connected", tenant.language, url=await connect_link())
-        # The link must arrive whole: a cut reply would lose it.
-        if len(f"{said}\n\n{line}") > WHATSAPP_TEXT_LIMIT:
+        # The link must arrive whole: a cut reply would lose it. It rides the last text.
+        if len(f"{bubbles(said)[-1]}\n\n{line}") > WHATSAPP_TEXT_LIMIT:
             said = ""
         return f"{said}\n\n{line}".strip()
     return said
@@ -1130,9 +1135,8 @@ async def respond(
 def fit_message(text: str) -> str:
     if len(text) <= WHATSAPP_TEXT_LIMIT:
         return text
-    # shortcut: a reply longer than one message is cut at a line or sentence, so one send
-    # stays one kind and a re-run sends nothing new. Send the rest as numbered parts if the
-    # 1024-token cap ever lets a real answer overflow.
+    # shortcut: one text longer than a message is cut at a line or sentence, so a part stays
+    # one send. The model splits a long answer into texts; this only guards one that overflows.
     return split_text(text, WHATSAPP_TEXT_LIMIT - 1)[0].rstrip() + "…"
 
 
@@ -1270,6 +1274,8 @@ async def agent_turn(
         except LLMRejectedError:
             log.warning("agent.fallback", reason="rejected")
             reply = ""
+    if bubbles(reply) == [""]:  # nothing but break lines says nothing
+        reply = ""
     if reply and proposed:
         async with db.tenant_session(TenantId(tenant.id)) as session:
             await pending.propose(
@@ -1279,17 +1285,23 @@ async def agent_turn(
                 payload=_payload(proposed[0], row.id),
                 now=now,
             )
-    text = fit_message(reply or t("agent_unavailable", tenant.language))
-    await send_once(
+    parts = [
+        fit_message(part) for part in bubbles(reply or t("agent_unavailable", tenant.language))
+    ]
+    _, every = await send_parts(
         db,
         channel,
         inbox_id=row.id,
         kind=AGENT_REPLY,
         recipient_key=row.sender_key,
         to=address,
-        text=text,
+        parts=parts,
     )
-    recorded = text
+    if proposed and reply and not every:  # the question never reached them: nothing to confirm
+        async with db.tenant_session(TenantId(tenant.id)) as session:
+            await pending.drop(session, tenant.id)
+    # The history holds the texts as one reply, so the model never sees a break line echoed.
+    recorded = "\n\n".join(parts)
     for url in links:
         recorded = recorded.replace(url, LINK_PLACEHOLDER)
     return Advance(reply=recorded)

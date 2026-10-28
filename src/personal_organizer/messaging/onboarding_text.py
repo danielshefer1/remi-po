@@ -44,7 +44,7 @@ _EN: Final = {
     "zone_retry": "Hmm, I don't know that one. What's the nearest big city?",
     "zone_set": "Got it, you're on {zone} time.",
     "connect_link": (
-        "That's it, you're all set! Every morning at 7:30 I'll send you a quick look at your "
+        "You're all set! Every morning at 7:30 I'll send you a quick look at your "
         "day; just tell me if you'd like another time, or none. Want me to see your Google "
         "Calendar too? Connect it here whenever you like. The link works once and expires "
         "soon, but I can always send you a new one:\n{url}"
@@ -89,9 +89,7 @@ _EN: Final = {
         "Got it. It's still in your calendar, though, since I can't take things out yet. "
         "You can delete it there whenever you like."
     ),
-    "outing_nudge_fallback": (
-        "Hey, just checking if you're coming: {summary}. No pressure, just let me know."
-    ),
+    "outing_nudge_fallback": "Hey, just checking if you're coming: {summary}. No pressure.",
 }
 
 _HE: Final = {
@@ -107,7 +105,7 @@ _HE: Final = {
     "zone_retry": "לא הכרתי את המקום הזה. מה העיר הגדולה הכי קרובה?",
     "zone_set": "מעולה, כיוונתי לשעון {zone}.",
     "connect_link": (
-        "זהו, הכול מוכן! כל בוקר ב-7:30 אשלח לך הצצה קצרה ליום שלך, ואם נוח לך שעה אחרת, "
+        "הכול מוכן! כל בוקר ב-7:30 אשלח לך הצצה קצרה ליום שלך, ואם נוח לך שעה אחרת, "
         "או שעדיף בלי, אפשר פשוט לכתוב לי. רוצה שאראה גם את יומן Google שלך? אפשר לחבר אותו "
         "כאן מתי שנוח. הקישור עובד פעם אחת ותוקפו קצר, אבל תמיד אפשר לבקש ממני חדש:\n{url}"
     ),
@@ -146,9 +144,7 @@ _HE: Final = {
         "קיבלתי. רק שזה עדיין ביומן שלך, כי אני עוד לא יכול להוריד משם דברים. "
         "אפשר למחוק את זה ביומן מתי שנוח."
     ),
-    "outing_nudge_fallback": (
-        "היי, רציתי לבדוק אם מסתדר לך להגיע: {summary}. בלי לחץ, רק לעדכן אותי."
-    ),
+    "outing_nudge_fallback": "היי, רציתי לבדוק אם מסתדר לך להגיע: {summary}. בלי לחץ.",
 }
 
 ONBOARDING_TEXT: Final[Mapping[str, Mapping[str, str]]] = MappingProxyType(

@@ -132,7 +132,7 @@ async def _propose(
 ) -> UUID:
     llm = ScriptedLLM(said("", DENTIST), said("להוסיף את זה?"))
     _, channel, inbox_id = await _turn(db, conn, tenant, llm, calendar, "תוסיף רופא שיניים מחר")
-    assert [m.body for m in channel.sent] == [f"להוסיף את זה?\n\n{CHOICE}"]
+    assert [m.body for m in channel.sent] == ["להוסיף את זה?", CHOICE]
     return inbox_id
 
 
@@ -402,7 +402,7 @@ class TestNoConfirm:
         assert await _current(db, tenant) is not None
         llm = ScriptedLLM(said("", DENTIST), said("להוסיף?"))
         _, channel, _ = await _turn(db, owner_conn, tenant, llm, calendar, inbox_id=inbox_id)
-        assert [m.body for m in channel.sent] == [f"להוסיף?\n\n{CHOICE}"]
+        assert [m.body for m in channel.sent] == ["להוסיף?", CHOICE]
         assert calendar.events == []
 
     async def test_one_with_nothing_open_is_text_for_the_model(

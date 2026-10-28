@@ -19,7 +19,7 @@ from personal_organizer.core.errors import (
 )
 from personal_organizer.db.engine import Database
 from personal_organizer.interfaces.channel import OutboundMessage
-from personal_organizer.messaging.outbox import already_sent, send_once, sent_message_id
+from personal_organizer.messaging.outbox import already_sent, send_once, send_parts, sent_message_id
 from personal_organizer.settings import Settings
 from tests.fixtures.channels import FakeOutbound, insert_inbox
 from tests.fixtures.payloads import SENDER_PHONE
@@ -223,3 +223,76 @@ class TestAlreadySent:
             )
         assert await already_sent(db, inbox_id, KIND) is sent
         assert not await already_sent(db, inbox_id, "another:kind")
+
+
+class SecondRefused(FakeOutbound):
+    async def send_text(self, message: OutboundMessage) -> str:
+        if len(self.attempts) == 1:
+            self.attempts.append(message)
+            raise RejectedChannelError(131)
+        return await super().send_text(message)
+
+
+class SecondTransient(FakeOutbound):
+    async def send_text(self, message: OutboundMessage) -> str:
+        if len(self.attempts) == 1:
+            self.attempts.append(message)
+            raise TransientChannelError("down")
+        return await super().send_text(message)
+
+
+class TestSendParts:
+    async def _parts(self, db: Database, channel: FakeOutbound, inbox_id: UUID, *parts: str) -> str:
+        sent, _ = await send_parts(
+            db,
+            channel,
+            inbox_id=inbox_id,
+            kind="agent_reply",
+            recipient_key=RECIPIENT,
+            to=SENDER_PHONE,
+            parts=parts,
+        )
+        return sent
+
+    async def test_parts_sent_in_order_with_own_keys(self, db: Database, owner_conn: Any) -> None:
+        inbox_id = await insert_inbox(owner_conn)
+        channel = FakeOutbound()
+        assert await self._parts(db, channel, inbox_id, "one", "two", "three") == "accepted"
+        assert [m.body for m in channel.sent] == ["one", "two", "three"]
+        rows = await owner_conn.fetch("SELECT kind, status FROM channel_outbox ORDER BY kind")
+        assert [(r["kind"], r["status"]) for r in rows] == [
+            ("agent_reply", "accepted"),
+            ("agent_reply:2", "accepted"),
+            ("agent_reply:3", "accepted"),
+        ]
+
+    async def test_rerun_sends_nothing(self, db: Database, owner_conn: Any) -> None:
+        inbox_id = await insert_inbox(owner_conn)
+        channel = FakeOutbound()
+        await self._parts(db, channel, inbox_id, "one", "two")
+        assert await self._parts(db, channel, inbox_id, "one", "two", "three") == "accepted"
+        assert [m.body for m in channel.sent] == ["one", "two"]
+
+    async def test_refused_part_stops_rest(self, db: Database, owner_conn: Any) -> None:
+        inbox_id = await insert_inbox(owner_conn)
+        channel = SecondRefused()
+        assert await self._parts(db, channel, inbox_id, "one", "two", "three") == "accepted"
+        assert [m.body for m in channel.attempts] == ["one", "two"]
+        rows = await owner_conn.fetch("SELECT kind, status FROM channel_outbox ORDER BY kind")
+        assert [(r["kind"], r["status"]) for r in rows] == [
+            ("agent_reply", "accepted"),
+            ("agent_reply:2", "failed"),
+        ]
+
+    async def test_transient_later_part_stops_and_fails_it(
+        self, db: Database, owner_conn: Any
+    ) -> None:
+        inbox_id = await insert_inbox(owner_conn)
+        channel = SecondTransient()
+        assert await self._parts(db, channel, inbox_id, "one", "two", "three") == "accepted"
+        assert [m.body for m in channel.attempts] == ["one", "two"]
+        rows = await owner_conn.fetch("SELECT kind, status FROM channel_outbox ORDER BY kind")
+        assert [(r["kind"], r["status"]) for r in rows] == [
+            ("agent_reply", "accepted"),
+            ("agent_reply:2", "failed"),
+        ]

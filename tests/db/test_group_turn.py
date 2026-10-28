@@ -193,6 +193,27 @@ async def test_group_turn_never_sees_titles(
     assert [tuple(row) for row in context][-1] == ("Remi", sent.body)
 
 
+async def test_group_reply_split(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    llm = ScriptedLLM(said("Friday looks open.\n---\nWant me to ask Noa too?"))
+    channel, _ = await _say(db, owner_conn, onboarding_settings, llm)
+    assert [m.body for m in channel.sent] == ["Friday looks open.", "Want me to ask Noa too?"]
+    assert {m.recipient for m in channel.sent} == {JID}
+    context = await owner_conn.fetch("SELECT sender_name, body FROM group_context ORDER BY sent_at")
+    assert [tuple(row) for row in context][-1] == (
+        "Remi",
+        "Friday looks open.\n\nWant me to ask Noa too?",
+    )
+
+
+async def test_group_reply_of_only_break_lines_sends_nothing(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    channel, _ = await _say(db, owner_conn, onboarding_settings, ScriptedLLM(said("---")))
+    assert channel.sent == []
+
+
 async def test_not_shared_member_is_not_read(
     db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
 ) -> None:

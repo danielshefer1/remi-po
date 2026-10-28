@@ -42,6 +42,7 @@ from personal_organizer.messaging.confirm import confirm_prompt
 from personal_organizer.messaging.onboarding_text import t
 from personal_organizer.messaging.schedule import InMemorySchedule
 from personal_organizer.messaging.tenancy import TenantState
+from personal_organizer.messaging.text import WHATSAPP_TEXT_LIMIT, bubbles
 from tests.fixtures.llm import ScriptedLLM, call, said
 
 JERUSALEM = ZoneInfo("Asia/Jerusalem")
@@ -231,7 +232,7 @@ class TestRespond:
     async def _respond(llm: ScriptedLLM, calendar: InMemoryTenantCalendar | None = None) -> str:
         return await respond(
             [],
-            "מה יש לי מחר?",
+            "What do I have tomorrow?",
             TENANT,
             llm=llm,
             calendar=calendar or _calendar(),
@@ -245,6 +246,18 @@ class TestRespond:
         )
         assert await self._respond(llm) == "אין לך כלום מחר."
         assert llm.calls[1][-1].content == '{"events": []}'
+
+    async def test_a_hebrew_question_answered_in_english_is_redone(self) -> None:
+        llm = ScriptedLLM(said("Nothing tomorrow."), said("אין לך כלום מחר."))
+        reply = await respond(
+            [],
+            "מה יש לי מחר?",
+            TENANT,
+            llm=llm,
+            calendar=_calendar(),
+            now=datetime(2026, 10, 12, 9, 0, tzinfo=UTC),
+        )
+        assert reply == "אין לך כלום מחר."
 
     async def test_list_events_without_google_reads_native(self) -> None:
         """Remi keeps their calendar: without Google, list_events reads it, and no line about
@@ -269,7 +282,7 @@ class TestRespond:
 
         return await respond(
             [],
-            "מה יש לי מחר?",
+            "What do I have tomorrow?",
             TENANT,
             llm=llm,
             calendar=calendar,
@@ -322,7 +335,13 @@ class TestLive:
         llm: ScriptedLLM, calendar: InMemoryTenantCalendar, schedule: InMemorySchedule
     ) -> str:
         return await respond(
-            [], "תבדוק תמיד בגוגל", TENANT, llm=llm, calendar=calendar, now=NOW, schedule=schedule
+            [],
+            "Always check Google live",
+            TENANT,
+            llm=llm,
+            calendar=calendar,
+            now=NOW,
+            schedule=schedule,
         )
 
     async def test_live_calendar_on_and_off(self) -> None:
@@ -365,6 +384,8 @@ DENTIST = call(
 
 
 class TestPropose:
+    SUMMARY = "\n".join(["רופא שיניים", "יום שלישי 2026-10-13, 09:00-10:00"])
+
     @staticmethod
     async def _respond(
         llm: ScriptedLLM,
@@ -373,7 +394,7 @@ class TestPropose:
     ) -> str:
         return await respond(
             [],
-            "תוסיף רופא שיניים מחר בתשע",
+            "Add a dentist tomorrow at nine",
             TENANT,
             llm=llm,
             calendar=calendar or _calendar(),
@@ -392,9 +413,19 @@ class TestPropose:
             "2026-10-13T10:00:00+03:00",
         )
         summary = "\n".join(["רופא שיניים", "יום שלישי 2026-10-13, 09:00-10:00"])
-        assert reply == f"להוסיף את זה?\n\n{confirm_prompt(summary, 'he')}"
+        assert bubbles(reply) == ["להוסיף את זה?", confirm_prompt(summary, "he")]
         assert calendar.added == []  # nothing is written before the confirm
         assert llm.calls[1][-1].content.startswith("ok: proposed")
+
+    async def test_after_three_texts_the_choice_rides_the_third(self) -> None:
+        llm = ScriptedLLM(said("", DENTIST), said("one\n---\ntwo\n---\nthree"))
+        choice = confirm_prompt(self.SUMMARY, "he")
+        assert bubbles(await self._respond(llm, [])) == ["one", "two", f"three\n\n{choice}"]
+
+    async def test_an_overlong_last_text_is_dropped_for_the_choice(self) -> None:
+        long = "x " * WHATSAPP_TEXT_LIMIT
+        llm = ScriptedLLM(said("", DENTIST), said(f"one\n---\ntwo\n---\n{long}"))
+        assert await self._respond(llm, []) == confirm_prompt(self.SUMMARY, "he")
 
     async def test_a_dropped_reply_keeps_the_choice(self) -> None:
         proposed: list[CalendarEvent] = []
@@ -626,7 +657,7 @@ class TestHandOff:
     ) -> str:
         return await respond(
             [],
-            "הנה המערכת שלי, תזכיר לי לפני כל שיעור",
+            "Here is my timetable, remind me before each class",
             TENANT,
             llm=llm,
             calendar=_calendar(),
@@ -642,7 +673,7 @@ class TestHandOff:
         assert "hand_off" in _tool_names(cheap)
         assert "call hand_off first" in cheap.calls[0][0].content
         # The strong run starts the turn over, and can't hand it off again.
-        assert strong.calls[0][-1].content == "הנה המערכת שלי, תזכיר לי לפני כל שיעור"
+        assert strong.calls[0][-1].content == "Here is my timetable, remind me before each class"
         assert "hand_off" not in _tool_names(strong)
         assert "hand_off" not in strong.calls[0][0].content
 
@@ -673,7 +704,7 @@ class TestHandOff:
         reply = await self._respond(cheap, strong, proposed=proposed)
         # The caller's own list holds the strong run's proposal only.
         assert [event.title for event in proposed] == ["other"]
-        assert reply.startswith("ok\n\nother\n")
+        assert reply.startswith("ok\n---\nother\n")
         assert "רופא שיניים" not in reply
 
     async def test_strong_unavailable_raises_for_retry(self) -> None:

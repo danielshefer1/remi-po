@@ -335,7 +335,10 @@ async def test_hebrew_outing(db: Database, family: Group, group: UUID) -> None:
         "set_up_outing", title="ארוחה משפחתית", start="2026-10-23T19:00", end="2026-10-23T21:00"
     )
 
-    await family.set_up(dinner, body="רמי, תארגן לנו ארוחה ביום שישי בשבע")
+    await family.say(
+        ScriptedLLM(said("", dinner), said("פתחתי סקר, מי שבפנים שיצביע.")),
+        body="רמי, תארגן לנו ארוחה ביום שישי בשבע",
+    )
 
     poll, _ = family.channel.sent
     assert poll.recipient == JID
