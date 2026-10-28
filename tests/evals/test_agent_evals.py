@@ -395,7 +395,7 @@ async def _turn(
         text,
         tenant,
         llm=llm,
-        calendar=calendar or InMemoryCalendar(_events(ZoneInfo(JERUSALEM))),
+        calendar=InMemoryCalendar(_events(ZoneInfo(JERUSALEM))) if calendar is None else calendar,
         account=ACCOUNT,
         now=NOW,
         proposed=proposed,
@@ -820,12 +820,12 @@ TYPICAL = [
     ("remind me at 5 to call the bank", "en"),
     ("add dentist on Sunday at 10", "en"),
     ("what's on this week?", "en"),
-    ("thanks!", "en"),
+    ("when is my flight?", "en"),
     ("מה יש לי מחר?", "he"),
     ("תזכיר לי בחמש להתקשר לבנק", "he"),
     ("תוסיף לי רופא שיניים ביום ראשון בעשר", "he"),
     ("מה יש לי השבוע?", "he"),
-    ("תודה!", "he"),
+    ("מתי הטיסה שלי?", "he"),
 ]
 
 
@@ -844,7 +844,11 @@ async def test_answer_then_question_splits(text: str, language: str, llm: Anthro
     """No time given: a question ends the reply, its own (what time?) or the confirm's. A
     proposal is the model's words, then the summary and confirm as a text of their own."""
     proposed: list[CalendarEvent] = []
-    reply = await _turn(text, language, InMemorySchedule(NOW), llm, proposed=proposed)
+    # No events, so no "heads up" about Thursday evening as a third text.
+    calendar = InMemoryCalendar()
+    reply = await _turn(
+        text, language, InMemorySchedule(NOW), llm, calendar=calendar, proposed=proposed
+    )
     parts = bubbles(reply)
     assert ENDS_IN_QUESTION.search(parts[-1]), parts
     if proposed:
