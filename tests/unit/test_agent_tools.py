@@ -276,7 +276,7 @@ class TestRespond:
     async def _respond(llm: ScriptedLLM, account: CalendarConnection | None = ACCOUNT) -> str:
         return await respond(
             [],
-            "מה יש לי מחר?",
+            "What do I have tomorrow?",
             TENANT,
             llm=llm,
             calendar=InMemoryCalendar(),
@@ -291,6 +291,19 @@ class TestRespond:
         )
         assert await self._respond(llm) == "אין לך כלום מחר."
         assert llm.calls[1][-1].content == '{"events": []}'
+
+    async def test_a_hebrew_question_answered_in_english_is_redone(self) -> None:
+        llm = ScriptedLLM(said("Nothing tomorrow."), said("אין לך כלום מחר."))
+        reply = await respond(
+            [],
+            "מה יש לי מחר?",
+            TENANT,
+            llm=llm,
+            calendar=InMemoryCalendar(),
+            account=ACCOUNT,
+            now=datetime(2026, 10, 12, 9, 0, tzinfo=UTC),
+        )
+        assert reply == "אין לך כלום מחר."
 
     async def test_not_connected_adds_the_fixed_line(self) -> None:
         llm = ScriptedLLM(
@@ -311,7 +324,7 @@ class TestRespond:
 
         return await respond(
             [],
-            "מה יש לי מחר?",
+            "What do I have tomorrow?",
             TENANT,
             llm=llm,
             calendar=InMemoryCalendar(),
@@ -389,7 +402,7 @@ class TestPropose:
     ) -> str:
         return await respond(
             [],
-            "תוסיף רופא שיניים מחר בתשע",
+            "Add a dentist tomorrow at nine",
             TENANT,
             llm=llm,
             calendar=calendar or InMemoryCalendar(),
@@ -643,7 +656,7 @@ class TestHandOff:
     ) -> str:
         return await respond(
             [],
-            "הנה המערכת שלי, תזכיר לי לפני כל שיעור",
+            "Here is my timetable, remind me before each class",
             TENANT,
             llm=llm,
             calendar=InMemoryCalendar(),
@@ -660,7 +673,7 @@ class TestHandOff:
         assert "hand_off" in _tool_names(cheap)
         assert "call hand_off first" in cheap.calls[0][0].content
         # The strong run starts the turn over, and can't hand it off again.
-        assert strong.calls[0][-1].content == "הנה המערכת שלי, תזכיר לי לפני כל שיעור"
+        assert strong.calls[0][-1].content == "Here is my timetable, remind me before each class"
         assert "hand_off" not in _tool_names(strong)
         assert "hand_off" not in strong.calls[0][0].content
 

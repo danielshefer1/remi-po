@@ -69,3 +69,35 @@ async def test_a_reply_cut_off_at_max_tokens_is_empty(cut: Completion) -> None:
 async def test_provider_errors_pass_through() -> None:
     with pytest.raises(LLMUnavailableError):
         await run(ScriptedLLM(LLMUnavailableError("down")), Tools())
+
+
+async def hebrew(llm: ScriptedLLM) -> str:
+    return await converse(
+        [], "אני פנוי מחר?", system="be brief", tools=[], run_tool=Tools(), llm=llm, hebrew=True
+    )
+
+
+async def test_an_english_reply_to_hebrew_is_redone_once_in_hebrew() -> None:
+    llm = ScriptedLLM(said("Yes, you're free."), said("כן, את פנויה."))
+    assert await hebrew(llm) == "כן, את פנויה."
+    english, nudge = llm.calls[1][-2:]
+    assert english == Message("assistant", "Yes, you're free.")
+    assert nudge.role == "user"
+
+
+async def test_a_redo_still_in_english_sends_the_first_reply() -> None:
+    llm = ScriptedLLM(said("Yes, you're free."), said("Yes, free."))
+    assert await hebrew(llm) == "Yes, you're free."
+    assert len(llm.calls) == 2
+
+
+@pytest.mark.parametrize("reply", ["כן, פנוי.", "", "18:00 👍"])
+async def test_a_reply_not_in_english_is_not_redone(reply: str) -> None:
+    llm = ScriptedLLM(said(reply))
+    assert await hebrew(llm) == reply
+    assert len(llm.calls) == 1
+
+
+async def test_english_is_left_alone_unless_hebrew_is_asked() -> None:
+    llm = ScriptedLLM(said("Yes, you're free."))
+    assert await run(llm, Tools()) == "Yes, you're free."
