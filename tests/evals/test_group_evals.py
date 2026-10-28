@@ -200,7 +200,7 @@ async def test_dinner_at_seven_sets_up_one_outing(
         (
             "Remi, let's do dinner at 7, set it up",
             FOLLOW_UP,
-            r"two hours|2 hours|2-hour|(until|till) 9|21:00|\b9 ?pm",
+            r"two hours|2 hours|2-hour|(until|till|ends?( at)?) 9|21:00|\b9 ?pm",
         ),
         (
             "רמי, בוא נעשה ארוחת ערב ב-7, תסדר את זה",
