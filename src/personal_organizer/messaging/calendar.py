@@ -1,0 +1,128 @@
+"""One calendar per member (issue #50): Remi's own, with Google's events copied in.
+
+``TenantCalendar`` is the worker's, over Postgres. ``InMemoryTenantCalendar`` is ``po-chat``'s
+and the tests' (no database). With Google connected, ``add`` writes to Google first and keeps
+the copy it returns; ``events`` reads the stored copy, refreshing it from Google first only
+when ``live``.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from dataclasses import replace
+from datetime import datetime
+from typing import Protocol
+from uuid import UUID
+
+import structlog
+
+from personal_organizer.core.errors import CalendarProviderError
+from personal_organizer.core.types import TenantId
+from personal_organizer.db.engine import Database
+from personal_organizer.db.models.tenant import CalendarConnection
+from personal_organizer.db.repositories import events as event_rows
+from personal_organizer.interfaces.calendar import CalendarEvent, CalendarProvider
+
+log = structlog.get_logger(__name__)
+
+
+class Calendar(Protocol):
+    connected: bool
+    live: bool
+
+    async def events(self, start: datetime, end: datetime) -> Sequence[CalendarEvent]: ...
+    async def add(self, event: CalendarEvent) -> CalendarEvent: ...
+
+
+class TenantCalendar:
+    def __init__(
+        self,
+        db: Database,
+        tenant_id: UUID,
+        *,
+        provider: CalendarProvider | None,
+        account: CalendarConnection | None,
+        live: bool = False,
+    ) -> None:
+        self._db = db
+        self._tenant_id = tenant_id
+        self._provider = provider
+        self._account = account
+        self.connected = provider is not None and account is not None
+        self.live = live
+
+    async def refresh(self, start: datetime, end: datetime) -> bool:
+        """Copy Google's ``[start, end)`` into the stored events. ``False`` when there is no
+        Google, or it failed (the stored copy stays as it was)."""
+        if self._provider is None or self._account is None:
+            return False
+        try:
+            found = await self._provider.list_events(
+                self._account.connected_account_id,
+                self._account.composio_user_id,
+                start=start,
+                end=end,
+            )
+        except CalendarProviderError:
+            log.warning("calendar.refresh_failed", tenant_id=str(self._tenant_id))
+            return False
+        async with self._db.tenant_session(TenantId(self._tenant_id)) as session:
+            await event_rows.replace_imported(session, self._tenant_id, start, end, found)
+        return True
+
+    async def events(self, start: datetime, end: datetime) -> Sequence[CalendarEvent]:
+        if self.live and self.connected:
+            await self.refresh(start, end)
+        async with self._db.tenant_session(TenantId(self._tenant_id)) as session:
+            return await event_rows.events_between(session, self._tenant_id, start, end)
+
+    async def add(self, event: CalendarEvent) -> CalendarEvent:
+        """Add ``event``. Provider errors (not added to Google) are re-raised."""
+        if self._provider is None or self._account is None:
+            async with self._db.tenant_session(TenantId(self._tenant_id)) as session:
+                return await event_rows.add_event(session, self._tenant_id, event, source="remi")
+        # CalendarProviderUnavailableError / RejectedError propagate: nothing was added.
+        stored = await self._provider.create_event(
+            self._account.connected_account_id, self._account.composio_user_id, event
+        )
+        # Keep Google's copy under its own id, so the next refresh replaces it, not doubles it.
+        async with self._db.tenant_session(TenantId(self._tenant_id)) as session:
+            await event_rows.upsert_google(session, self._tenant_id, stored)
+        return stored
+
+
+class InMemoryTenantCalendar:
+    """The same behaviour in a list. ``added`` is there to assert on; ``fail`` makes ``add``
+    raise, like a provider that is down."""
+
+    def __init__(
+        self,
+        events: Sequence[CalendarEvent] = (),
+        *,
+        connected: bool = False,
+        live: bool = False,
+    ) -> None:
+        self._events = list(events)
+        self.connected = connected
+        self.live = live
+        self.added: list[CalendarEvent] = []
+        self.fail: Exception | None = None
+
+    async def events(self, start: datetime, end: datetime) -> Sequence[CalendarEvent]:
+        found = [e for e in self._events if e.start < end and e.end > start]
+        return sorted(found, key=lambda e: e.start)
+
+    async def add(self, event: CalendarEvent) -> CalendarEvent:
+        if self.fail:
+            raise self.fail
+        stored = (
+            event
+            if event.external_id
+            else replace(event, external_id=f"memory-{len(self._events) + 1}")
+        )
+        self._events.append(stored)
+        self.added.append(stored)
+        return stored
+
+
+__all__ = ["Calendar", "InMemoryTenantCalendar", "TenantCalendar"]

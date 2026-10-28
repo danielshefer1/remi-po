@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -136,3 +137,51 @@ async def test_live_calendar_defaults_off(db: Database) -> None:
         tenant = await get_tenant(session, tenant_id)
         assert tenant is not None
         assert tenant.live_calendar is True
+
+
+async def test_empty_external_id_means_no_id(db: Database) -> None:
+    tenant_id = await _tenant(db)
+    async with db.tenant_session(TenantId(tenant_id)) as session:
+        a = await events.add_event(
+            session, tenant_id, _event("A", NOW), source="remi", external_id=""
+        )
+        b = await events.add_event(
+            session, tenant_id, _event("B", NOW), source="remi", external_id=""
+        )
+    assert a.external_id
+    assert b.external_id
+    assert a.external_id != b.external_id
+
+
+async def test_replace_imported_sets_source_from_incoming(db: Database) -> None:
+    tenant_id = await _tenant(db)
+    far = NOW + timedelta(days=60)
+    async with db.tenant_session(TenantId(tenant_id)) as session:
+        await events.add_event(
+            session, tenant_id, _event("X", far), source="remi", external_id="g1"
+        )
+        await events.replace_imported(session, tenant_id, *WIDE, [_event("X", far, ext="g1")])
+        # It is a google copy now, so the next replace over its span drops it.
+        await events.replace_imported(
+            session, tenant_id, far - timedelta(days=1), far + timedelta(days=1), []
+        )
+        got = await events.events_between(session, tenant_id, NOW, far + timedelta(days=1))
+    assert got == []
+
+
+async def test_events_between_reads_in_callers_zone(db: Database) -> None:
+    tenant_id = await _tenant(db)
+    jerusalem = ZoneInfo("Asia/Jerusalem")
+    day = datetime(2026, 11, 2, tzinfo=jerusalem)
+    async with db.tenant_session(TenantId(tenant_id)) as session:
+        await events.add_event(
+            session,
+            tenant_id,
+            CalendarEvent("", "Holiday", day, day + timedelta(days=1), all_day=True),
+            source="remi",
+        )
+        got = await events.events_between(
+            session, tenant_id, day - timedelta(days=1), day + timedelta(days=2)
+        )
+    assert got[0].start.date() == day.date()
+    assert got[0].start == day

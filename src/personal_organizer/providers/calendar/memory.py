@@ -17,12 +17,15 @@ from personal_organizer.interfaces.calendar import CalendarEvent
 class InMemoryCalendar:
     def __init__(self, events: Iterable[CalendarEvent] = ()) -> None:
         self.events = list(events)
+        self.fail: Exception | None = None  # raised by every call, like a provider that is down
         self.calls: list[tuple[str, str, datetime, datetime]] = []
 
     async def list_events(
         self, account_id: str, user_id: str, *, start: datetime, end: datetime
     ) -> Sequence[CalendarEvent]:
         self.calls.append((account_id, user_id, start, end))
+        if self.fail:
+            raise self.fail
         found = [event for event in self.events if event.start < end and event.end > start]
         return sorted(found, key=lambda event: event.start)
 
@@ -30,6 +33,8 @@ class InMemoryCalendar:
         self, account_id: str, user_id: str, event: CalendarEvent
     ) -> CalendarEvent:
         del account_id, user_id  # every account shares the one set of events
+        if self.fail:
+            raise self.fail
         stored = replace(event, external_id=f"memory-{len(self.events) + 1}")
         self.events.append(stored)
         return stored

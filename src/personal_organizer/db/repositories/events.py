@@ -12,7 +12,7 @@ sync tick's cross-tenant scan, through the ``SECURITY DEFINER`` function of migr
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, tzinfo
 from typing import Final
 from uuid import UUID
 
@@ -31,12 +31,12 @@ IMPORT_AHEAD: Final = timedelta(days=90)
 SYNC_EVERY: Final = timedelta(hours=1)
 
 
-def _to_event(row: Event) -> CalendarEvent:
+def _to_event(row: Event, zone: tzinfo | None = None) -> CalendarEvent:
     return CalendarEvent(
         external_id=row.external_id or str(row.id),
         title=row.title,
-        start=row.starts_at,
-        end=row.ends_at,
+        start=row.starts_at.astimezone(zone),
+        end=row.ends_at.astimezone(zone),
         all_day=row.all_day,
         location=row.location,
     )
@@ -50,7 +50,11 @@ async def add_event(
     source: str,
     external_id: str | None = None,
 ) -> CalendarEvent:
-    """Store ``event``; its ``external_id`` is the given one, or the new row's id."""
+    """Store ``event``; its ``external_id`` is the given one, or the new row's id.
+
+    ``None`` and ``""`` both mean "no id" (the codebase's ``CalendarEvent("", ...)``).
+    """
+    external_id = external_id or None
     result = await session.execute(
         insert(Event)
         .values(
@@ -83,13 +87,14 @@ async def add_event(
 async def events_between(
     session: AsyncSession, tenant_id: UUID, start: datetime, end: datetime
 ) -> list[CalendarEvent]:
-    """Events overlapping ``[start, end)``, by start. One ending exactly at ``start`` is out."""
+    """Events overlapping ``[start, end)``, by start, in ``start``'s zone (so an all-day event
+    reads back on its own date). One ending exactly at ``start`` is out."""
     rows = await session.scalars(
         scoped(select(Event), Event, tenant_id)
         .where(Event.starts_at < end, Event.ends_at > start)
         .order_by(Event.starts_at, Event.id)
     )
-    return [_to_event(row) for row in rows]
+    return [_to_event(row, start.tzinfo) for row in rows]
 
 
 async def replace_imported(
@@ -105,6 +110,19 @@ async def replace_imported(
             Event.source == "google", Event.starts_at < end, Event.ends_at > start
         )
     )
+    await _upsert_google(session, tenant_id, events)
+
+
+async def upsert_google(session: AsyncSession, tenant_id: UUID, event: CalendarEvent) -> None:
+    """Store Google's copy of one event, replacing the row with its id. Unlike
+    :func:`replace_imported`, it deletes nothing: other copies in its span stay."""
+    await _upsert_google(session, tenant_id, [event])
+
+
+async def _upsert_google(
+    session: AsyncSession, tenant_id: UUID, events: Sequence[CalendarEvent]
+) -> None:
+    """Insert-or-update by Google id; ``source`` always follows the incoming row."""
     if not events:
         return
     stmt = pg_insert(Event).values(
@@ -131,6 +149,7 @@ async def replace_imported(
                 "ends_at": stmt.excluded.ends_at,
                 "all_day": stmt.excluded.all_day,
                 "location": stmt.excluded.location,
+                "source": stmt.excluded.source,
             },
         )
     )
@@ -161,4 +180,5 @@ __all__ = [
     "events_between",
     "mark_synced",
     "replace_imported",
+    "upsert_google",
 ]
