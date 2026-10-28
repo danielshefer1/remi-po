@@ -23,6 +23,7 @@ from personal_organizer.core.errors import (
 )
 from personal_organizer.core.types import TenantId
 from personal_organizer.db.engine import Database
+from personal_organizer.db.repositories import events as event_rows
 from personal_organizer.db.repositories import pending
 from personal_organizer.db.repositories.connections import bind_connection
 from personal_organizer.db.repositories.tenants import set_timezone
@@ -285,21 +286,35 @@ class TestConfirm:
         _, channel, _ = await _turn(db, owner_conn, tenant, _yes(), calendar)
         assert [m.body for m in channel.sent] == [t("calendar_disconnected", "he")]
 
-    async def test_no_connection_gets_the_d9_line(self, db: Database, owner_conn: Any) -> None:
+    async def test_confirm_without_google_stores_natively(
+        self, db: Database, owner_conn: Any
+    ) -> None:
         tenant = await _active(db, connected=False)
-        async with db.tenant_session(TenantId(tenant.id)) as session:
-            payload = {
-                "title": "x",
-                "start": "2026-10-13T09:00",
-                "end": "2026-10-13T10:00",
-                "all_day": False,
-                "location": None,
-            }
-            await pending.propose(session, tenant.id, kind=CREATE_EVENT, payload=payload, now=NOW)
         calendar = InMemoryCalendar()
+        await _propose(db, owner_conn, tenant, calendar)
         _, channel, _ = await _turn(db, owner_conn, tenant, _yes(), calendar)
-        assert [m.body for m in channel.sent] == [t("calendar_disconnected", "he")]
-        assert calendar.events == []
+        assert [m.body for m in channel.sent] == [ADDED]
+        assert calendar.events == []  # nothing goes to Google
+        async with db.tenant_session(TenantId(tenant.id)) as session:
+            [event] = await event_rows.events_between(
+                session, tenant.id, NOW, NOW + timedelta(days=2)
+            )
+        assert event.title == "רופא שיניים"
+        assert event.start.isoformat() == "2026-10-13T06:00:00+00:00"
+
+    async def test_a_confirmed_google_event_is_stored_once(
+        self, db: Database, owner_conn: Any
+    ) -> None:
+        tenant = await _active(db)
+        calendar = InMemoryCalendar()
+        await _propose(db, owner_conn, tenant, calendar)
+        await _turn(db, owner_conn, tenant, _yes(), calendar)
+        [created] = calendar.events
+        async with db.tenant_session(TenantId(tenant.id)) as session:
+            [event] = await event_rows.events_between(
+                session, tenant.id, NOW, NOW + timedelta(days=2)
+            )
+        assert event.external_id == created.external_id
 
     async def test_an_unavailable_confirm_call_is_retried_with_the_proposal_kept(
         self, db: Database, owner_conn: Any

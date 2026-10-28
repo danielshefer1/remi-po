@@ -170,8 +170,11 @@ class TestLastAttempt:
 
 
 class TestOnAllowed:
-    def test_the_agent_when_enabled(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        llm, strong, calendar, settings = object(), object(), object(), object()
+    @pytest.mark.parametrize("composio", [True, False])
+    def test_the_agent_when_enabled(self, monkeypatch: pytest.MonkeyPatch, composio: bool) -> None:
+        """With Composio off there is no Google: Remi's own calendar answers alone."""
+        llm, strong, calendar = object(), object(), object()
+        settings = SimpleNamespace(composio=SimpleNamespace(enabled=composio))
         monkeypatch.setattr(channel_tasks, "agent_llm", lambda: llm)
         monkeypatch.setattr(channel_tasks, "strong_llm", lambda: strong)
         monkeypatch.setattr(channel_tasks, "agent_calendar", lambda: calendar)
@@ -184,7 +187,7 @@ class TestOnAllowed:
             "db": db,
             "llm": llm,
             "strong": strong,
-            "calendar": calendar,
+            "calendar": calendar if composio else None,
             "settings": settings,
             "last_attempt": True,
         }

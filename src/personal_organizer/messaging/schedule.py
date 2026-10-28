@@ -26,6 +26,7 @@ class Schedule(Protocol):
     async def cancel(self, reminder_id: UUID, *, just_once: bool = False) -> bool: ...
     async def set_briefing(self, at: time | None) -> None: ...
     async def set_timezone(self, zone: str) -> None: ...
+    async def set_live_calendar(self, on: bool) -> None: ...
 
 
 class TenantSchedule:
@@ -73,16 +74,21 @@ class TenantSchedule:
         async with self._db.tenant_session(TenantId(self._tenant_id)) as session:
             await tenants.set_timezone(session, self._tenant_id, zone)
 
+    async def set_live_calendar(self, on: bool) -> None:
+        async with self._db.tenant_session(TenantId(self._tenant_id)) as session:
+            await tenants.set_live_calendar(session, self._tenant_id, on)
+
 
 class InMemorySchedule:
-    """The same behaviour in a list. ``reminders``, ``briefing_at`` and ``timezone`` are there
-    to assert on."""
+    """The same behaviour in a list. ``reminders``, ``briefing_at``, ``timezone`` and
+    ``live_calendar`` are there to assert on."""
 
     def __init__(self, now: datetime) -> None:
         self.now = now
         self.reminders: list[Reminder] = []
         self.briefing_at: time | None = time(7, 30)
         self.timezone: str | None = None
+        self.live_calendar = False
 
     async def add(self, text: str, due_at: datetime, rule: str | None = None) -> None:
         same = ("pending", text, due_at, rule)
@@ -132,6 +138,9 @@ class InMemorySchedule:
 
     async def set_timezone(self, zone: str) -> None:
         self.timezone = zone
+
+    async def set_live_calendar(self, on: bool) -> None:
+        self.live_calendar = on
 
 
 __all__ = ["InMemorySchedule", "Schedule", "TenantSchedule"]

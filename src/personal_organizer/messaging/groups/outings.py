@@ -53,6 +53,7 @@ from personal_organizer.messaging.agent import (
     outing_event,
     outing_line,
 )
+from personal_organizer.messaging.calendar import TenantCalendar
 from personal_organizer.messaging.conversation import MAX_TOKENS
 from personal_organizer.messaging.groups.addressing import group_key
 from personal_organizer.messaging.groups.answers import unanswered
@@ -185,8 +186,7 @@ async def handle_vote(
         zone = ZoneInfo(tenant.timezone or "UTC")
         text = await add_event(
             outing_event(poll, zone),
-            calendar=calendar,
-            account=account,
+            calendar=TenantCalendar(db, tenant_id, provider=calendar, account=account),
             zone=zone,
             language=tenant.language,
         )

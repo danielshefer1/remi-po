@@ -15,16 +15,16 @@ from uuid import UUID
 import pytest
 
 from personal_organizer.core.errors import (
-    CalendarNotConnectedError,
     CalendarProviderUnavailableError,
     LLMRejectedError,
     LLMUnavailableError,
 )
 from personal_organizer.core.types import TenantId
 from personal_organizer.db.engine import Database
+from personal_organizer.db.repositories import events as event_rows
 from personal_organizer.db.repositories.connections import bind_connection
 from personal_organizer.db.repositories.messages import record_inbound, record_outbound
-from personal_organizer.db.repositories.tenants import set_timezone
+from personal_organizer.db.repositories.tenants import set_live_calendar, set_timezone
 from personal_organizer.interfaces.calendar import CalendarEvent
 from personal_organizer.interfaces.llm import Message
 from personal_organizer.messaging.agent import AGENT_REPLY, agent_turn
@@ -47,6 +47,12 @@ pytestmark = [
 
 NOW = datetime(2026, 10, 12, 9, 0, tzinfo=UTC)
 TOMORROW = call("list_events", start="2026-10-13T00:00", end="2026-10-14T00:00")
+DENTIST = CalendarEvent(
+    "evt-1",
+    "רופא שיניים",
+    datetime(2026, 10, 13, 6, 0, tzinfo=UTC),
+    datetime(2026, 10, 13, 6, 30, tzinfo=UTC),
+)
 
 
 class Failing(InMemoryCalendar):
@@ -67,14 +73,20 @@ async def db(onboarding_settings: Settings, owner_conn: Any) -> AsyncIterator[Da
         await database.dispose()
 
 
-async def _active(db: Database, *, connected: bool = True) -> TenantState:
+async def _active(
+    db: Database, *, connected: bool = True, live: bool = False, stored: bool = False
+) -> TenantState:
+    """``stored`` keeps the dentist in Remi's calendar."""
     tenant_id = await new_tenant(db, phone=IL_PHONE, language="he", status="active", step=None)
     async with db.tenant_session(TenantId(tenant_id)) as session:
         await set_timezone(session, tenant_id, "Asia/Jerusalem")
+        await set_live_calendar(session, tenant_id, live)
         if connected:
             await bind_connection(
                 session, tenant_id, connected_account_id="ca_bound", auth_config_id="ac_test"
             )
+        if stored:
+            await event_rows.add_event(session, tenant_id, DENTIST, source="remi")
     state = await load_state(db, tenant_id)
     assert state is not None
     return state
@@ -122,14 +134,9 @@ class TestThroughTheGate:
     async def test_the_reply_is_sent_once_and_recorded(
         self, db: Database, owner_conn: Any, onboarding_settings: Settings
     ) -> None:
-        tenant = await _active(db)
-        dentist = CalendarEvent(
-            "evt-1",
-            "רופא שיניים",
-            datetime(2026, 10, 13, 6, 0, tzinfo=UTC),
-            datetime(2026, 10, 13, 6, 30, tzinfo=UTC),
-        )
-        calendar = InMemoryCalendar([dentist])
+        """With live reading on, Google is read for the window asked."""
+        tenant = await _active(db, live=True)
+        calendar = InMemoryCalendar([DENTIST])
         llm = ScriptedLLM(said("", TOMORROW), said("מחר ב-09:00 רופא שיניים."))
         channel = FakeOutbound(name="gowa")
         inbox_id = await insert_inbox(owner_conn, phone=IL_PHONE, body="מה יש לי מחר?")
@@ -159,6 +166,17 @@ class TestThroughTheGate:
             ("out", "מחר ב-09:00 רופא שיניים."),
         ]
 
+    async def test_without_live_reading_the_stored_copy_is_read(
+        self, db: Database, owner_conn: Any
+    ) -> None:
+        tenant = await _active(db, stored=True)
+        calendar = InMemoryCalendar()
+        llm = ScriptedLLM(said("", TOMORROW), said("מחר ב-09:00 רופא שיניים."))
+        _, channel, _ = await _turn(db, owner_conn, tenant, llm, calendar)
+        assert [m.body for m in channel.sent] == ["מחר ב-09:00 רופא שיניים."]
+        assert calendar.calls == []
+        assert '"start": "2026-10-13T09:00"' in llm.calls[1][-1].content
+
 
 class TestReRuns:
     async def test_a_re_run_after_the_send_calls_no_model_and_sends_nothing(
@@ -184,35 +202,26 @@ class TestReRuns:
 
 
 class TestFallbacks:
-    @pytest.mark.parametrize(
-        ("llm", "calendar"),
-        [
-            (ScriptedLLM(LLMUnavailableError("down")), InMemoryCalendar()),
-            (
-                ScriptedLLM(said("", TOMORROW)),
-                Failing(CalendarProviderUnavailableError("down")),
-            ),
-        ],
-        ids=["model down", "calendar down"],
-    )
     async def test_the_last_attempt_sends_the_fixed_line(
-        self, db: Database, owner_conn: Any, llm: ScriptedLLM, calendar: InMemoryCalendar
+        self, db: Database, owner_conn: Any
     ) -> None:
         tenant = await _active(db)
-        advance, channel, _ = await _turn(db, owner_conn, tenant, llm, calendar, last_attempt=True)
+        llm = ScriptedLLM(LLMUnavailableError("down"))
+        advance, channel, _ = await _turn(db, owner_conn, tenant, llm, last_attempt=True)
         fixed = t("agent_unavailable", "he")
         assert [m.body for m in channel.sent] == [fixed]
         assert advance == Advance(reply=fixed)
         assert await _kinds(owner_conn) == [(AGENT_REPLY, "accepted")]
 
-    async def test_a_down_calendar_raises_before_the_last_attempt(
+    async def test_a_down_google_serves_the_stored_copy(
         self, db: Database, owner_conn: Any
     ) -> None:
-        tenant = await _active(db)
+        tenant = await _active(db, live=True, stored=True)
         calendar = Failing(CalendarProviderUnavailableError("down"))
-        with pytest.raises(CalendarProviderUnavailableError):
-            await _turn(db, owner_conn, tenant, ScriptedLLM(said("", TOMORROW)), calendar)
-        assert await _kinds(owner_conn) == []
+        llm = ScriptedLLM(said("", TOMORROW), said("מחר ב-09:00 רופא שיניים."))
+        _, channel, _ = await _turn(db, owner_conn, tenant, llm, calendar)
+        assert [m.body for m in channel.sent] == ["מחר ב-09:00 רופא שיניים."]
+        assert '"start": "2026-10-13T09:00"' in llm.calls[1][-1].content
 
     async def test_a_refusal_sends_the_fixed_line_on_any_attempt(
         self, db: Database, owner_conn: Any
@@ -240,44 +249,64 @@ class TestFallbacks:
         assert advance.reply == sent.body
 
 
-class TestNoCalendar:
-    async def test_no_connection_gets_a_link_to_connect(
+class TestNoGoogle:
+    async def test_list_events_without_google_reads_native(
         self, db: Database, owner_conn: Any, onboarding_settings: Settings
     ) -> None:
-        tenant = await _active(db, connected=False)
+        tenant = await _active(db, connected=False, stored=True)
         calendar = InMemoryCalendar()
-        llm = ScriptedLLM(said("", TOMORROW), said("אני עוד לא רואה את היומן שלך."))
-        advance, channel, _ = await _turn(
-            db, owner_conn, tenant, llm, calendar, settings=onboarding_settings
-        )
-        [text] = [m.body for m in channel.sent]
-        url = text.rsplit("\n", 1)[-1]
-        line = t("calendar_not_connected", "he", url=url)
-        assert text == f"אני עוד לא רואה את היומן שלך.\n\n{line}"
-        assert link_payload(text).tenant_id == tenant.id
-        assert calendar.calls == []
-        # The link is a bearer credential: the history keeps a placeholder.
-        assert advance.reply == text.replace(url, LINK_PLACEHOLDER)
-
-    async def test_an_account_that_stopped_working_gets_a_link_to_reconnect(
-        self, db: Database, owner_conn: Any, onboarding_settings: Settings
-    ) -> None:
-        tenant = await _active(db)
-        calendar = Failing(CalendarNotConnectedError(401))
-        llm = ScriptedLLM(said("", TOMORROW), said(""))
+        llm = ScriptedLLM(said("", TOMORROW), said("מחר ב-09:00 רופא שיניים."))
         _, channel, _ = await _turn(
             db, owner_conn, tenant, llm, calendar, settings=onboarding_settings
         )
+        # No line about connecting Google: Remi's calendar is the calendar.
+        assert [m.body for m in channel.sent] == ["מחר ב-09:00 רופא שיניים."]
+        assert calendar.calls == []
+        assert '"start": "2026-10-13T09:00"' in llm.calls[1][-1].content
+
+    async def test_connect_calendar_sends_a_link(
+        self, db: Database, owner_conn: Any, onboarding_settings: Settings
+    ) -> None:
+        tenant = await _active(db, connected=False)
+        llm = ScriptedLLM(said("", call("connect_calendar")), said("בשמחה."))
+        advance, channel, _ = await _turn(db, owner_conn, tenant, llm, settings=onboarding_settings)
         [text] = [m.body for m in channel.sent]
-        assert text == t("calendar_not_connected", "he", url=text.rsplit("\n", 1)[-1])
+        url = text.rsplit("\n", 1)[-1]
+        assert text == f"בשמחה.\n\n{t('calendar_not_connected', 'he', url=url)}"
+        assert link_payload(text).tenant_id == tenant.id
+        # The link is a bearer credential: the history keeps a placeholder.
+        assert advance.reply == text.replace(url, LINK_PLACEHOLDER)
 
     async def test_without_settings_the_line_says_to_ask(
         self, db: Database, owner_conn: Any
     ) -> None:
         tenant = await _active(db, connected=False)
-        llm = ScriptedLLM(said("", TOMORROW), said(""))
+        llm = ScriptedLLM(said("", call("connect_calendar")), said(""))
         _, channel, _ = await _turn(db, owner_conn, tenant, llm)
         assert [m.body for m in channel.sent] == [t("calendar_disconnected", "he")]
+
+
+class TestLive:
+    @pytest.mark.parametrize("on", [True, False])
+    async def test_live_calendar_on_and_off(self, db: Database, owner_conn: Any, on: bool) -> None:
+        tenant = await _active(db, live=not on)
+        llm = ScriptedLLM(said("", call("live_calendar", on=on)), said("בסדר."))
+        await _turn(db, owner_conn, tenant, llm)
+        assert llm.calls[1][-1].content.startswith("ok: ")
+        state = await load_state(db, tenant.id)
+        assert state is not None
+        assert state.live_calendar is on
+
+    async def test_live_calendar_without_google_is_error(
+        self, db: Database, owner_conn: Any
+    ) -> None:
+        tenant = await _active(db, connected=False)
+        llm = ScriptedLLM(said("", call("live_calendar", on=True)), said("בסדר."))
+        await _turn(db, owner_conn, tenant, llm)
+        assert llm.calls[1][-1].content.startswith("error: ")
+        state = await load_state(db, tenant.id)
+        assert state is not None
+        assert state.live_calendar is False
 
 
 class TestContext:

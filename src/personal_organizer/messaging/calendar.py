@@ -103,8 +103,8 @@ class TenantCalendar:
 
 
 class InMemoryTenantCalendar:
-    """The same behaviour in a list. ``added`` is there to assert on; ``fail`` makes ``add``
-    raise, like a provider that is down."""
+    """The same behaviour in a list. ``added`` and ``calls`` (each window read) are there to
+    assert on; ``fail`` makes ``add`` raise, like a provider that is down."""
 
     def __init__(
         self,
@@ -117,9 +117,11 @@ class InMemoryTenantCalendar:
         self.connected = connected
         self.live = live
         self.added: list[CalendarEvent] = []
+        self.calls: list[tuple[datetime, datetime]] = []
         self.fail: Exception | None = None
 
     async def events(self, start: datetime, end: datetime) -> Sequence[CalendarEvent]:
+        self.calls.append((start, end))
         found = [e for e in self._events if e.start < end and e.end > start]
         zone = start.tzinfo
         found = [

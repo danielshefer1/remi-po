@@ -23,10 +23,10 @@ import anthropic
 import pytest
 
 from personal_organizer.db.models.group import GroupPoll
-from personal_organizer.db.models.tenant import CalendarConnection
 from personal_organizer.interfaces.calendar import CalendarEvent
 from personal_organizer.interfaces.llm import Message
 from personal_organizer.messaging.agent import respond
+from personal_organizer.messaging.calendar import InMemoryTenantCalendar
 from personal_organizer.messaging.conversation import converse
 from personal_organizer.messaging.groups.approval import approves
 from personal_organizer.messaging.groups.outings import POSTED, classify
@@ -36,7 +36,6 @@ from personal_organizer.messaging.language import detect_language
 from personal_organizer.messaging.notes import InMemoryNotes
 from personal_organizer.messaging.schedule import InMemorySchedule
 from personal_organizer.messaging.tenancy import TenantState
-from personal_organizer.providers.calendar.memory import InMemoryCalendar
 from personal_organizer.providers.llm.anthropic import AnthropicLLM
 
 pytestmark = pytest.mark.eval
@@ -45,7 +44,6 @@ NOW = datetime(2026, 10, 21, 10, 0, tzinfo=UTC)
 JERUSALEM = "Asia/Jerusalem"
 ZONE = ZoneInfo(JERUSALEM)
 LOCAL_NOW = NOW.astimezone(ZONE)
-ACCOUNT = CalendarConnection(connected_account_id="ca_eval", composio_user_id="eval")
 
 
 @pytest.fixture
@@ -313,8 +311,7 @@ async def test_mom_can_see_my_events_uses_the_name_in_my_notes(
         text,
         tenant,
         llm=llm,
-        calendar=InMemoryCalendar([]),
-        account=ACCOUNT,
+        calendar=InMemoryTenantCalendar(connected=True),
         now=NOW,
         schedule=InMemorySchedule(NOW),
         notes=InMemoryNotes("Mother: Rina"),

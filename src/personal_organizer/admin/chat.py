@@ -5,13 +5,14 @@ state: :func:`~personal_organizer.messaging.onboarding.next_reply` for an ``onbo
 :func:`~personal_organizer.messaging.agent.respond` for an ``active`` one. The history lives in
 memory and replies are printed, not sent. Nothing about the tenant is written: a step the
 conversation would take is applied in memory only. The one write is a connect link, issued or
-reused exactly as the worker would, so the printed link works.
+reused exactly as the worker would, so the printed link works; and, with live reading on, the
+stored copy of their Google events, refreshed as the worker would.
 
-An active tenant's calendar is read through Composio with their bound connection, as the
-worker does. ``--fake-calendar`` reads a few made-up events held in memory instead, so the
-agent can be tried without a connected Google account or a Composio key. A proposed event
-waits in memory for the next line, and a "yes" (as the model reads it, like the worker) adds
-it to that fake calendar only: on Google, po-chat writes nothing.
+An active tenant's calendar is the worker's: Remi's stored events, with Google read through
+Composio when it is on and they are connected. ``--fake-calendar`` reads a few made-up events
+held in memory instead, so the agent can be tried without a database calendar or a Composio
+key. A proposed event waits in memory for the next line, and a "yes" (as the model reads it,
+like the worker) adds it to that fake calendar only: po-chat never adds to a real one.
 
 For the model check of docs/plan-iteration-04.md: on Railway, ``railway ssh --service worker
 --environment staging``, then ``po-chat --tenant <uuid>``. It needs ``AGENT__API_KEY``.
@@ -32,11 +33,11 @@ from zoneinfo import ZoneInfo
 from personal_organizer.core.errors import ConfigError
 from personal_organizer.core.types import TenantId
 from personal_organizer.db.engine import Database
-from personal_organizer.db.models.tenant import CalendarConnection
 from personal_organizer.db.repositories.connections import active_connection
-from personal_organizer.interfaces.calendar import CalendarEvent, CalendarProvider
+from personal_organizer.interfaces.calendar import CalendarEvent
 from personal_organizer.interfaces.llm import LLMProvider, Message
 from personal_organizer.messaging.agent import AGENT_REPLY, add_event, event_summary, respond
+from personal_organizer.messaging.calendar import Calendar, InMemoryTenantCalendar, TenantCalendar
 from personal_organizer.messaging.confirm import CONFIRM_ADD, decide
 from personal_organizer.messaging.inbox import InboxRow
 from personal_organizer.messaging.notes import InMemoryNotes
@@ -47,7 +48,6 @@ from personal_organizer.messaging.tenancy import TenantState, load_state, phone_
 from personal_organizer.observability.logging import configure_logging
 from personal_organizer.onboarding.links import issue_or_reuse_link
 from personal_organizer.providers.calendar.composio import ComposioConnector
-from personal_organizer.providers.calendar.memory import InMemoryCalendar
 from personal_organizer.providers.llm.anthropic import AnthropicLLM
 from personal_organizer.settings import Settings, get_settings
 
@@ -57,7 +57,7 @@ REFUSED: Final = 1
 #: Printed for an agent turn with nothing to send, where the worker sends its fixed line.
 NO_ANSWER: Final = "(no usable answer: the worker sends its fallback)"
 
-#: Printed for a confirmed event when the calendar is Google's.
+#: Printed for a confirmed event when the calendar is a real one.
 NOT_ADDED: Final = "(not added: po-chat adds events to --fake-calendar only)"
 
 #: The channel name the in-memory rows carry. No channel by that name exists to send on.
@@ -133,8 +133,7 @@ async def agent_chat(
     tenant: TenantState,
     *,
     llm: LLMProvider,
-    calendar: CalendarProvider,
-    account: CalendarConnection | None,
+    calendar: Calendar,
     read: Callable[[str], str] = input,
     write: Callable[[str], None] = _out,
     connect_link: Callable[[], Awaitable[str]] | None = None,
@@ -160,10 +159,8 @@ async def agent_chat(
             event = waiting.pop()
             if picked != CONFIRM_ADD:
                 text = t("event_cancelled", language)
-            elif isinstance(calendar, InMemoryCalendar):
-                text = await add_event(
-                    event, calendar=calendar, account=account, zone=zone, language=language
-                )
+            elif isinstance(calendar, InMemoryTenantCalendar):
+                text = await add_event(event, calendar=calendar, zone=zone, language=language)
             else:
                 text = NOT_ADDED
         else:
@@ -174,7 +171,6 @@ async def agent_chat(
                 tenant,
                 llm=llm,
                 calendar=calendar,
-                account=account,
                 now=datetime.now(UTC),
                 proposed=waiting,
                 schedule=schedule,
@@ -206,28 +202,30 @@ async def _agent(
 ) -> int:
     async with db.tenant_session(TenantId(tenant.id)) as session:
         account = await active_connection(session, tenant.id)
-    calendar: CalendarProvider
+    calendar: Calendar
     if fake:
         zone = ZoneInfo(tenant.timezone or "UTC")
-        calendar = InMemoryCalendar(sample_events(datetime.now(UTC), zone))
-        # The in-memory calendar ignores the ids; any connection will do.
-        account = account or CalendarConnection(
-            connected_account_id="fake", composio_user_id=str(tenant.id)
+        calendar = InMemoryTenantCalendar(
+            sample_events(datetime.now(UTC), zone),
+            connected=account is not None,
+            live=tenant.live_calendar,
         )
         _out("(fake calendar: a few made-up events from today on)")
     else:
-        try:
-            calendar = ComposioConnector.from_settings(settings.composio)
-        except ConfigError:
-            _out("COMPOSIO__API_KEY is not set; try --fake-calendar")
-            return REFUSED
+        # As the worker: with Composio off, Remi's own calendar is the whole calendar.
+        provider = (
+            ComposioConnector.from_settings(settings.composio)
+            if settings.composio.enabled
+            else None
+        )
+        calendar = TenantCalendar(
+            db, tenant.id, provider=provider, account=account, live=tenant.live_calendar
+        )
 
     async def connect_link() -> str:
         return await issue_or_reuse_link(db, tenant.id, settings=settings, now=datetime.now(UTC))
 
-    return await agent_chat(
-        tenant, llm=llm, calendar=calendar, account=account, connect_link=connect_link
-    )
+    return await agent_chat(tenant, llm=llm, calendar=calendar, connect_link=connect_link)
 
 
 def _parser() -> argparse.ArgumentParser:

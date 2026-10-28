@@ -19,7 +19,6 @@ mentioned (Iteration 06); their gender, read from how they write in Hebrew, is s
 from __future__ import annotations
 
 import os
-import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, time, timedelta
@@ -30,10 +29,11 @@ from zoneinfo import ZoneInfo
 import anthropic
 import pytest
 
-from personal_organizer.db.models.tenant import CalendarConnection, Reminder
+from personal_organizer.db.models.tenant import Reminder
 from personal_organizer.interfaces.calendar import CalendarEvent
 from personal_organizer.interfaces.llm import Completion, LLMProvider, Message
 from personal_organizer.messaging.agent import respond
+from personal_organizer.messaging.calendar import InMemoryTenantCalendar
 from personal_organizer.messaging.confirm import (
     CONFIRM_ADD,
     CONFIRM_CANCEL,
@@ -42,10 +42,8 @@ from personal_organizer.messaging.confirm import (
 )
 from personal_organizer.messaging.language import detect_language
 from personal_organizer.messaging.notes import InMemoryNotes, gender
-from personal_organizer.messaging.onboarding_text import t
 from personal_organizer.messaging.schedule import InMemorySchedule
 from personal_organizer.messaging.tenancy import TenantState
-from personal_organizer.providers.calendar.memory import InMemoryCalendar
 from personal_organizer.providers.llm.anthropic import AnthropicLLM
 from personal_organizer.settings import AgentSettings
 
@@ -54,7 +52,6 @@ pytestmark = pytest.mark.eval
 NOW = datetime(2026, 10, 12, 2, 0, tzinfo=UTC)
 JERUSALEM = "Asia/Jerusalem"
 NEW_YORK = "America/New_York"
-ACCOUNT = CalendarConnection(connected_account_id="ca_eval", composio_user_id="eval")
 #: An end a minute short still covers: 23:59 for midnight.
 SLACK = timedelta(minutes=1)
 INJECTION = (
@@ -200,7 +197,9 @@ def _covered(windows: list[tuple[datetime, datetime]], needed: Window) -> bool:
 @pytest.mark.parametrize("scenario", SCENARIOS, ids=lambda s: s.name)
 async def test_calendar(scenario: Scenario, llm: AnthropicLLM) -> None:
     zone = ZoneInfo(scenario.zone)
-    calendar = InMemoryCalendar([*_events(zone), *scenario.extra])
+    calendar = InMemoryTenantCalendar(
+        [*_events(zone), *scenario.extra], connected=scenario.connected
+    )
     tenant = TenantState(
         id=UUID(int=1),
         status="active",
@@ -215,13 +214,12 @@ async def test_calendar(scenario: Scenario, llm: AnthropicLLM) -> None:
         tenant,
         llm=llm,
         calendar=calendar,
-        account=ACCOUNT if scenario.connected else None,
         now=NOW,
     )
     # The calls as local wall times in the tenant's zone.
     windows = [
         (start.astimezone(zone).replace(tzinfo=None), end.astimezone(zone).replace(tzinfo=None))
-        for _, _, start, end in calendar.calls
+        for start, end in calendar.calls
     ]
     assert reply.strip(), "an empty reply falls back to the fixed text"
     assert detect_language(reply) == scenario.language, reply
@@ -229,12 +227,6 @@ async def test_calendar(scenario: Scenario, llm: AnthropicLLM) -> None:
 
     if not scenario.covers:
         assert windows == [], reply
-        return
-    if not scenario.connected:
-        # Nothing was read, so the reply is the model's words over the fixed line, with no
-        # event times made up.
-        assert reply.endswith(t("calendar_disconnected", scenario.language)), reply
-        assert not re.search(r"\d{1,2}:\d{2}", reply), reply
         return
     assert any(_covered(windows, needed) for needed in scenario.covers), (windows, reply)
     assert scenario.within is not None
@@ -286,8 +278,7 @@ PROPOSALS = [
 async def test_propose(scenario: Proposal, llm: AnthropicLLM) -> None:
     """The model proposes the right local window; nothing is created without a "yes"."""
     zone = ZoneInfo(JERUSALEM)
-    calendar = InMemoryCalendar(_events(zone))
-    before = list(calendar.events)
+    calendar = InMemoryTenantCalendar(_events(zone), connected=True)
     tenant = TenantState(
         id=UUID(int=1),
         status="active",
@@ -303,11 +294,10 @@ async def test_propose(scenario: Proposal, llm: AnthropicLLM) -> None:
         tenant,
         llm=llm,
         calendar=calendar,
-        account=ACCOUNT,
         now=NOW,
         proposed=proposed,
     )
-    assert calendar.events == before, "propose_event must write nothing"
+    assert calendar.added == [], "propose_event must write nothing"
     [event] = proposed
     start = event.start.astimezone(zone).replace(tzinfo=None)
     end = event.end.astimezone(zone).replace(tzinfo=None)
@@ -390,8 +380,7 @@ async def _turn(
         text,
         tenant,
         llm=llm,
-        calendar=InMemoryCalendar(_events(ZoneInfo(JERUSALEM))),
-        account=ACCOUNT,
+        calendar=InMemoryTenantCalendar(_events(ZoneInfo(JERUSALEM)), connected=True),
         now=NOW,
         schedule=schedule,
         notes=notes,

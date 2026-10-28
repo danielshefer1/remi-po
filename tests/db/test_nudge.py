@@ -23,11 +23,11 @@ from personal_organizer.db.repositories import groups
 from personal_organizer.db.repositories.outings import create_poll, set_answer
 from personal_organizer.interfaces.calendar import CalendarEvent
 from personal_organizer.messaging.agent import respond
+from personal_organizer.messaging.calendar import InMemoryTenantCalendar
 from personal_organizer.messaging.groups.answers import TenantOutings
 from personal_organizer.messaging.groups.nudge import NUDGE_KIND, nudge_key, send_nudge
 from personal_organizer.messaging.onboarding_text import t
 from personal_organizer.messaging.tenancy import load_state
-from personal_organizer.providers.calendar.memory import InMemoryCalendar
 from personal_organizer.settings import Settings
 from tests.db.test_handle_inbound import FakeOutbound
 from tests.db.test_onboarding_connected import outbox, resolver
@@ -247,8 +247,7 @@ async def test_answer_outing_privately_stops_nudges(db: Database, owner_conn: An
         "I can't make it on Friday, I'm working late",
         tenant,
         llm=llm,
-        calendar=InMemoryCalendar(),
-        account=None,
+        calendar=InMemoryTenantCalendar(),
         now=NOW,
         outings=TenantOutings(db, noa, NOW),
     )
@@ -266,7 +265,7 @@ async def test_answer_outing_coming_adds_nothing(db: Database, owner_conn: Any) 
     poll, noa = await _outing(db, owner_conn)
     tenant = await load_state(db, noa)
     assert tenant is not None
-    calendar = InMemoryCalendar()
+    calendar = InMemoryTenantCalendar()
     llm = ScriptedLLM(
         said("", call("answer_outing", n=1, coming=True)),
         said("Great! Vote I'm in on the poll and it goes in your calendar."),
@@ -278,7 +277,6 @@ async def test_answer_outing_coming_adds_nothing(db: Database, owner_conn: Any) 
         tenant,
         llm=llm,
         calendar=calendar,
-        account=None,
         now=NOW,
         outings=TenantOutings(db, noa, NOW),
     )
@@ -286,7 +284,7 @@ async def test_answer_outing_coming_adds_nothing(db: Database, owner_conn: Any) 
     answer = await _answer(db, noa)
     assert answer is not None
     assert (answer.answer, answer.reason) == ("in", None)
-    assert calendar.events == []
+    assert calendar.added == []
     assert (poll, noa) not in await _due(db, NOW)
 
 
@@ -296,7 +294,7 @@ async def test_answer_outing_without_outings(db: Database, owner_conn: Any) -> N
     assert tenant is not None
     llm = ScriptedLLM(said("", call("answer_outing", n=1, coming=True)), said("Hmm."))
 
-    await respond([], "yes", tenant, llm=llm, calendar=InMemoryCalendar(), account=None, now=NOW)
+    await respond([], "yes", tenant, llm=llm, calendar=InMemoryTenantCalendar(), now=NOW)
 
     assert llm.calls[1][-1].content == "error: outings are not available here"
     assert "Family dinner" not in llm.calls[0][0].content
