@@ -236,7 +236,7 @@ class TestFallbacks:
         self, db: Database, owner_conn: Any
     ) -> None:
         tenant = await _active(db)
-        long = "\n".join(f"line {n}" for n in range(1000))
+        long = "\n".join(f"שורה {n}" for n in range(1000))
         advance, channel, _ = await _turn(db, owner_conn, tenant, ScriptedLLM(said(long)))
         [sent] = channel.sent
         assert len(sent.body) <= WHATSAPP_TEXT_LIMIT

@@ -84,7 +84,7 @@ from personal_organizer.messaging.conversation import converse
 from personal_organizer.messaging.groups.answers import Outings, TenantOutings
 from personal_organizer.messaging.groups.grants import Grants, TenantGrants
 from personal_organizer.messaging.inbox import InboxRow
-from personal_organizer.messaging.language import ENGLISH, HEBREW
+from personal_organizer.messaging.language import ENGLISH, HEBREW, detect_language
 from personal_organizer.messaging.notes import Notes, TenantNotes
 from personal_organizer.messaging.onboarding import LINK_PLACEHOLDER, Advance
 from personal_organizer.messaging.onboarding_text import t
@@ -1052,6 +1052,7 @@ async def respond(
             tools=TOOLS if strong is None else (*TOOLS, HAND_OFF_TOOL),
             run_tool=run_tool,
             llm=llm,
+            hebrew=tenant.language == HEBREW and detect_language(text) == HEBREW,
         )
     except _HandOff as handoff:
         assert strong is not None  # only raised with a strong model

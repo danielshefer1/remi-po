@@ -74,7 +74,7 @@ from personal_organizer.messaging.groups.gate import GROUP_REPLY, POLL_VOTE, REM
 from personal_organizer.messaging.groups.outings import handle_vote, read_answer, set_up_outing
 from personal_organizer.messaging.groups.prompt import group_prompt
 from personal_organizer.messaging.inbox import InboxRow
-from personal_organizer.messaging.language import detect_language
+from personal_organizer.messaging.language import HEBREW, detect_language
 from personal_organizer.messaging.onboarding_text import t
 from personal_organizer.messaging.outbox import already_sent, send_once, send_parts
 from personal_organizer.messaging.tenancy import phone_of
@@ -481,7 +481,13 @@ async def _answer(
         try:
             reply = (
                 await converse(
-                    history, text, system=system, tools=GROUP_TOOLS, run_tool=run_tool, llm=llm
+                    history,
+                    text,
+                    system=system,
+                    tools=GROUP_TOOLS,
+                    run_tool=run_tool,
+                    llm=llm,
+                    hebrew=language == HEBREW,
                 )
             ).strip()
             if "http" in reply.lower():
