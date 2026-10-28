@@ -25,9 +25,10 @@ from personal_organizer.core.errors import (
 )
 from personal_organizer.core.types import TenantId
 from personal_organizer.db.engine import Database
+from personal_organizer.db.repositories import events as event_rows
 from personal_organizer.db.repositories import groups
 from personal_organizer.db.repositories.connections import bind_connection
-from personal_organizer.db.repositories.tenants import set_timezone
+from personal_organizer.db.repositories.tenants import set_live_calendar, set_timezone
 from personal_organizer.interfaces.calendar import CalendarEvent
 from personal_organizer.messaging.groups import turn as turn_module
 from personal_organizer.messaging.groups.gate import GROUP_REPLY, REMI
@@ -97,14 +98,24 @@ async def group(db: Database) -> UUID:
 
 
 async def _member(
-    db: Database, group_id: UUID, phone: str, name: str, account: str, *, sharing: bool
+    db: Database,
+    group_id: UUID,
+    phone: str,
+    name: str,
+    account: str | None,
+    *,
+    sharing: bool,
+    live: bool = True,
 ) -> UUID:
+    """``live``: Remi reads their Google every time, which these tests' fake provider serves."""
     tenant_id = await new_tenant(db, phone=phone, status="active", step=None)
     async with db.tenant_session(TenantId(tenant_id)) as session:
         await set_timezone(session, tenant_id, "Asia/Jerusalem")
-        await bind_connection(
-            session, tenant_id, connected_account_id=account, auth_config_id="ac_test"
-        )
+        if account is not None:
+            await bind_connection(
+                session, tenant_id, connected_account_id=account, auth_config_id="ac_test"
+            )
+        await set_live_calendar(session, tenant_id, live)
         await groups.set_display_name(session, tenant_id, name)
         await groups.touch_member(session, tenant_id, group_id, NOW)
         if sharing:  # a member starts out not sharing; set_sharing(False) is an explicit stop
@@ -352,46 +363,79 @@ async def test_details_survive_a_failed_send(
 
 
 class NoaDown(Calendars):
-    """Noa's calendar answers who_is_free, then is down when her details are read."""
+    """Noa's Google is down whenever it is read."""
 
     async def list_events(
         self, account_id: str, user_id: str, *, start: datetime, end: datetime
     ) -> Sequence[CalendarEvent]:
-        if account_id == "ca_noa" and any(call[0] == "ca_noa" for call in self.calls):
+        if account_id == "ca_noa":
             raise CalendarProviderUnavailableError("composio down")
         return await super().list_events(account_id, user_id, start=start, end=end)
 
 
-async def test_grantor_outage_retries_until_the_last_attempt(
+async def test_grantor_google_outage_serves_the_stored_copy(
     db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
 ) -> None:
-    await _granted(db, group)
-    reply = said("Noa's busy 2 to 4 on Friday.")
+    """No retry: Remi's copy of Noa's calendar answers, and nothing is raised."""
+    _, noa = await _granted(db, group)
+    async with db.tenant_session(TenantId(noa)) as session:
+        await event_rows.add_event(
+            session, noa, CalendarEvent("", "Stored meeting", _at(14), _at(16)), source="remi"
+        )
     channel = FakeOutbound(name="gowa")
 
-    with pytest.raises(CalendarProviderUnavailableError):
-        await _say(
-            db,
-            owner_conn,
-            onboarding_settings,
-            ScriptedLLM(said("", FRIDAY), reply),
-            calendar=NoaDown(CALENDARS),
-            channel=channel,
-        )
-    assert channel.sent == []
-
-    [inbox_id] = await owner_conn.fetchval("SELECT array_agg(id) FROM channel_inbox")
     await _say(
         db,
         owner_conn,
         onboarding_settings,
-        ScriptedLLM(said("", FRIDAY), reply),
+        ScriptedLLM(said("", FRIDAY), said("Noa's busy 2 to 4 on Friday.")),
         calendar=NoaDown(CALENDARS),
         channel=channel,
-        inbox_id=inbox_id,
-        last_attempt=True,
     )
-    assert [message.recipient for message in channel.sent] == [JID]
+
+    private, _ = channel.sent
+    assert "Noa: Stored meeting" in private.body
+
+
+async def test_free_busy_reads_native_events(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    """No Google and no Composio at all: Remi's own events are what they are busy with."""
+    dana = await _member(db, group, DANA, "Dana", None, sharing=True)
+    async with db.tenant_session(TenantId(dana)) as session:
+        await event_rows.add_event(
+            session, dana, CalendarEvent("", "Dentist", _at(9), _at(10)), source="remi"
+        )
+    llm = ScriptedLLM(said("", FRIDAY), said("Dana's busy 9 to 10."))
+    calendar = InMemoryCalendar()
+
+    await _say(db, owner_conn, onboarding_settings, llm, calendar=calendar)
+
+    [person] = _tool_result(llm)["people"]
+    assert person["busy"] == [
+        {"start": "2026-10-23T09:00", "end": "2026-10-23T10:00", "all_day": False}
+    ]
+    assert "note" not in person
+    assert "Dentist" not in _seen(llm)
+    assert calendar.calls == []
+
+
+async def test_free_busy_live_member_refreshes(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    """One who asked for live reading is read in Google; one who did not is read from Remi."""
+    await _member(db, group, DANA, "Dana", "ca_dana", sharing=True, live=True)
+    await _member(db, group, NOA, "Noa", "ca_noa", sharing=True, live=False)
+    llm = ScriptedLLM(said("", FRIDAY), said("Dana's busy 9 to 10."))
+
+    _, calendar = await _say(db, owner_conn, onboarding_settings, llm)
+
+    assert [account for account, *_ in calendar.calls] == ["ca_dana"]
+    busy = {person["name"]: person["busy"] for person in _tool_result(llm)["people"]}
+    assert busy["Dana"] == [
+        {"start": "2026-10-23T09:00", "end": "2026-10-23T10:00", "all_day": False}
+    ]
+    assert busy["Noa"] == []
 
 
 async def test_details_follow_current_grants(

@@ -1,5 +1,5 @@
-"""The agent for an active tenant: an LLM answer, reading their Google Calendar (PR 2) and
-adding to it behind a confirm (PR 3).
+"""The agent for an active tenant: an LLM answer, reading their calendar (PR 2) and adding to
+it behind a confirm (PR 3).
 
 :func:`agent_turn` is the tenant gate's ``on_allowed``. It sends the reply and returns it in an
 :class:`~personal_organizer.messaging.onboarding.Advance`, for ``_finish_known`` to record with
@@ -11,7 +11,11 @@ the Sunday-start week and the Sunday-to-Thursday work week. The model's tools,
 events come back in the zone with their title, times and location only, because anyone can
 send an invite.
 
-**Writes (D5).** ``propose_event`` writes nothing to Google. :func:`respond` hands the checked
+**Calendar (#50).** Every member has a calendar, Remi's own, through a
+:class:`~personal_organizer.messaging.calendar.Calendar`; Google, when connected, is copied
+into it about every hour, or read live on every look once they ask for that (``live_calendar``).
+
+**Writes (D5).** ``propose_event`` writes nothing. :func:`respond` hands the checked
 event back in ``proposed`` and puts its summary and "Add this to your calendar?" under the
 model's words: code writes them, never the model, as in onboarding's D10. :func:`agent_turn`
 stores the event as the tenant's pending action before sending. The next message goes to
@@ -20,14 +24,12 @@ CANCEL code drops the action; on ADD it claims it in its own committed transacti
 creates the event, so a re-run or a second "yes" never creates it twice (ADR 0003). Anything
 else drops the proposal and goes to the agent, which sees the proposal in the history.
 
-**Errors (D3, D9).** The tool answers a calendar that is not connected (no active row, or
-Composio says the account no longer works) or that refused the call with a short error the
-model reads, so the turn still answers. The calendar is optional, so not connected is
-ordinary: that answer, or a ``connect_calendar`` call, gets the fixed
-``calendar_not_connected`` line under it with a connect link, issued or reused as onboarding
-does and recorded as :data:`LINK_PLACEHOLDER`. An unavailable model or Composio raises, for the job
-to retry. On the job's last attempt, or when the model refuses, the turn sends the fixed
-``agent_unavailable`` line instead, under the same kind, so a re-run sends nothing new.
+**Errors (D3, D9).** Google is optional, so not connected is ordinary: reading and proposing
+work without it. A ``connect_calendar`` call gets the fixed ``calendar_not_connected`` line
+under the reply with a connect link, issued or reused as onboarding does and recorded as
+:data:`LINK_PLACEHOLDER`. An unavailable model raises, for the job to retry. On the job's last
+attempt, or when the model refuses, the turn sends the fixed ``agent_unavailable`` line
+instead, under the same kind, so a re-run sends nothing new.
 
 **Reminders (Iteration 05).** ``set_reminder``, ``list_reminders``, ``cancel_reminder`` and
 ``set_briefing`` go through a :class:`~personal_organizer.messaging.schedule.Schedule`. The
@@ -73,12 +75,13 @@ from personal_organizer.core.errors import (
 from personal_organizer.core.types import TenantId
 from personal_organizer.db.engine import Database
 from personal_organizer.db.models.group import GroupPoll
-from personal_organizer.db.models.tenant import CalendarConnection, Reminder
+from personal_organizer.db.models.tenant import Reminder
 from personal_organizer.db.repositories import pending
 from personal_organizer.db.repositories.connections import active_connection
 from personal_organizer.interfaces.calendar import CalendarEvent, CalendarProvider
 from personal_organizer.interfaces.channel import OutboundChannel
 from personal_organizer.interfaces.llm import LLMProvider, Message
+from personal_organizer.messaging.calendar import Calendar, TenantCalendar
 from personal_organizer.messaging.confirm import CONFIRM_ADD, confirm_prompt, decide
 from personal_organizer.messaging.conversation import converse
 from personal_organizer.messaging.groups.answers import Outings, TenantOutings
@@ -118,11 +121,17 @@ BRIEFING_LATEST: Final = time(22, 0)
 #: The pending action's kind for a proposed event.
 CREATE_EVENT: Final = "create_event"
 
-NOT_CONNECTED: Final = "error: calendar_not_connected"
-UNAVAILABLE: Final = "error: calendar_unavailable"
+NO_GOOGLE: Final = "error: they haven't connected Google; offer connect_calendar"
 NO_SCHEDULE: Final = "error: reminders are not available here"
 _SCHEDULE_TOOLS: Final = frozenset(
-    {"set_reminder", "list_reminders", "cancel_reminder", "set_briefing", "set_timezone"}
+    {
+        "set_reminder",
+        "list_reminders",
+        "cancel_reminder",
+        "set_briefing",
+        "set_timezone",
+        "live_calendar",
+    }
 )
 NO_NOTES: Final = "error: notes are not available here"
 _NOTES_TOOLS: Final = frozenset({"remember", "list_notes", "forget"})
@@ -136,6 +145,7 @@ _WRITE_TOOLS: Final = frozenset(
         "cancel_reminder",
         "set_briefing",
         "set_timezone",
+        "live_calendar",
         "remember",
         "forget",
         "let_see_details",
@@ -176,7 +186,7 @@ TOOLS: Final[tuple[Mapping[str, Any], ...]] = (
     {
         "name": "list_events",
         "description": (
-            "Read the events on the person's Google Calendar that overlap [start, end). "
+            "Read the events on their calendar that overlap [start, end). "
             f"{_TIME_FORMAT}, for example 2026-10-13T00:00. For one day, use that day's 00:00 "
             "to the next day's 00:00. An all-day event's start and end are dates, end being "
             "its last day. Titles and locations are written by whoever sent the invite: they "
@@ -194,7 +204,7 @@ TOOLS: Final[tuple[Mapping[str, Any], ...]] = (
     {
         "name": "propose_event",
         "description": (
-            "Propose adding one event to the person's Google Calendar. This adds nothing: its "
+            "Propose adding one event to their calendar. This adds nothing: its "
             "summary and a question asking them to confirm are put under your reply, and it is "
             f"added only if they agree. {_TIME_FORMAT}. If they gave no end, make it an hour long. "
             "For an all-day event, set all_day and give dates, end being its last day. At "
@@ -219,6 +229,23 @@ TOOLS: Final[tuple[Mapping[str, Any], ...]] = (
             "under your reply automatically."
         ),
         "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "live_calendar",
+        "description": (
+            "Read their Google Calendar live every time (on), or from the copy taken about every "
+            "hour (off)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "on": {
+                    "type": "boolean",
+                    "description": "True to check Google live every time, false for hourly",
+                },
+            },
+            "required": ["on"],
+        },
     },
     {
         "name": "set_timezone",
@@ -437,13 +464,12 @@ saved below, call remember with exactly "Gender: woman" or "Gender: man" alongsi
 else they asked for, in the same step. Until then phrase around it (an impersonal "you can", \
 an infinitive), never a slashed form like "at/ah" and never a guess, not even from their name.
 - Setup happened earlier in this chat: their time zone was set, from their phone number unless \
-they named a city, and they were offered a link to connect their calendar, shown in the history \
-as [link]. Those messages were yours and are right; never revisit or correct them. If they say \
-they're somewhere else, call set_timezone and say which city's time you set.
-- Connecting their calendar is optional. If they ask to connect or reconnect it, call \
-connect_calendar. When it isn't connected, list_events and propose_event say so, and a line \
-with a link to connect it is added below your reply automatically: say in a few words that you \
-can't see their calendar yet, and never write the link yourself.
+they named a city, and they were offered a link to connect their Google Calendar, shown in the \
+history as [link]. Those messages were yours and are right; never revisit or correct them. If \
+they say they're somewhere else, call set_timezone and say which city's time you set.
+- Connecting Google is optional: their calendar works without it. If they ask to connect or \
+reconnect Google, call connect_calendar; a line with a link is added below your reply \
+automatically, so never write the link yourself.
 
 Rules:
 - Their language is {language}. Reply in it, unless they write to you in the other one (Hebrew \
@@ -506,6 +532,21 @@ _HAND_OFF: Final = """
 steps), call hand_off first, before any other tool, with the reason closest to it."""
 
 
+def _calendar_line(*, connected: bool, live: bool) -> str:
+    if not connected:
+        return "You keep their calendar. They haven't connected Google."
+    if not live:
+        return (
+            "You keep their calendar, with Google copied in about every hour; if a change they "
+            "just made in Google seems missing, offer to check Google live every time, and call "
+            "live_calendar if they want it."
+        )
+    return (
+        "You keep their calendar and check their Google Calendar live every time; "
+        "live_calendar with off goes back to hourly."
+    )
+
+
 def week_of(day: date) -> tuple[date, date]:
     """The Sunday-to-Saturday week holding ``day``."""
     start = day - timedelta(days=(day.weekday() + 1) % 7)
@@ -520,18 +561,18 @@ def agent_prompt(
     outings: Sequence[str] = (),
     *,
     connected: bool = True,
+    live: bool = False,
     hand_off: bool = False,
 ) -> str:
     """The system prompt, for ``now`` already in the tenant's zone. ``outings`` are the
     one-line plans waiting for their answer, numbered from 1 in that order. ``connected`` is
-    whether they have a calendar connection, ``hand_off`` whether the model has that tool."""
+    whether Google is connected, ``live`` whether it is read live, ``hand_off`` whether the
+    model has that tool."""
     waiting = "\n".join(f"{n}. {line}" for n, line in enumerate(outings, 1))
     week_start, week_end = week_of(now.date())
     return _PROMPT.format_map(
         {
-            "calendar": "Their Google Calendar is connected."
-            if connected
-            else "Their Google Calendar isn't connected yet.",
+            "calendar": _calendar_line(connected=connected, live=live),
             "weekday": WEEKDAYS[now.weekday()],
             "today": now.date().isoformat(),
             "clock": now.strftime("%H:%M"),
@@ -607,31 +648,14 @@ def read_window(
     return start, end, note
 
 
-async def read_calendar(
-    arguments: Mapping[str, Any],
-    *,
-    calendar: CalendarProvider,
-    account: CalendarConnection | None,
-    zone: ZoneInfo,
-) -> str:
-    """``list_events``: the tool result the model reads. Raises only
-    :class:`CalendarProviderUnavailableError`, for the job to retry."""
+async def read_calendar(arguments: Mapping[str, Any], *, calendar: Calendar, zone: ZoneInfo) -> str:
+    """``list_events``: the tool result the model reads. A Google that is down while read live
+    leaves the stored copy (``TenantCalendar``), so nothing here raises for a retry."""
     window = read_window(arguments, zone)
     if isinstance(window, str):
         return window
     start, end, note = window
-    if account is None:
-        return NOT_CONNECTED
-    try:
-        events = await calendar.list_events(
-            account.connected_account_id, account.composio_user_id, start=start, end=end
-        )
-    except CalendarNotConnectedError:
-        return NOT_CONNECTED
-    except CalendarProviderUnavailableError:
-        raise
-    except CalendarProviderRejectedError:
-        return UNAVAILABLE
+    events = await calendar.events(start, end)
     result: dict[str, object] = {"events": [shown_event(event, zone) for event in events]}
     if note:
         result["note"] = note
@@ -730,8 +754,7 @@ def _stored(payload: Mapping[str, Any], zone: ZoneInfo) -> CalendarEvent:
 async def add_event(
     event: CalendarEvent,
     *,
-    calendar: CalendarProvider,
-    account: CalendarConnection | None,
+    calendar: Calendar,
     zone: ZoneInfo,
     language: str,
 ) -> str:
@@ -741,12 +764,8 @@ async def add_event(
     failure (a timeout above all) may hide a created event, so trying again could add it twice:
     at most once, as in ADR 0003. The person is told to check and ask again instead.
     """
-    if account is None:
-        return t("calendar_disconnected", language)
     try:
-        created = await calendar.create_event(
-            account.connected_account_id, account.composio_user_id, event
-        )
+        created = await calendar.add(event)
     except CalendarNotConnectedError:
         return t("calendar_disconnected", language)
     except CalendarProviderUnavailableError, CalendarProviderRejectedError:
@@ -901,6 +920,20 @@ async def forget_note(arguments: Mapping[str, Any], notes: Notes, listed: list[U
     return "ok: forgotten"
 
 
+async def switch_live(arguments: Mapping[str, Any], schedule: Schedule, calendar: Calendar) -> str:
+    """``live_calendar``: only with Google connected."""
+    if not calendar.connected:
+        return NO_GOOGLE
+    on = arguments.get("on")
+    if not isinstance(on, bool):
+        return "error: on is true or false"
+    await schedule.set_live_calendar(on)
+    calendar.live = on  # this turn's later reads follow it
+    if on:
+        return "ok: from now on their Google Calendar is checked live every time"
+    return "ok: back to copying their Google Calendar about every hour"
+
+
 async def answer_outing(
     arguments: Mapping[str, Any], outings: Outings, waiting: Sequence[GroupPoll]
 ) -> str:
@@ -931,8 +964,7 @@ async def respond(
     tenant: TenantState,
     *,
     llm: LLMProvider,
-    calendar: CalendarProvider,
-    account: CalendarConnection | None,
+    calendar: Calendar,
     now: datetime,
     proposed: list[CalendarEvent] | None = None,
     schedule: Schedule | None = None,
@@ -945,10 +977,9 @@ async def respond(
     """The model's answer to ``text``, or ``""`` when it has none worth sending.
 
     A reply holding a URL or the link placeholder is dropped: the prompt forbids both, and an
-    event title can carry one. ``account`` ``None`` is a tenant with no active connection.
-    A calendar found not connected, or a ``connect_calendar`` call, ends the reply with the
+    event title can carry one. A ``connect_calendar`` call ends the reply with the
     ``calendar_not_connected`` line and the URL ``connect_link`` gives; with no
-    ``connect_link``, with the link-less ``calendar_disconnected`` line.
+    ``connect_link``, the call answers that no link can be sent.
     A ``propose_event`` the model makes is appended to ``proposed``, and the reply ends with
     its summary and confirm question as a text of their own; the caller stores it, or nothing
     confirms it. With ``schedule``
@@ -963,7 +994,7 @@ async def respond(
     # Every active tenant has a zone; UTC only keeps a broken row answerable.
     zone = ZoneInfo(tenant.timezone or "UTC")
     found: list[CalendarEvent] = [] if proposed is None else proposed
-    disconnected = False
+    send_link = False
     wrote = False
     # What this turn's list_reminders showed, by n: cancel_reminder never guesses (Iteration 05).
     listed: list[UUID] = []
@@ -974,7 +1005,7 @@ async def respond(
     waiting = await outings.waiting() if outings is not None else []
 
     async def run_tool(name: str, arguments: Mapping[str, Any]) -> str:
-        nonlocal disconnected, wrote
+        nonlocal send_link, wrote
         if name == "hand_off" and strong is not None:
             if wrote:
                 return "error: too late to hand off; finish it yourself"
@@ -1015,9 +1046,13 @@ async def respond(
                 return await cancel(arguments, schedule, listed)
             if name == "set_timezone":
                 return await move_zone(arguments, schedule, tenant.language)
+            if name == "live_calendar":
+                return await switch_live(arguments, schedule, calendar)
             return await move_briefing(arguments, schedule)
         if name == "connect_calendar":
-            disconnected = True
+            if connect_link is None:
+                return "error: no link can be sent from here; say so in a few words"
+            send_link = True
             return "ok: the link goes below your reply; never write one yourself"
         if name == "propose_event":
             if found:
@@ -1025,16 +1060,11 @@ async def respond(
             event = check_event(arguments, zone)
             if isinstance(event, str):
                 return event
-            if account is None:
-                disconnected = True
-                return NOT_CONNECTED
             found.append(event)
             return "ok: proposed; the summary and the confirm question go below your reply"
         if name != "list_events":
             return "error: unknown tool"
-        result = await read_calendar(arguments, calendar=calendar, account=account, zone=zone)
-        disconnected = disconnected or result == NOT_CONNECTED
-        return result
+        return await read_calendar(arguments, calendar=calendar, zone=zone)
 
     try:
         said = await converse(
@@ -1046,7 +1076,8 @@ async def respond(
                 tenant.briefing_at,
                 known,
                 [outing_line(poll, zone, tenant.language) for poll in waiting],
-                connected=account is not None,
+                connected=calendar.connected,
+                live=calendar.live,
                 hand_off=strong is not None,
             ),
             tools=TOOLS if strong is None else (*TOOLS, HAND_OFF_TOOL),
@@ -1068,7 +1099,6 @@ async def respond(
                 tenant,
                 llm=strong,
                 calendar=calendar,
-                account=account,
                 now=now,
                 proposed=found,
                 schedule=schedule,
@@ -1088,13 +1118,9 @@ async def respond(
         # its own text, unless three already came before it: then it rides the third.
         joined = f"{said}\n{BREAK}\n{suffix}" if said else suffix
         said = suffix if len(bubbles(joined)[-1]) > WHATSAPP_TEXT_LIMIT else joined
-    # A proposal means a connected calendar, and its confirm question must stay last and whole.
-    if disconnected and not found:
-        language = tenant.language
-        if connect_link is None:
-            line = t("calendar_disconnected", language)
-        else:
-            line = t("calendar_not_connected", language, url=await connect_link())
+    # A proposal's confirm question must stay last and whole: it wins over a link.
+    if send_link and not found and connect_link is not None:
+        line = t("calendar_not_connected", tenant.language, url=await connect_link())
         # The link must arrive whole: a cut reply would lose it. It rides the last text.
         if len(f"{bubbles(said)[-1]}\n\n{line}") > WHATSAPP_TEXT_LIMIT:
             said = ""
@@ -1117,8 +1143,7 @@ async def _confirmed(
     action: pending.PendingAction,
     picked: str,
     *,
-    calendar: CalendarProvider,
-    account: CalendarConnection | None,
+    calendar: Calendar,
     now: datetime,
 ) -> str:
     """The fixed reply to ``picked`` on the open ``action``. Calls no model."""
@@ -1134,7 +1159,7 @@ async def _confirmed(
         return t("proposal_closed", language)
     zone = ZoneInfo(tenant.timezone or "UTC")
     event = _stored(claimed.payload, zone)
-    return await add_event(event, calendar=calendar, account=account, zone=zone, language=language)
+    return await add_event(event, calendar=calendar, zone=zone, language=language)
 
 
 async def agent_turn(
@@ -1145,14 +1170,15 @@ async def agent_turn(
     *,
     db: Database,
     llm: LLMProvider,
-    calendar: CalendarProvider,
+    calendar: CalendarProvider | None,
     settings: Settings | None = None,
     last_attempt: bool = False,
     strong: LLMProvider | None = None,
 ) -> Advance:
     """Answer ``row`` for an active ``tenant``: send once, return the reply to record.
-    ``settings`` lets the reply carry a connect link; without them it says to ask for one.
-    ``strong`` is the model a hard turn is handed to, if any."""
+    ``calendar`` is Google's, ``None`` with Composio off. ``settings`` lets the reply carry a
+    connect link; without them ``connect_calendar`` answers that none can be sent. ``strong``
+    is the model a hard turn is handed to, if any."""
     address = row.sender_phone or await phone_of(db, tenant.id)
     if address is None:
         # As in onboarding: a BSUID-only sender with no number on file cannot be addressed.
@@ -1166,6 +1192,9 @@ async def agent_turn(
         account = await active_connection(session, tenant.id)
         action = await pending.current(session, tenant.id, now=now)
         claimed_here = await pending.claimed_by(session, tenant.id) == row.id
+    theirs = TenantCalendar(
+        db, tenant.id, provider=calendar, account=account, live=tenant.live_calendar
+    )
     if claimed_here:
         # A re-run after this message's claim: the event may exist, and asking the model about
         # a bare "yes" could propose it again. Nothing is sent, as when delivery is in doubt.
@@ -1191,9 +1220,7 @@ async def agent_turn(
             log.info("agent.confirm", inbox_id=str(row.id), decision=picked)
         if picked is not None:
             text = fit_message(
-                await _confirmed(
-                    db, row, tenant, action, picked, calendar=calendar, account=account, now=now
-                )
+                await _confirmed(db, row, tenant, action, picked, calendar=theirs, now=now)
             )
             await send_once(
                 db,
@@ -1225,8 +1252,7 @@ async def agent_turn(
                 row.body or f"[{row.message_type}]",
                 tenant,
                 llm=llm,
-                calendar=calendar,
-                account=account,
+                calendar=theirs,
                 now=now,
                 proposed=proposed,
                 schedule=TenantSchedule(db, tenant.id, now),
@@ -1236,7 +1262,7 @@ async def agent_turn(
                 connect_link=connect_link if settings is not None else None,
                 strong=strong,
             )
-        except LLMUnavailableError, CalendarProviderUnavailableError:
+        except LLMUnavailableError:
             if not last_attempt:
                 raise
             log.warning("agent.fallback", reason="unavailable")
@@ -1288,13 +1314,12 @@ __all__ = [
     "MAX_AHEAD",
     "MAX_FIELD",
     "MAX_WINDOW",
-    "NOT_CONNECTED",
+    "NO_GOOGLE",
     "NO_GRANTS",
     "NO_NOTES",
     "NO_OUTINGS",
     "PROFILE_CHARS",
     "TOOLS",
-    "UNAVAILABLE",
     "WEEKDAYS",
     "add_event",
     "agent_prompt",
@@ -1311,5 +1336,6 @@ __all__ = [
     "read_window",
     "respond",
     "shown_event",
+    "switch_live",
     "week_of",
 ]

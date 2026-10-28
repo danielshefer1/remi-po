@@ -50,7 +50,6 @@ message, with who you can see. "Everyone" only ever means everyone in the group:
 is in not_shared or stopped, name the people you can see instead.
 - stopped lists the people here who said to stop sharing. Say you can't see their calendars, \
 and don't ask them for an okay: it's their call to share again.
-- A person whose calendar isn't connected: say you can't see it right now.
 
 Okaying and names:
 - share_my_calendar turns on or off, for this group only, whether you show when the person who \

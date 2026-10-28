@@ -24,7 +24,7 @@ model can answer the who's-free question again; a no goes on to ``read_answer``.
 **Silence.** The model may reply with nothing (the message was for someone else, or for a
 person named Rami): nothing is sent. Not-addressed messages cost no model call beyond
 ``approves``' and ``read_answer``'s, each only when its sender has an open ask or outing. An
-unavailable model or Composio raises for the job to retry, and the last attempt answers with
+unavailable model raises for the job to retry, and the last attempt answers with
 the fixed ``agent_unavailable`` line, as the agent does.
 """
 
@@ -41,15 +41,12 @@ from zoneinfo import ZoneInfo
 import structlog
 
 from personal_organizer.core.errors import (
-    CalendarNotConnectedError,
-    CalendarProviderRejectedError,
-    CalendarProviderUnavailableError,
     LLMRejectedError,
     LLMUnavailableError,
 )
 from personal_organizer.core.types import TenantId
 from personal_organizer.db.engine import Database
-from personal_organizer.db.models.tenant import CalendarConnection, Tenant
+from personal_organizer.db.models.tenant import Tenant
 from personal_organizer.db.repositories.connections import active_connection
 from personal_organizer.db.repositories.groups import (
     add_context,
@@ -67,6 +64,7 @@ from personal_organizer.interfaces.calendar import CalendarEvent, CalendarProvid
 from personal_organizer.interfaces.channel import OutboundChannel
 from personal_organizer.interfaces.llm import LLMProvider, Message
 from personal_organizer.messaging.agent import day_label, fit_message, read_window, shown_event
+from personal_organizer.messaging.calendar import TenantCalendar
 from personal_organizer.messaging.conversation import converse
 from personal_organizer.messaging.groups.addressing import group_key
 from personal_organizer.messaging.groups.approval import approves
@@ -91,7 +89,6 @@ DEFAULT_ZONE: Final = "Asia/Jerusalem"
 MAX_NAME: Final = 40
 
 NOT_A_MEMBER: Final = "error: only people set up with Remi can do that"
-NOT_CONNECTED: Final = "calendar not connected"
 
 GROUP_TOOLS: Final[tuple[Mapping[str, Any], ...]] = (
     {
@@ -183,33 +180,13 @@ def _name(tenant: Tenant | None) -> str:
     return (tenant.display_name if tenant else None) or SOMEONE
 
 
-async def _events(
-    calendar: CalendarProvider,
-    account: CalendarConnection | None,
-    start: datetime,
-    end: datetime,
-) -> Sequence[CalendarEvent] | str:
-    """The account's events in the window, or a note on why there are none to read. Raises
-    :class:`CalendarProviderUnavailableError`."""
-    if account is None:
-        return NOT_CONNECTED
-    try:
-        return await calendar.list_events(
-            account.connected_account_id, account.composio_user_id, start=start, end=end
-        )
-    except CalendarNotConnectedError:
-        return NOT_CONNECTED
-    except CalendarProviderRejectedError:
-        return "calendar unavailable"
-
-
 async def free_busy(
     db: Database,
     group_id: UUID,
     start: datetime,
     end: datetime,
     *,
-    calendar: CalendarProvider,
+    calendar: CalendarProvider | None,
     now: datetime,
 ) -> dict[str, object]:
     """Who is busy when in ``[start, end)``, among the group's members who okayed it; the
@@ -224,17 +201,21 @@ async def free_busy(
     stopped: list[str] = []
     for tenant_id, sharing in members:
         async with db.tenant_session(TenantId(tenant_id)) as session:
-            name = _name(await get_tenant(session, tenant_id))
+            tenant = await get_tenant(session, tenant_id)
+            name = _name(tenant)
             account = await active_connection(session, tenant_id) if sharing else None
             asked = not sharing and await ask(session, tenant_id, group_id, now)
         if not sharing:
             (not_shared if asked else stopped).append(name)
             continue
-        events = await _events(calendar, account, start, end)
-        if isinstance(events, str):
-            people.append({"name": name, "busy": None, "note": events})
-        else:
-            people.append({"name": name, "busy": busy_blocks(events, zone)})
+        theirs = TenantCalendar(
+            db,
+            tenant_id,
+            provider=calendar,
+            account=account,
+            live=tenant.live_calendar if tenant else False,
+        )
+        people.append({"name": name, "busy": busy_blocks(await theirs.events(start, end), zone)})
     return {"people": people, "not_shared": not_shared, "stopped": stopped}
 
 
@@ -254,31 +235,30 @@ async def _send_details(
     asker: UUID,
     windows: Sequence[tuple[datetime, datetime]],
     *,
-    calendar: CalendarProvider,
+    calendar: CalendarProvider | None,
     zone: ZoneInfo,
     language: str,
-    last_attempt: bool,
 ) -> None:
-    """The granted people's events in ``windows``, privately to ``asker``, if there are any.
-    A calendar that is down raises for the job to retry, except on the last attempt."""
+    """The granted people's events in ``windows``, privately to ``asker``, if there are any."""
     async with db.system_session() as session:
         grantors = await detail_grantors(session, asker, group_id)
     lines: list[str] = []
     for grantor in grantors:
         async with db.tenant_session(TenantId(grantor)) as session:
-            name = _name(await get_tenant(session, grantor))
+            tenant = await get_tenant(session, grantor)
             account = await active_connection(session, grantor)
+        name = _name(tenant)
+        theirs = TenantCalendar(
+            db,
+            grantor,
+            provider=calendar,
+            account=account,
+            live=tenant.live_calendar if tenant else False,
+        )
         found: dict[tuple[str, datetime], CalendarEvent] = {}
         for start, end in windows:
-            try:
-                events = await _events(calendar, account, start, end)
-            except CalendarProviderUnavailableError:
-                if not last_attempt:
-                    raise  # nothing is sent yet: the retry runs the whole turn again
-                log.warning("group.details_unavailable", inbox_id=str(row.id))
-                events = ()
-            if not isinstance(events, str):
-                found.update(((event.external_id, event.start), event) for event in events)
+            events = await theirs.events(start, end)
+            found.update(((event.external_id, event.start), event) for event in events)
         ordered = sorted(found.values(), key=lambda event: event.start)
         lines += [_detail(name, event, zone, language) for event in ordered]
     if not lines:
@@ -334,7 +314,7 @@ async def group_turn(
     *,
     db: Database,
     llm: LLMProvider,
-    calendar: CalendarProvider,
+    calendar: CalendarProvider | None,
     last_attempt: bool = False,
 ) -> None:
     """Count a vote; read an okay or an answer said to the group; or answer ``row`` in the
@@ -412,7 +392,7 @@ async def _answer(
     *,
     db: Database,
     llm: LLMProvider,
-    calendar: CalendarProvider,
+    calendar: CalendarProvider | None,
     last_attempt: bool,
     approved: bool,
 ) -> None:
@@ -493,7 +473,7 @@ async def _answer(
             if "http" in reply.lower():
                 log.info("group.reply_dropped")
                 reply = t("agent_unavailable", language)
-        except LLMUnavailableError, CalendarProviderUnavailableError:
+        except LLMUnavailableError:
             if not last_attempt:
                 raise
             log.warning("group.fallback", reason="unavailable")
@@ -518,7 +498,6 @@ async def _answer(
             calendar=calendar,
             zone=zone,
             language=language,
-            last_attempt=last_attempt,
         )
     parts = [fit_message(part) for part in bubbles(reply)]
     if parts != [""]:

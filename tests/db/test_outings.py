@@ -19,6 +19,7 @@ from sqlalchemy import select, update
 from personal_organizer.core.types import TenantId
 from personal_organizer.db.engine import Database
 from personal_organizer.db.models.tenant import GroupMember, PollAnswer
+from personal_organizer.db.repositories import events as event_rows
 from personal_organizer.db.repositories import groups
 from personal_organizer.db.repositories.connections import bind_connection
 from personal_organizer.db.repositories.tenants import set_timezone
@@ -78,13 +79,14 @@ async def group(db: Database) -> UUID:
     return found.id
 
 
-async def _member(db: Database, group_id: UUID, phone: str, name: str, account: str) -> UUID:
+async def _member(db: Database, group_id: UUID, phone: str, name: str, account: str | None) -> UUID:
     tenant_id = await new_tenant(db, phone=phone, status="active", step=None)
     async with db.tenant_session(TenantId(tenant_id)) as session:
         await set_timezone(session, tenant_id, "Asia/Jerusalem")
-        await bind_connection(
-            session, tenant_id, connected_account_id=account, auth_config_id="ac_test"
-        )
+        if account is not None:
+            await bind_connection(
+                session, tenant_id, connected_account_id=account, auth_config_id="ac_test"
+            )
         await groups.set_display_name(session, tenant_id, name)
         await groups.touch_member(session, tenant_id, group_id, NOW)
         await groups.set_sharing(session, tenant_id, group_id, True)
@@ -199,6 +201,24 @@ async def test_vote_in_creates_event_in_voters_calendar(
     assert "Family dinner" in private.body
     # Nothing about it in the group: the poll and the reply only.
     assert [message.recipient for message in family.channel.sent].count(JID) == 2
+
+
+async def test_vote_in_adds_native_event_without_google(
+    db: Database, owner_conn: Any, family: Group, group: UUID
+) -> None:
+    await _member(db, group, DANA, "Dana", None)
+    noa = await _member(db, group, NOA, "Noa", None)
+    await family.set_up()
+
+    await family.vote(NOA, "I'm in")
+    await family.vote(NOA, "I'm in")
+
+    assert family.calendar.created_in == []
+    async with db.tenant_session(TenantId(noa)) as session:
+        [event] = await event_rows.events_between(session, noa, NOW, NOW + timedelta(days=7))
+    assert event.title == "Family dinner"
+    private = family.channel.sent[-1]
+    assert (private.recipient, "Family dinner" in private.body) == (NOA, True)
 
 
 async def test_vote_in_twice_creates_one_event(db: Database, family: Group, group: UUID) -> None:

@@ -51,15 +51,17 @@ them can help.
 
 Facts:
 - After setup they can set reminders, ask you to remember things, and get a short message \
-about their day every morning. With their Google Calendar connected they can also ask about it \
-in this chat (for example "what do I have tomorrow?") and add events to it ("add the dentist \
-tomorrow at 9"). An event is added only after they confirm it in the chat, never before. \
-Changing or deleting events is not available yet.
+about their day every morning. They also have a calendar here: they can ask about it in this \
+chat (for example "what do I have tomorrow?") and add events to it ("add the dentist tomorrow at \
+9"), and if they connect their Google Calendar, its events show here too. An event is added \
+only after they confirm it in the chat, never before. Changing or deleting events is not \
+available yet.
 - Only Google Calendar connects directly. Someone on Apple Calendar can add their Google \
 account to the Calendar app on their iPhone and connect that Google account here; the connect \
 page shows how. Outlook and others are not supported, for now.
-- Calendar access is needed to read and add their events. The Google sign-in is handled by \
-Composio, a service that keeps the access token, so this organizer never sees their password.
+- Google access is needed only for their Google Calendar events to show up here. The Google \
+sign-in is handled by Composio, a service that keeps the access token, so this organizer \
+never sees their password.
 - Google may show "Google hasn't verified this app". The app is private to this circle and has \
 not been through Google's review for public apps. It is safe to continue: tap Advanced, then \
 continue to the app.
@@ -112,14 +114,15 @@ URL, קישור או אפשרויות ממוספרות, ולעולם לא לבק
 
 עובדות:
 - אחרי ההגדרה אפשר לבקש תזכורות, לבקש ממך לזכור דברים, ולקבל כל בוקר הודעה קצרה על היום. \
-כשיומן Google מחובר אפשר גם לשאול עליו בצ'אט הזה (למשל "מה יש לי מחר?") ולהוסיף אליו \
-אירועים ("תוסיף רופא שיניים מחר בתשע"). אירוע נוסף רק אחרי שמאשרים אותו בצ'אט, אף פעם לא \
-לפני. שינוי או מחיקה של אירועים עדיין לא זמינים.
+יש גם יומן כאן בצ'אט: אפשר לשאול עליו (למשל "מה יש לי מחר?") ולהוסיף אליו אירועים \
+("תוסיף רופא שיניים מחר בתשע"), ואם מחברים את יומן Google, גם האירועים שלו יופיעו כאן. \
+אירוע נוסף רק אחרי שמאשרים אותו בצ'אט, אף פעם לא לפני. שינוי או מחיקה של אירועים עדיין לא \
+זמינים.
 - רק יומן Google מתחבר ישירות. מי שמשתמשים ביומן של Apple יכולים להוסיף את חשבון Google \
 לאפליקציית לוח השנה באייפון ולחבר כאן את אותו חשבון Google; דף החיבור מסביר איך. Outlook \
 ואחרים לא נתמכים, בינתיים.
-- הגישה ליומן נחוצה כדי לקרוא ולהוסיף אירועים. ההתחברות ל-Google מתבצעת דרך Composio, שירות \
-ששומר את אסימון הגישה, כך שהמארגן לעולם לא רואה את הסיסמה.
+- הגישה ל-Google נחוצה רק כדי שהאירועים מיומן Google יופיעו כאן. ההתחברות ל-Google מתבצעת \
+דרך Composio, שירות ששומר את אסימון הגישה, כך שהמארגן לעולם לא רואה את הסיסמה.
 - ייתכן ש-Google יציג "Google לא אימת את האפליקציה הזו". האפליקציה פרטית למעגל הזה ולא עברה את \
 הבדיקה של Google לאפליקציות ציבוריות. בטוח להמשיך: ללחוץ על "מתקדם" ואז להמשיך לאפליקציה.
 - השירות בהזמנה בלבד: אי אפשר להשתמש בו בלי הזמנה.

@@ -53,6 +53,7 @@ from personal_organizer.messaging.agent import (
     outing_event,
     outing_line,
 )
+from personal_organizer.messaging.calendar import TenantCalendar
 from personal_organizer.messaging.conversation import MAX_TOKENS
 from personal_organizer.messaging.groups.addressing import group_key
 from personal_organizer.messaging.groups.answers import unanswered
@@ -148,7 +149,7 @@ async def handle_vote(
     turn: GroupTurn,
     *,
     db: Database,
-    calendar: CalendarProvider,
+    calendar: CalendarProvider | None,
 ) -> None:
     """Store a tenant's vote; on "in", add the event to their calendar, once."""
     if turn.tenant_id is None or row.reply_id is None:
@@ -174,7 +175,7 @@ async def handle_vote(
         return
     if answer == "out" and earlier is not None and earlier.claimed_at is not None:
         text = t("outing_kept", tenant.language)
-    elif answer == "in" and account is not None:
+    elif answer == "in":
         # Committed before the create: a crash or retry after this never adds it again.
         # shortcut: as in agent_turn, a send that fails for sure after the create leaves them
         # without the "added" line. Store the line with the claim if that shows up in the logs.
@@ -185,13 +186,12 @@ async def handle_vote(
         zone = ZoneInfo(tenant.timezone or "UTC")
         text = await add_event(
             outing_event(poll, zone),
-            calendar=calendar,
-            account=account,
+            calendar=TenantCalendar(db, tenant_id, provider=calendar, account=account),
             zone=zone,
             language=tenant.language,
         )
     else:
-        return  # counted; with no calendar there is nothing to add or say
+        return  # counted; nothing to add or say
     phone = await phone_of(db, tenant_id)
     if phone is None:
         return

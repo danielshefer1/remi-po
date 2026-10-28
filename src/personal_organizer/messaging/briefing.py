@@ -3,16 +3,12 @@
 Once per local day, a short message of today's events and the reminders still to come. One
 model call with no tools writes it from the day as JSON data, so an invite's title can at worst
 make an odd sentence. Code sends a fixed list instead when the model refuses, writes something
-unusable, is down on the job's last attempt, or there is no model at all. An empty day is one
-fixed line, with no model call. The calendar is optional: a tenant with no connection gets the
-fixed list of their reminders, or no message on a day without any. A connection Composio says
-no longer works gives the reminders and the ``calendar_disconnected`` line. One that could not
-be read (refused, or down on the last
-attempt; before that it raises for a retry) gives the reminders and the
-``briefing_calendar_unavailable`` line, or nothing at all when there are none: never "nothing
-on your calendar" about a calendar nobody read. Links never go out: they are stripped from the
-titles in the fixed list, a reply holding one is dropped, and an event's location (free text
-anyone can put a link in) is not given to the model.
+unusable, is down on the job's last attempt, or there is no model at all.
+Events come from Remi's own calendar (``TenantCalendar``), so Google being down or
+disconnected changes nothing here: the stored copy is read, and a day with no events and no
+reminders sends nothing. Links never go out: they are stripped from the titles in the fixed
+list, a reply holding one is dropped, and an event's location (free text anyone can put a
+link in) is not given to the model.
 
 Like "You're all set", it answers no inbound message: it goes through ``messaging.proactive``
 and is keyed ``briefing:<tenant_id>:<local day>`` (ADR 0003), so a re-run sends nothing new.
@@ -33,9 +29,6 @@ from zoneinfo import ZoneInfo
 import structlog
 
 from personal_organizer.core.errors import (
-    CalendarNotConnectedError,
-    CalendarProviderRejectedError,
-    CalendarProviderUnavailableError,
     LLMRejectedError,
     LLMUnavailableError,
 )
@@ -49,6 +42,7 @@ from personal_organizer.db.repositories.reminders import mark_briefed, upcoming_
 from personal_organizer.interfaces.calendar import CalendarEvent, CalendarProvider
 from personal_organizer.interfaces.llm import LLMProvider, Message
 from personal_organizer.messaging.agent import LANGUAGE_NAMES, WEEKDAYS, fit_message, shown_event
+from personal_organizer.messaging.calendar import TenantCalendar
 from personal_organizer.messaging.inbound import ChannelResolver
 from personal_organizer.messaging.notes import gender
 from personal_organizer.messaging.onboarding_text import t
@@ -152,32 +146,6 @@ async def compose_briefing(
     return text
 
 
-async def _today(
-    calendar: CalendarProvider,
-    account_id: str,
-    user_id: str,
-    *,
-    start: datetime,
-    last_attempt: bool,
-) -> tuple[Sequence[CalendarEvent], str | None]:
-    """Today's events, or the key of the line saying why there are none we can trust."""
-    try:
-        events = await calendar.list_events(
-            account_id, user_id, start=start, end=start + timedelta(days=1)
-        )
-    except CalendarNotConnectedError:
-        return [], "calendar_disconnected"
-    except CalendarProviderRejectedError:
-        log.warning("briefing.calendar_rejected")
-        return [], "briefing_calendar_unavailable"
-    except CalendarProviderUnavailableError:
-        if not last_attempt:
-            raise
-        log.warning("briefing.calendar_unavailable")
-        return [], "briefing_calendar_unavailable"
-    return events, None
-
-
 async def send_briefing(
     tenant_id: UUID,
     day: date,
@@ -185,16 +153,15 @@ async def send_briefing(
     db: Database,
     channels: ChannelResolver,
     llm: LLMProvider | None,
-    calendar: CalendarProvider,
+    calendar: CalendarProvider | None,
     now: datetime,
     last_attempt: bool,
 ) -> str | None:
     """Send local ``day``'s briefing at most once.
 
     Returns the outbox status, or ``None`` when there is nowhere to send it, the tenant is no
-    longer active or already had it, or the calendar could not be read and there are no
-    reminders. Re-raises ``TransientChannelError``, and, before the
-    last attempt, ``LLMUnavailableError`` and ``CalendarProviderUnavailableError``, for the
+    longer active or already had it, or there are no events and no reminders. Re-raises
+    ``TransientChannelError``, and, before the last attempt, ``LLMUnavailableError``, for the
     task's retry strategy.
     """
     target = await proactive_target(db, tenant_id, channels=channels, event="briefing.skipped")
@@ -214,29 +181,21 @@ async def send_briefing(
             session, tenant_id, after=now, before=start + timedelta(days=1)
         )
         gendered = gender(await list_notes(session, tenant_id))
-    events: Sequence[CalendarEvent] = []
-    problem = None
-    if account is None and not reminders:
-        # No calendar and nothing to remind: a message would only say there is nothing.
-        async with db.tenant_session(TenantId(tenant_id)) as session:
-            await mark_briefed(session, tenant_id, day)
-        return None
-    if account is not None:
-        events, problem = await _today(
-            calendar,
-            account.connected_account_id,
-            account.composio_user_id,
-            start=start,
-            last_attempt=last_attempt,
-        )
-    if problem == "briefing_calendar_unavailable" and not reminders:
-        # Nothing we can vouch for: an empty-day line about an unread calendar would be wrong.
+    theirs = TenantCalendar(
+        db,
+        tenant_id,
+        provider=calendar,
+        account=account,
+        live=target.tenant.live_calendar,
+    )
+    events = await theirs.events(start, start + timedelta(days=1))
+    if not events and not reminders:
+        # Nothing on: a message would only say so.
         async with db.tenant_session(TenantId(tenant_id)) as session:
             await mark_briefed(session, tenant_id, day)
         return None
     text = ""
-    # Without a calendar the fixed list says it all: a model could call the day empty.
-    if (events or reminders) and llm is not None and problem is None and account is not None:
+    if (events or reminders) and llm is not None:
         try:
             text = await compose_briefing(
                 events,
@@ -252,10 +211,6 @@ async def send_briefing(
                 raise
         except LLMRejectedError:
             log.warning("briefing.llm_rejected")
-    if problem is not None:
-        line = t(problem, language)
-        listed = fallback_briefing([], reminders, zone=zone, language=language)
-        text = f"{listed}\n\n{line}" if reminders else line
     text = fit_message(text or fallback_briefing(events, reminders, zone=zone, language=language))
     status = await send_once(
         db,

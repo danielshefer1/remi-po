@@ -96,7 +96,7 @@ def strong_llm() -> AnthropicLLM | None:
 
 @functools.cache
 def agent_calendar() -> ComposioConnector:
-    """One Composio client for the process; the agent being on implies Composio is."""
+    """One Composio client for the process, built on first use."""
     return ComposioConnector.from_settings(get_settings().composio)
 
 
@@ -111,13 +111,15 @@ def _on_allowed(db: Database, *, last_attempt: bool) -> OnAllowed:
     """The agent's turn when it is enabled, else Iteration 02's acknowledgement."""
     llm = agent_llm()
     if llm is not None:
+        settings = get_settings()
         return functools.partial(
             agent_turn,
             db=db,
             llm=llm,
             strong=strong_llm(),
-            calendar=agent_calendar(),
-            settings=get_settings(),
+            # With Composio off, Remi's own calendar is the whole calendar.
+            calendar=agent_calendar() if settings.composio.enabled else None,
+            settings=settings,
             last_attempt=last_attempt,
         )
 
@@ -136,7 +138,11 @@ def _on_group(db: Database, *, last_attempt: bool) -> OnGroup | None:
     if llm is None:
         return None
     return functools.partial(
-        group_turn, db=db, llm=llm, calendar=agent_calendar(), last_attempt=last_attempt
+        group_turn,
+        db=db,
+        llm=llm,
+        calendar=agent_calendar() if get_settings().composio.enabled else None,
+        last_attempt=last_attempt,
     )
 
 

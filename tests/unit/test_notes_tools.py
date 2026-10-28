@@ -16,9 +16,9 @@ from personal_organizer.messaging.agent import (
     profile_lines,
     respond,
 )
+from personal_organizer.messaging.calendar import InMemoryTenantCalendar
 from personal_organizer.messaging.notes import MAX_NOTES, InMemoryNotes
 from personal_organizer.messaging.tenancy import TenantState
-from personal_organizer.providers.calendar.memory import InMemoryCalendar
 from tests.fixtures.llm import ScriptedLLM, call, said
 
 NOW = datetime(2026, 10, 16, 9, 0, tzinfo=UTC)
@@ -35,7 +35,7 @@ TENANT = TenantState(
 async def _run(notes: InMemoryNotes | None, *script: Completion) -> ScriptedLLM:
     llm = ScriptedLLM(*script)
     await respond(
-        [], "hi", TENANT, llm=llm, calendar=InMemoryCalendar(), account=None, now=NOW, notes=notes
+        [], "hi", TENANT, llm=llm, calendar=InMemoryTenantCalendar(), now=NOW, notes=notes
     )
     return llm
 

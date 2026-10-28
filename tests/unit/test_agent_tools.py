@@ -24,13 +24,11 @@ from personal_organizer.core.errors import (
     CalendarProviderUnavailableError,
     LLMUnavailableError,
 )
-from personal_organizer.db.models.tenant import CalendarConnection
 from personal_organizer.interfaces.calendar import CalendarEvent
 from personal_organizer.interfaces.llm import ToolCall
 from personal_organizer.messaging.agent import (
     MAX_WINDOW,
-    NOT_CONNECTED,
-    UNAVAILABLE,
+    TOOLS,
     add_event,
     agent_prompt,
     check_event,
@@ -39,16 +37,16 @@ from personal_organizer.messaging.agent import (
     respond,
     week_of,
 )
+from personal_organizer.messaging.calendar import InMemoryTenantCalendar
 from personal_organizer.messaging.confirm import confirm_prompt
 from personal_organizer.messaging.onboarding_text import t
+from personal_organizer.messaging.schedule import InMemorySchedule
 from personal_organizer.messaging.tenancy import TenantState
 from personal_organizer.messaging.text import WHATSAPP_TEXT_LIMIT, bubbles
-from personal_organizer.providers.calendar.memory import InMemoryCalendar
 from tests.fixtures.llm import ScriptedLLM, call, said
 
 JERUSALEM = ZoneInfo("Asia/Jerusalem")
 LONDON = ZoneInfo("Europe/London")
-ACCOUNT = CalendarConnection(connected_account_id="ca_bound", composio_user_id="tenant-uuid")
 TENANT = TenantState(
     id=UUID(int=1),
     status="active",
@@ -59,25 +57,14 @@ TENANT = TenantState(
 )
 
 
-class Failing(InMemoryCalendar):
-    def __init__(self, error: Exception) -> None:
-        super().__init__()
-        self.error = error
-
-    async def list_events(self, *args: Any, **kwargs: Any) -> list[CalendarEvent]:
-        raise self.error
+def _calendar(*events: CalendarEvent, connected: bool = True) -> InMemoryTenantCalendar:
+    return InMemoryTenantCalendar(events, connected=connected)
 
 
 async def _read(
-    calendar: InMemoryCalendar,
-    start: object,
-    end: object,
-    zone: ZoneInfo = JERUSALEM,
-    account: CalendarConnection | None = ACCOUNT,
+    calendar: InMemoryTenantCalendar, start: object, end: object, zone: ZoneInfo = JERUSALEM
 ) -> str:
-    return await read_calendar(
-        {"start": start, "end": end}, calendar=calendar, account=account, zone=zone
-    )
+    return await read_calendar({"start": start, "end": end}, calendar=calendar, zone=zone)
 
 
 def _event(start: datetime, end: datetime, **kw: Any) -> CalendarEvent:
@@ -111,25 +98,22 @@ class TestPrompt:
     async def test_respond_uses_the_tenant_zone(self) -> None:
         llm = ScriptedLLM(said("ok"))
         now = datetime(2026, 10, 12, 21, 30, tzinfo=UTC)
-        await respond(
-            [], "hi", TENANT, llm=llm, calendar=InMemoryCalendar(), account=ACCOUNT, now=now
-        )
+        await respond([], "hi", TENANT, llm=llm, calendar=_calendar(), now=now)
         assert "Tuesday 2026-10-13, 00:30" in llm.calls[0][0].content
 
 
 class TestZone:
     async def test_naive_local_times_get_the_tenant_zone(self) -> None:
-        calendar = InMemoryCalendar()
+        calendar = _calendar()
         await _read(calendar, "2026-10-13T00:00", "2026-10-14T00:00")
-        [(account, user, start, end)] = calendar.calls
-        assert (account, user) == ("ca_bound", "tenant-uuid")
+        [(start, end)] = calendar.calls
         assert start.isoformat() == "2026-10-13T00:00:00+03:00"
         assert end.isoformat() == "2026-10-14T00:00:00+03:00"
 
     async def test_a_date_alone_is_midnight(self) -> None:
-        calendar = InMemoryCalendar()
+        calendar = _calendar()
         await _read(calendar, "2026-10-13", "2026-10-14")
-        assert calendar.calls[0][2].isoformat() == "2026-10-13T00:00:00+03:00"
+        assert calendar.calls[0][0].isoformat() == "2026-10-13T00:00:00+03:00"
 
     @pytest.mark.parametrize(
         ("day", "offsets", "hours"),
@@ -141,21 +125,19 @@ class TestZone:
     async def test_a_day_across_a_dst_change(
         self, day: str, offsets: tuple[str, str], hours: int
     ) -> None:
-        calendar = InMemoryCalendar()
+        calendar = _calendar()
         following = (date.fromisoformat(day) + timedelta(days=1)).isoformat()
         await _read(calendar, f"{day}T00:00", f"{following}T00:00", zone=LONDON)
-        [(_, _, start, end)] = calendar.calls
+        [(start, end)] = calendar.calls
         assert (start.isoformat()[-6:], end.isoformat()[-6:]) == offsets
         assert end.astimezone(UTC) - start.astimezone(UTC) == timedelta(hours=hours)
 
     async def test_events_come_back_in_the_zone(self) -> None:
-        calendar = InMemoryCalendar(
-            [
-                _event(
-                    datetime(2026, 10, 13, 6, 0, tzinfo=UTC),
-                    datetime(2026, 10, 13, 6, 30, tzinfo=UTC),
-                )
-            ]
+        calendar = _calendar(
+            _event(
+                datetime(2026, 10, 13, 6, 0, tzinfo=UTC),
+                datetime(2026, 10, 13, 6, 30, tzinfo=UTC),
+            )
         )
         result = json.loads(await _read(calendar, "2026-10-13T00:00", "2026-10-14T00:00"))
         assert result == {
@@ -171,13 +153,11 @@ class TestZone:
 
     async def test_an_event_after_the_dst_change_keeps_its_wall_time(self) -> None:
         # 09:00 BST is 08:00 UTC; the day after the change it is 09:00 UTC.
-        calendar = InMemoryCalendar(
-            [
-                _event(
-                    datetime(2026, 3, 30, 8, 0, tzinfo=UTC),
-                    datetime(2026, 3, 30, 9, 0, tzinfo=UTC),
-                )
-            ]
+        calendar = _calendar(
+            _event(
+                datetime(2026, 3, 30, 8, 0, tzinfo=UTC),
+                datetime(2026, 3, 30, 9, 0, tzinfo=UTC),
+            )
         )
         result = json.loads(await _read(calendar, "2026-03-29", "2026-04-01", zone=LONDON))
         assert result["events"][0]["start"] == "2026-03-30T09:00"
@@ -186,22 +166,18 @@ class TestZone:
 class TestEventFields:
     async def test_title_times_location_only(self) -> None:
         start = datetime(2026, 10, 13, 20, 0, tzinfo=JERUSALEM)
-        calendar = InMemoryCalendar(
-            [_event(start, start + timedelta(hours=2), location="Tel Aviv")]
-        )
+        calendar = _calendar(_event(start, start + timedelta(hours=2), location="Tel Aviv"))
         [shown] = json.loads(await _read(calendar, "2026-10-13", "2026-10-14"))["events"]
         assert set(shown) == {"title", "start", "end", "all_day", "location"}
         assert shown["location"] == "Tel Aviv"
 
     async def test_an_all_day_event_shows_its_last_day(self) -> None:
-        calendar = InMemoryCalendar(
-            [
-                _event(
-                    datetime(2026, 10, 13, tzinfo=JERUSALEM),
-                    datetime(2026, 10, 16, tzinfo=JERUSALEM),
-                    all_day=True,
-                )
-            ]
+        calendar = _calendar(
+            _event(
+                datetime(2026, 10, 13, tzinfo=JERUSALEM),
+                datetime(2026, 10, 16, tzinfo=JERUSALEM),
+                all_day=True,
+            )
         )
         [shown] = json.loads(await _read(calendar, "2026-10-13", "2026-10-14"))["events"]
         assert (shown["start"], shown["end"], shown["all_day"]) == (
@@ -212,7 +188,7 @@ class TestEventFields:
 
     async def test_hebrew_titles_stay_readable(self) -> None:
         start = datetime(2026, 10, 13, 20, 0, tzinfo=JERUSALEM)
-        calendar = InMemoryCalendar([replace(_event(start, start), title="ארוחה עם נועה")])
+        calendar = _calendar(replace(_event(start, start), title="ארוחה עם נועה"))
         assert "ארוחה עם נועה" in await _read(calendar, "2026-10-13", "2026-10-14")
 
 
@@ -229,59 +205,37 @@ class TestArguments:
         ],
     )
     async def test_anything_but_naive_iso_is_an_error(self, start: object, end: object) -> None:
-        calendar = InMemoryCalendar()
+        calendar = _calendar()
         assert (await _read(calendar, start, end)).startswith("error: ")
         assert calendar.calls == []
 
     @pytest.mark.parametrize("end", ["2026-10-13T00:00", "2026-10-12T09:00"])
     async def test_end_must_be_after_start(self, end: str) -> None:
-        calendar = InMemoryCalendar()
+        calendar = _calendar()
         assert await _read(calendar, "2026-10-13T00:00", end) == ("error: end must be after start")
         assert calendar.calls == []
 
     async def test_a_wide_window_is_capped(self) -> None:
-        calendar = InMemoryCalendar()
+        calendar = _calendar()
         result = json.loads(await _read(calendar, "2026-10-01T00:00", "2027-10-01T00:00"))
-        [(_, _, start, end)] = calendar.calls
+        [(start, end)] = calendar.calls
         assert end - start == MAX_WINDOW
         assert "62 days" in result["note"]
 
     async def test_a_window_within_the_cap_has_no_note(self) -> None:
-        result = json.loads(await _read(InMemoryCalendar(), "2026-10-01", "2026-12-02"))
+        result = json.loads(await _read(_calendar(), "2026-10-01", "2026-12-02"))
         assert "note" not in result
-
-
-class TestErrors:
-    async def test_no_connection(self) -> None:
-        calendar = InMemoryCalendar()
-        assert await _read(calendar, "2026-10-13", "2026-10-14", account=None) == NOT_CONNECTED
-        assert calendar.calls == []
-
-    async def test_an_account_that_stopped_working(self) -> None:
-        failing = Failing(CalendarNotConnectedError(401))
-        assert await _read(failing, "2026-10-13", "2026-10-14") == NOT_CONNECTED
-
-    async def test_a_refusal(self) -> None:
-        failing = Failing(CalendarProviderRejectedError(400))
-        assert await _read(failing, "2026-10-13", "2026-10-14") == UNAVAILABLE
-
-    async def test_unavailable_is_raised_for_the_retry(self) -> None:
-        with pytest.raises(CalendarProviderUnavailableError):
-            await _read(
-                Failing(CalendarProviderUnavailableError("down")), "2026-10-13", "2026-10-14"
-            )
 
 
 class TestRespond:
     @staticmethod
-    async def _respond(llm: ScriptedLLM, account: CalendarConnection | None = ACCOUNT) -> str:
+    async def _respond(llm: ScriptedLLM, calendar: InMemoryTenantCalendar | None = None) -> str:
         return await respond(
             [],
             "What do I have tomorrow?",
             TENANT,
             llm=llm,
-            calendar=InMemoryCalendar(),
-            account=account,
+            calendar=calendar or _calendar(),
             now=datetime(2026, 10, 12, 9, 0, tzinfo=UTC),
         )
 
@@ -300,26 +254,29 @@ class TestRespond:
             "מה יש לי מחר?",
             TENANT,
             llm=llm,
-            calendar=InMemoryCalendar(),
-            account=ACCOUNT,
+            calendar=_calendar(),
             now=datetime(2026, 10, 12, 9, 0, tzinfo=UTC),
         )
         assert reply == "אין לך כלום מחר."
 
-    async def test_not_connected_adds_the_fixed_line(self) -> None:
+    async def test_list_events_without_google_reads_native(self) -> None:
+        """Remi keeps their calendar: without Google, list_events reads it, and no line about
+        connecting is added."""
+        start = datetime(2026, 10, 13, 9, 0, tzinfo=JERUSALEM)
+        calendar = _calendar(_event(start, start + timedelta(hours=1)), connected=False)
         llm = ScriptedLLM(
             said("", call("list_events", start="2026-10-13T00:00", end="2026-10-14T00:00")),
-            said("לא הצלחתי לקרוא את היומן."),
+            said("מחר בתשע רופא שיניים."),
         )
-        assert await self._respond(llm, account=None) == (
-            f"לא הצלחתי לקרוא את היומן.\n\n{t('calendar_disconnected', 'he')}"
-        )
+        assert await self._respond(llm, calendar) == "מחר בתשע רופא שיניים."
+        assert json.loads(llm.calls[1][-1].content)["events"][0]["title"] == "Dentist"
 
     async def test_no_tool_call_no_fixed_line(self) -> None:
-        assert await self._respond(ScriptedLLM(said("שלום!")), account=None) == "שלום!"
+        llm = ScriptedLLM(said("שלום!"))
+        assert await self._respond(llm, _calendar(connected=False)) == "שלום!"
 
     @staticmethod
-    async def _with_link(llm: ScriptedLLM, account: CalendarConnection | None) -> str:
+    async def _with_link(llm: ScriptedLLM, calendar: InMemoryTenantCalendar) -> str:
         async def connect_link() -> str:
             return "https://po.example/connect/TOKEN"
 
@@ -328,40 +285,35 @@ class TestRespond:
             "What do I have tomorrow?",
             TENANT,
             llm=llm,
-            calendar=InMemoryCalendar(),
-            account=account,
+            calendar=calendar,
             now=datetime(2026, 10, 12, 9, 0, tzinfo=UTC),
             connect_link=connect_link,
         )
 
-    async def test_not_connected_says_so_with_a_link_to_connect(self) -> None:
-        llm = ScriptedLLM(
-            said("", call("list_events", start="2026-10-13T00:00", end="2026-10-14T00:00")),
-            said("אני עוד לא רואה את היומן שלך."),
-        )
-        line = t("calendar_not_connected", "he", url="https://po.example/connect/TOKEN")
-        assert await self._with_link(llm, None) == f"אני עוד לא רואה את היומן שלך.\n\n{line}"
-
-    @pytest.mark.parametrize("account", [None, ACCOUNT])
-    async def test_connect_calendar_sends_the_link(
-        self, account: CalendarConnection | None
-    ) -> None:
+    @pytest.mark.parametrize("connected", [False, True])
+    async def test_connect_calendar_still_sends_link(self, connected: bool) -> None:
         """Asked for, it is sent even to a connected tenant: reconnecting is how a calendar
         that stopped working comes back."""
         llm = ScriptedLLM(said("", call("connect_calendar")), said("בשמחה."))
         line = t("calendar_not_connected", "he", url="https://po.example/connect/TOKEN")
-        assert await self._with_link(llm, account) == f"בשמחה.\n\n{line}"
+        assert await self._with_link(llm, _calendar(connected=connected)) == f"בשמחה.\n\n{line}"
         assert llm.calls[1][-1].content.startswith("ok:")
 
     async def test_an_overlong_answer_gives_way_to_the_link(self) -> None:
         llm = ScriptedLLM(said("", call("connect_calendar")), said("x" * 5000))
         line = t("calendar_not_connected", "he", url="https://po.example/connect/TOKEN")
-        assert await self._with_link(llm, None) == line
+        assert await self._with_link(llm, _calendar(connected=False)) == line
 
-    def test_the_prompt_says_whether_the_calendar_is_connected(self) -> None:
+    def test_the_prompt_says_what_google_does(self) -> None:
         now = datetime(2026, 10, 12, 12, 0, tzinfo=JERUSALEM)
-        assert "Calendar is connected." in agent_prompt("he", now)
-        assert "Calendar isn't connected yet." in agent_prompt("he", now, connected=False)
+        alone = agent_prompt("he", now, connected=False)
+        hourly = agent_prompt("he", now)
+        live = agent_prompt("he", now, live=True)
+        assert "They haven't connected Google" in alone
+        assert "about every hour" in hourly
+        assert "call live_calendar if they want it" in hourly
+        assert "check their Google Calendar live every time" in live
+        assert "live_calendar with off" in live
 
     @pytest.mark.parametrize("text", ["see https://evil.example", "open [link]"])
     async def test_a_url_or_the_link_placeholder_drops_the_reply(self, text: str) -> None:
@@ -377,20 +329,58 @@ class TestRespond:
             await self._respond(ScriptedLLM(LLMUnavailableError("down")))
 
 
+class TestLive:
+    @staticmethod
+    async def _respond(
+        llm: ScriptedLLM, calendar: InMemoryTenantCalendar, schedule: InMemorySchedule
+    ) -> str:
+        return await respond(
+            [],
+            "Always check Google live",
+            TENANT,
+            llm=llm,
+            calendar=calendar,
+            now=NOW,
+            schedule=schedule,
+        )
+
+    async def test_live_calendar_on_and_off(self) -> None:
+        calendar, schedule = _calendar(), InMemorySchedule(NOW)
+        on = ScriptedLLM(said("", call("live_calendar", on=True)), said("ok"))
+        await self._respond(on, calendar, schedule)
+        assert on.calls[1][-1].content.startswith("ok: ")
+        # This turn's later reads are live too.
+        assert (schedule.live_calendar, calendar.live) == (True, True)
+        off = ScriptedLLM(said("", call("live_calendar", on=False)), said("ok"))
+        await self._respond(off, calendar, schedule)
+        assert off.calls[1][-1].content.startswith("ok: ")
+        assert (schedule.live_calendar, calendar.live) == (False, False)
+
+    async def test_live_calendar_without_google_is_error(self) -> None:
+        calendar, schedule = _calendar(connected=False), InMemorySchedule(NOW)
+        llm = ScriptedLLM(said("", call("live_calendar", on=True)), said("ok"))
+        await self._respond(llm, calendar, schedule)
+        assert llm.calls[1][-1].content == (
+            "error: they haven't connected Google; offer connect_calendar"
+        )
+        assert (schedule.live_calendar, calendar.live) == (False, False)
+
+    async def test_on_must_be_true_or_false(self) -> None:
+        calendar, schedule = _calendar(), InMemorySchedule(NOW)
+        llm = ScriptedLLM(said("", call("live_calendar", on="yes")), said("ok"))
+        await self._respond(llm, calendar, schedule)
+        assert llm.calls[1][-1].content.startswith("error: ")
+        assert schedule.live_calendar is False
+
+    def test_the_tool_takes_on(self) -> None:
+        [tool] = [tool for tool in TOOLS if tool["name"] == "live_calendar"]
+        assert tool["input_schema"]["properties"]["on"]["type"] == "boolean"
+        assert tool["input_schema"]["required"] == ["on"]
+
+
 DENTIST = call(
     "propose_event", title="רופא שיניים", start="2026-10-13T09:00", end="2026-10-13T10:00"
 )
-
-
-class Creating(InMemoryCalendar):
-    def __init__(self, error: Exception | None = None, link: str | None = None) -> None:
-        super().__init__()
-        self.error, self.link = error, link
-
-    async def create_event(self, account_id: str, user_id: str, event: CalendarEvent) -> Any:
-        if self.error is not None:
-            raise self.error
-        return replace(await super().create_event(account_id, user_id, event), link=self.link)
 
 
 class TestPropose:
@@ -400,23 +390,21 @@ class TestPropose:
     async def _respond(
         llm: ScriptedLLM,
         proposed: list[CalendarEvent],
-        account: CalendarConnection | None = ACCOUNT,
-        calendar: InMemoryCalendar | None = None,
+        calendar: InMemoryTenantCalendar | None = None,
     ) -> str:
         return await respond(
             [],
             "Add a dentist tomorrow at nine",
             TENANT,
             llm=llm,
-            calendar=calendar or InMemoryCalendar(),
-            account=account,
+            calendar=calendar or _calendar(),
             now=datetime(2026, 10, 12, 9, 0, tzinfo=UTC),
             proposed=proposed,
         )
 
     async def test_code_puts_the_choice_under_the_model_words(self) -> None:
         proposed: list[CalendarEvent] = []
-        calendar = InMemoryCalendar()
+        calendar = _calendar()
         llm = ScriptedLLM(said("", DENTIST), said("להוסיף את זה?"))
         reply = await self._respond(llm, proposed, calendar=calendar)
         [event] = proposed
@@ -426,7 +414,7 @@ class TestPropose:
         )
         summary = "\n".join(["רופא שיניים", "יום שלישי 2026-10-13, 09:00-10:00"])
         assert bubbles(reply) == ["להוסיף את זה?", confirm_prompt(summary, "he")]
-        assert calendar.events == []  # nothing is written before the confirm
+        assert calendar.added == []  # nothing is written before the confirm
         assert llm.calls[1][-1].content.startswith("ok: proposed")
 
     async def test_after_three_texts_the_choice_rides_the_third(self) -> None:
@@ -457,13 +445,13 @@ class TestPropose:
         assert [event.title for event in proposed] == ["רופא שיניים"]
         assert llm.calls[2][-1].content.startswith("error: one proposal")
 
-    async def test_no_connection_proposes_nothing(self) -> None:
+    async def test_propose_without_google_is_allowed(self) -> None:
         proposed: list[CalendarEvent] = []
-        llm = ScriptedLLM(said("", DENTIST), said("אין חיבור ליומן."))
-        reply = await self._respond(llm, proposed, account=None)
-        assert proposed == []
-        assert llm.calls[1][-1].content == NOT_CONNECTED
-        assert reply == f"אין חיבור ליומן.\n\n{t('calendar_disconnected', 'he')}"
+        llm = ScriptedLLM(said("", DENTIST), said("להוסיף?"))
+        reply = await self._respond(llm, proposed, _calendar(connected=False))
+        assert [event.title for event in proposed] == ["רופא שיניים"]
+        assert llm.calls[1][-1].content.startswith("ok: proposed")
+        assert reply.endswith(confirm_prompt("", "he").strip())
 
     async def test_an_invalid_proposal_is_an_error_the_model_reads(self) -> None:
         proposed: list[CalendarEvent] = []
@@ -556,25 +544,24 @@ class TestAddEvent:
         datetime(2026, 10, 13, 9, tzinfo=JERUSALEM), datetime(2026, 10, 13, 10, tzinfo=JERUSALEM)
     )
 
-    async def _add(
-        self, calendar: InMemoryCalendar, account: CalendarConnection | None = ACCOUNT
-    ) -> str:
-        return await add_event(
-            self.EVENT, calendar=calendar, account=account, zone=JERUSALEM, language="en"
-        )
+    async def _add(self, calendar: InMemoryTenantCalendar) -> str:
+        return await add_event(self.EVENT, calendar=calendar, zone=JERUSALEM, language="en")
 
     async def test_added_with_the_link(self) -> None:
-        calendar = Creating(link="https://www.google.com/calendar/event?eid=abc")
+        calendar = Linked()
         summary = event_summary(self.EVENT, JERUSALEM, "en")
         assert await self._add(calendar) == (
             f"{t('event_added', 'en', summary=summary)}"
             "\nhttps://www.google.com/calendar/event?eid=abc"
         )
-        assert len(calendar.events) == 1
+        assert len(calendar.added) == 1
 
-    async def test_added_without_a_link(self) -> None:
+    @pytest.mark.parametrize("connected", [False, True])
+    async def test_added_without_a_link(self, connected: bool) -> None:
         summary = event_summary(self.EVENT, JERUSALEM, "en")
-        assert await self._add(Creating()) == t("event_added", "en", summary=summary)
+        calendar = _calendar(connected=connected)
+        assert await self._add(calendar) == t("event_added", "en", summary=summary)
+        assert len(calendar.added) == 1
 
     @pytest.mark.parametrize(
         ("error", "key"),
@@ -587,12 +574,17 @@ class TestAddEvent:
     async def test_a_failed_create_is_a_fixed_line_never_a_raise(
         self, error: Exception, key: str
     ) -> None:
-        assert await self._add(Creating(error)) == t(key, "en")
+        calendar = _calendar()
+        calendar.fail = error
+        assert await self._add(calendar) == t(key, "en")
 
-    async def test_no_connection(self) -> None:
-        calendar = Creating()
-        assert await self._add(calendar, account=None) == t("calendar_disconnected", "en")
-        assert calendar.events == []
+
+class Linked(InMemoryTenantCalendar):
+    """Google hands back a link to the event it created."""
+
+    async def add(self, event: CalendarEvent) -> CalendarEvent:
+        stored = await super().add(event)
+        return replace(stored, link="https://www.google.com/calendar/event?eid=abc")
 
 
 NOW = datetime(2026, 10, 16, 9, 0, tzinfo=UTC)
@@ -618,15 +610,13 @@ class _FakeGrants:
 async def test_stop_sharing_calendar_reaches_the_grants_port() -> None:
     grants = _FakeGrants()
     llm = ScriptedLLM(said("", ToolCall("c1", "stop_sharing_calendar", {})), said("Done."))
-    await respond(
-        [], "hi", TENANT, llm=llm, calendar=InMemoryCalendar(), account=None, now=NOW, grants=grants
-    )
+    await respond([], "hi", TENANT, llm=llm, calendar=_calendar(), now=NOW, grants=grants)
     assert grants.asked == [("stop_sharing", "")]
 
 
 async def test_without_grants_stop_sharing_calendar_says_so() -> None:
     llm = ScriptedLLM(said("", ToolCall("c1", "stop_sharing_calendar", {})), said("ok"))
-    await respond([], "hi", TENANT, llm=llm, calendar=InMemoryCalendar(), account=None, now=NOW)
+    await respond([], "hi", TENANT, llm=llm, calendar=_calendar(), now=NOW)
     assert llm.calls[1][-1].content == "error: sharing details is not available here"
 
 
@@ -640,15 +630,13 @@ async def test_the_sharing_tools_reach_the_grants_port() -> None:
         ),
         said("Done."),
     )
-    await respond(
-        [], "hi", TENANT, llm=llm, calendar=InMemoryCalendar(), account=None, now=NOW, grants=grants
-    )
+    await respond([], "hi", TENANT, llm=llm, calendar=_calendar(), now=NOW, grants=grants)
     assert grants.asked == [("let_see", "Rina"), ("stop", " Dana ")]
 
 
 async def test_without_grants_the_sharing_tools_say_so() -> None:
     llm = ScriptedLLM(said("", ToolCall("c1", "let_see_details", {"name": "Rina"})), said("ok"))
-    await respond([], "hi", TENANT, llm=llm, calendar=InMemoryCalendar(), account=None, now=NOW)
+    await respond([], "hi", TENANT, llm=llm, calendar=_calendar(), now=NOW)
     assert llm.calls[1][-1].content == "error: sharing details is not available here"
 
 
@@ -672,8 +660,7 @@ class TestHandOff:
             "Here is my timetable, remind me before each class",
             TENANT,
             llm=llm,
-            calendar=InMemoryCalendar(),
-            account=ACCOUNT,
+            calendar=_calendar(),
             now=NOW,
             proposed=proposed,
             grants=grants,

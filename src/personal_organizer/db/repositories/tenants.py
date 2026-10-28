@@ -65,6 +65,11 @@ async def set_timezone(session: AsyncSession, tenant_id: UUID, timezone: str) ->
     await _update(session, tenant_id, timezone=timezone)
 
 
+async def set_live_calendar(session: AsyncSession, tenant_id: UUID, on: bool) -> None:
+    """Read Google on every look (``True``), or serve the hourly copy."""
+    await _update(session, tenant_id, live_calendar=on)
+
+
 async def set_language(session: AsyncSession, tenant_id: UUID, language: str) -> None:
     """The person asked for the other language (D10). ``enrol``'s detection is the default."""
     await _update(session, tenant_id, language=language)
@@ -123,6 +128,7 @@ __all__ = [
     "primary_phone",
     "resolve_tenant",
     "set_language",
+    "set_live_calendar",
     "set_onboarding_step",
     "set_status",
     "set_timezone",

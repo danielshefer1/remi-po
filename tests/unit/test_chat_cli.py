@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any, cast
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
@@ -20,13 +21,12 @@ from personal_organizer.admin.chat import (
     sample_events,
 )
 from personal_organizer.db.engine import Database
-from personal_organizer.db.models.tenant import CalendarConnection
 from personal_organizer.interfaces.llm import Message
 from personal_organizer.messaging.agent import AGENT_REPLY
+from personal_organizer.messaging.calendar import InMemoryTenantCalendar
 from personal_organizer.messaging.onboarding import REPLY
 from personal_organizer.messaging.onboarding_text import t
 from personal_organizer.messaging.tenancy import TenantState
-from personal_organizer.providers.calendar.memory import InMemoryCalendar
 from personal_organizer.settings import Settings
 from tests.fixtures.llm import ScriptedLLM, call, said
 
@@ -107,8 +107,7 @@ class TestActiveTenants:
             first_message=False,
             timezone="Asia/Jerusalem",
         )
-        calendar = InMemoryCalendar()
-        account = CalendarConnection(connected_account_id="fake", composio_user_id="t")
+        calendar = InMemoryTenantCalendar()
         llm = ScriptedLLM(
             said("", call("list_events", start="2026-10-13T00:00", end="2026-10-14T00:00")),
             said("Nothing tomorrow."),
@@ -119,7 +118,6 @@ class TestActiveTenants:
             tenant,
             llm=llm,
             calendar=calendar,
-            account=account,
             read=lines("what's on tomorrow?", "and then?"),
             write=printed.append,
         )
@@ -145,10 +143,9 @@ class TestActiveTenants:
             first_message=False,
             timezone="Asia/Jerusalem",
         )
-        memory = InMemoryCalendar()
-        # Anything but the in-memory calendar stands for Google, which po-chat never writes.
-        calendar = memory if fake else cast(Any, object())
-        account = CalendarConnection(connected_account_id="fake", composio_user_id="t")
+        memory = InMemoryTenantCalendar()
+        # Anything but the in-memory calendar stands for a real one, which po-chat never writes.
+        calendar = memory if fake else cast(Any, SimpleNamespace(connected=True, live=False))
         dentist = call(
             "propose_event", title="Dentist", start="2026-10-13T09:00", end="2026-10-13T10:00"
         )
@@ -166,7 +163,6 @@ class TestActiveTenants:
             tenant,
             llm=llm,
             calendar=calendar,
-            account=account,
             read=lines("add the dentist tomorrow at 9", "yes", "and again", "no", "yes"),
             write=printed.append,
         )
@@ -179,6 +175,6 @@ class TestActiveTenants:
             f"bot [{AGENT_REPLY}]> {NO_ANSWER}",
         ]
         assert printed[0].endswith("Add this to your calendar?")
-        assert len(memory.events) == (1 if fake else 0)
+        assert len(memory.added) == (1 if fake else 0)
         # "yes" with nothing waiting is the agent's, like any other line.
         assert len(llm.calls) == 7

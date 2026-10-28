@@ -107,6 +107,7 @@ DEFINER_FUNCTIONS = {
     "create_tenant",
     "due_reminders",
     "due_briefings",
+    "due_syncs",
     "group_tenants",
     "peers_of",
     "detail_grantors",

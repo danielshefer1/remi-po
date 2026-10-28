@@ -24,9 +24,9 @@ from personal_organizer.messaging.agent import (
     remind,
     respond,
 )
+from personal_organizer.messaging.calendar import InMemoryTenantCalendar
 from personal_organizer.messaging.schedule import InMemorySchedule
 from personal_organizer.messaging.tenancy import TenantState
-from personal_organizer.providers.calendar.memory import InMemoryCalendar
 from tests.fixtures.llm import ScriptedLLM, call, said
 
 NOW = datetime(2026, 10, 15, 9, 0, tzinfo=UTC)  # 12:00 in Jerusalem
@@ -47,8 +47,7 @@ async def _respond(schedule: InMemorySchedule | None, *script: Completion) -> Sc
         "hi",
         TENANT,
         llm=llm,
-        calendar=InMemoryCalendar(),
-        account=None,
+        calendar=InMemoryTenantCalendar(),
         now=NOW,
         schedule=schedule,
     )
@@ -73,8 +72,7 @@ async def test_set_reminder_stores_it_in_the_tenants_zone() -> None:
         "remind me at 6 to call mom",
         TENANT,
         llm=llm,
-        calendar=InMemoryCalendar(),
-        account=None,
+        calendar=InMemoryTenantCalendar(),
         now=NOW,
         schedule=schedule,
     )
@@ -217,7 +215,7 @@ def test_the_prompt_states_the_morning_message_time() -> None:
 async def test_respond_puts_the_tenants_morning_time_in_the_prompt() -> None:
     llm = ScriptedLLM(said("ok"))
     tenant = replace(TENANT, briefing_at=time(8, 15))
-    await respond([], "hi", tenant, llm=llm, calendar=InMemoryCalendar(), account=None, now=NOW)
+    await respond([], "hi", tenant, llm=llm, calendar=InMemoryTenantCalendar(), now=NOW)
     assert "now set for 08:15" in llm.calls[0][0].content
 
 

@@ -38,6 +38,8 @@ CONNECTION_STATUSES: Final = ("active", "revoked", "failed")
 DIRECTIONS: Final = ("in", "out")
 REMINDER_STATUSES: Final = ("pending", "sent", "cancelled", "failed")
 POLL_ANSWERS: Final = ("in", "out")
+#: ``remi`` events are made here; ``google`` ones are imported copies. Issue #50.
+EVENT_SOURCES: Final = ("remi", "google")
 
 _GEN_UUID = text("gen_random_uuid()")
 
@@ -67,6 +69,8 @@ class Tenant(Base, TenantRoot):
     briefed_on: Mapped[date | None]
     #: What the person asked to be called ("call me Dani"); how groups name them. Iteration 07.
     display_name: Mapped[str | None] = mapped_column(Text)
+    #: Read Google on every look instead of the hourly copy. Issue #50.
+    live_calendar: Mapped[bool] = mapped_column(server_default=text("false"))
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
@@ -108,6 +112,8 @@ class CalendarConnection(Base, TenantMixin):
     auth_config_id: Mapped[str] = mapped_column(Text)
     status: Mapped[str] = mapped_column(Text, server_default=text("'active'"))
     connected_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    #: When Google's events were last copied into ``events``; ``NULL`` is never.
+    synced_at: Mapped[datetime | None]
 
 
 class OnboardingLink(Base, TenantMixin):
@@ -178,6 +184,31 @@ class Note(Base, TenantMixin):
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
 
+class Event(Base, TenantMixin):
+    """One calendar event: Remi's own, or an imported copy of Google's (issue #50).
+
+    Title, times and location only, as ``CalendarEvent`` carries. ``external_id`` is Google's id
+    for an import, the row id for ``remi``. ``rule`` is unused until #53.
+    """
+
+    __tablename__ = "events"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "external_id"),
+        CheckConstraint(check_in("source", EVENT_SOURCES), name="source"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=_GEN_UUID)
+    title: Mapped[str] = mapped_column(Text)
+    starts_at: Mapped[datetime]
+    ends_at: Mapped[datetime]
+    all_day: Mapped[bool] = mapped_column(server_default=text("false"))
+    location: Mapped[str | None] = mapped_column(Text)
+    rule: Mapped[str | None] = mapped_column(Text)
+    source: Mapped[str] = mapped_column(Text)
+    external_id: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
 class GroupMember(Base, TenantMixin):
     """A tenant seen in a group, and whether they okayed sharing busy/free there (Iteration 07).
 
@@ -233,6 +264,7 @@ class PollAnswer(Base, TenantMixin):
 __all__ = [
     "CONNECTION_STATUSES",
     "DIRECTIONS",
+    "EVENT_SOURCES",
     "LANGUAGES",
     "NETWORK_WHATSAPP",
     "ONBOARDING_STEPS",
@@ -241,6 +273,7 @@ __all__ = [
     "TENANT_STATUSES",
     "CalendarConnection",
     "DetailGrant",
+    "Event",
     "GroupMember",
     "Message",
     "Note",

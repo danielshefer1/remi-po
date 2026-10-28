@@ -9,9 +9,11 @@ never itself parsed as a template.
 ``connect_link`` ends setup: the calendar is optional, so it offers the link rather than
 asking for it, and ends with the URL on a line of its own. WhatsApp linkifies a bare URL
 reliably, but not one with a character glued to it. ``all_set`` is sent by the
-``onboarding:connected`` task once a calendar connects, whenever that is. ``agent_unavailable``,
-``calendar_not_connected`` (with a fresh link), ``calendar_disconnected`` (no link: the
-briefing and a failed add send it) and the confirm outcomes (``event_*``,
+``onboarding:connected`` task once Google connects, whenever that is (``all_set_pending``
+instead when the import on connect failed), and says that it is synced about hourly and can be
+read live instead, on request (#50). ``agent_unavailable``,
+``calendar_not_connected`` (the link to connect Google, or reconnect it),
+``calendar_disconnected`` (a failed add, with no link) and the confirm outcomes (``event_*``,
 ``proposal_closed``) are the agent's (``messaging.agent``). ``reminder`` is sent by the
 reminder job, and the ``briefing_*`` lines by the morning briefing (Iteration 05).
 ``voice_unheard`` answers a voice note that couldn't be heard (Iteration 06). The ``group_*``
@@ -30,8 +32,9 @@ from personal_organizer.messaging.language import ENGLISH
 
 _EN: Final = {
     "welcome": (
-        "Hi! I'm your personal organizer, right here in WhatsApp. I can remind you of things, "
-        "remember what matters to you and, if you connect it, keep an eye on your Google Calendar."
+        "Hi! I'm your personal organizer, right here in WhatsApp. I can keep your calendar, "
+        "remind you of things and remember what matters to you. If you use Google Calendar, "
+        "you can connect it too."
     ),
     "zone_guessed": (
         "I've set your clock to {zone} time, going by your number. If you're somewhere else, "
@@ -47,17 +50,22 @@ _EN: Final = {
         "soon, but I can always send you a new one:\n{url}"
     ),
     "all_set": (
-        "Your Google Calendar is connected! Ask me things like "
-        '"what do I have tomorrow?" or "add the dentist on Thursday at 9", and your morning '
-        "message will show your day's events too."
+        "Your Google Calendar is connected, and your events are in! I'll keep them in sync "
+        "about every hour. If you'd rather I check Google live every time, just say so."
+    ),
+    "all_set_pending": (
+        "Your Google Calendar is connected! Your events should be in within the hour, and after "
+        "that I'll keep them in sync about every hour. If you'd rather I check Google live every "
+        "time, just say so."
     ),
     "agent_unavailable": "Sorry, I couldn't answer just now. Try me again in a minute.",
     "calendar_not_connected": (
-        "Your calendar isn't connected, so I can't see it. You can connect it here:\n{url}"
+        "To connect your Google Calendar, just open the link below, and your Google events "
+        "will show right alongside what I keep for you:\n{url}"
     ),
     "calendar_disconnected": (
-        "Your Google Calendar connection has stopped working. Just ask me and I'll send you a "
-        "link to reconnect it."
+        "I couldn't add it: your Google Calendar connection has stopped working. Just ask me "
+        "and I'll send you a link to reconnect it."
     ),
     "event_added": "Done, it's in your calendar:\n{summary}",
     "event_cancelled": "No problem, I didn't add it.",
@@ -72,26 +80,21 @@ _EN: Final = {
     "briefing_intro": "Good morning! Here's your day:",
     "briefing_reminders_heading": "Reminders:",
     "briefing_empty": "Good morning! Nothing on your calendar today. Have a good one.",
-    "briefing_calendar_unavailable": (
-        "I couldn't reach your calendar this morning, so today's events aren't here. "
-        "Ask me later and I'll check again."
-    ),
     "group_details": "Here's what's on, just for you:",
     "group_shared_on": (
         "Done, from now on I'll show here when you're busy. Only the times, never what it is."
     ),
     "group_shared_off": "Okay, I won't show your schedule here anymore.",
     "outing_kept": (
-        "Got it. It's still in your calendar, though, since I can't take things out yet. "
-        "You can delete it there whenever you like."
+        "Got it. It's still in your calendar, though, since I can't take things out yet."
     ),
     "outing_nudge_fallback": "Hey, just checking if you're coming: {summary}. No pressure.",
 }
 
 _HE: Final = {
     "welcome": (
-        "היי! אני העוזר האישי שלך, ישר כאן בוואטסאפ. אפשר לבקש ממני תזכורות, לספר לי דברים "
-        "שכדאי שאזכור, ואם מחברים את יומן Google, גם לשאול מה יש בו ולהוסיף אליו דברים."
+        "היי! אני העוזר האישי שלך, ישר כאן בוואטסאפ. אני יכול לנהל לך את היומן, לשלוח לך "
+        "תזכורות ולזכור את מה שחשוב לך. ואם יש לך יומן Google, אפשר לחבר גם אותו."
     ),
     "zone_guessed": (
         "כיוונתי לך את השעון לשעון {zone}, לפי המספר שלך. ואם זה לא נכון, "
@@ -106,16 +109,21 @@ _HE: Final = {
         "כאן מתי שנוח. הקישור עובד פעם אחת ותוקפו קצר, אבל תמיד אפשר לבקש ממני חדש:\n{url}"
     ),
     "all_set": (
-        'יומן Google שלך מחובר! אפשר לשאול אותי למשל "מה יש לי מחר?" '
-        'או "תוסיף רופא שיניים ביום חמישי בתשע", ומעכשיו גם ההודעה של הבוקר תראה '
-        "את האירועים של היום."
+        "יומן Google שלך מחובר, והאירועים שלך כבר אצלי! אני מעדכן אותם מ-Google בערך פעם "
+        "בשעה. אם עדיף שאבדוק ישר ב-Google בכל פעם, מספיק לבקש."
+    ),
+    "all_set_pending": (
+        "יומן Google שלך מחובר! האירועים שלך אמורים להגיע אליי תוך שעה, ומשם אעדכן אותם "
+        "מ-Google פעם בשעה בערך. אם עדיף שאבדוק ישר ב-Google בכל פעם, מספיק לבקש."
     ),
     "agent_unavailable": "סליחה, לא הצלחתי לענות כרגע. אפשר לנסות שוב בעוד דקה.",
     "calendar_not_connected": (
-        "היומן שלך לא מחובר, אז אני לא רואה אותו. אפשר לחבר אותו כאן:\n{url}"
+        "כדי לחבר את יומן Google, נכנסים לקישור כאן למטה, ואז האירועים מ-Google יופיעו לצד "
+        "מה שכבר שמור אצלי:\n{url}"
     ),
     "calendar_disconnected": (
-        "החיבור ליומן Google שלך הפסיק לעבוד. אפשר לבקש ממני ואשלח קישור לחבר אותו מחדש."
+        "לא הצלחתי להוסיף את זה, כי החיבור ליומן Google שלך הפסיק לעבוד. אפשר לבקש ממני "
+        "ואשלח קישור לחבר אותו מחדש."
     ),
     "event_added": "בוצע, זה ביומן:\n{summary}",
     "event_cancelled": "אין בעיה, לא הוספתי.",
@@ -128,17 +136,10 @@ _HE: Final = {
     "briefing_intro": "בוקר טוב! זה מה שיש לך היום:",
     "briefing_reminders_heading": "תזכורות:",
     "briefing_empty": "בוקר טוב! היומן פנוי היום. שיהיה יום טוב.",
-    "briefing_calendar_unavailable": (
-        "לא הצלחתי להגיע ליומן שלך הבוקר, אז האירועים של היום לא מופיעים כאן. "
-        "אפשר לשאול אותי שוב בהמשך ואבדוק."
-    ),
     "group_details": "הנה מה שיש, רק בשבילך:",
     "group_shared_on": "סגור, מעכשיו אראה כאן מתי יש לך משהו. רק את השעות, אף פעם לא מה זה.",
     "group_shared_off": "בסדר, מעכשיו לא אראה כאן מתי יש לך משהו.",
-    "outing_kept": (
-        "קיבלתי. רק שזה עדיין ביומן שלך, כי אני עוד לא יכול להוריד משם דברים. "
-        "אפשר למחוק את זה ביומן מתי שנוח."
-    ),
+    "outing_kept": "קיבלתי. רק שזה עדיין ביומן שלך, כי אני עוד לא יכול להוריד משם דברים.",
     "outing_nudge_fallback": "היי, רציתי לבדוק אם מסתדר לך להגיע: {summary}. בלי לחץ.",
 }
 

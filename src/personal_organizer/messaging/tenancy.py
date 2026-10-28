@@ -72,6 +72,8 @@ class TenantState:
     timezone: str | None = None
     #: Local time of the morning briefing; ``None`` is off (Iteration 05).
     briefing_at: time | None = None
+    #: Google is read on every look, not only the hourly copy (#50).
+    live_calendar: bool = False
 
 
 def network_for(channel: str) -> str:
@@ -183,6 +185,7 @@ async def load_state(db: Database, tenant_id: UUID) -> TenantState | None:
         language=tenant.language,
         timezone=tenant.timezone,
         briefing_at=tenant.briefing_at,
+        live_calendar=tenant.live_calendar,
         first_message=first,
     )
 
