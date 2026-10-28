@@ -314,7 +314,8 @@ class TestSplitReply:
             calendar=InMemoryCalendar(),
         )
         assert [m.body for m in channel.sent] == ["Got it."]
-        assert advance.reply and advance.reply.startswith("Got it.\n\n")
+        assert advance.reply is not None
+        assert advance.reply.startswith("Got it.\n\n")
         async with db.tenant_session(TenantId(tenant.id)) as session:
             assert await current(session, tenant.id, now=NOW) is None
 
