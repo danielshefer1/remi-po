@@ -121,12 +121,7 @@ def register(app: procrastinate.App) -> None:
         pass_context=True,
     )
     async def tick(context: procrastinate.JobContext, timestamp: int) -> None:
-        # Briefings read the calendar through Composio; without it there is no day to describe.
-        await run_tick(
-            context.app,
-            datetime.fromtimestamp(timestamp, UTC),
-            briefings=get_settings().composio.enabled,
-        )
+        await run_tick(context.app, datetime.fromtimestamp(timestamp, UTC), briefings=True)
 
     @app.task(queue=Queue.WEBHOOKS.value, name=REMINDER_TASK, retry=INBOUND_RETRY)
     async def reminder(reminder_id: str, tenant_id: str) -> None:
@@ -148,7 +143,7 @@ def register(app: procrastinate.App) -> None:
             db=get_database(),
             channels=get_outbound_channel,
             llm=agent_llm(),
-            calendar=agent_calendar(),
+            calendar=agent_calendar() if get_settings().composio.enabled else None,
             now=datetime.now(UTC),
             last_attempt=is_last_attempt(context.job.attempts),
         )

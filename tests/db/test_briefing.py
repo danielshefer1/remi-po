@@ -2,8 +2,8 @@
 
 The model writes it from today's events and still-pending reminders. Code sends a fixed list
 when the model is down on the last attempt, refuses, or writes something unusable; the
-reminders alone when there is no calendar; and with the ``calendar_disconnected`` line when the
-connection stopped working.
+reminders alone when there are no events. Events are Remi's own, so Google being down or
+disconnected changes nothing.
 """
 
 from __future__ import annotations
@@ -27,19 +27,18 @@ from personal_organizer.core.errors import (
 from personal_organizer.core.types import TenantId
 from personal_organizer.db.engine import Database
 from personal_organizer.db.models.tenant import Reminder
-from personal_organizer.db.repositories import notes, reminders
+from personal_organizer.db.repositories import events as event_rows
+from personal_organizer.db.repositories import notes, reminders, tenants
 from personal_organizer.db.repositories.connections import bind_connection
 from personal_organizer.db.repositories.tenants import get_tenant, set_timezone
 from personal_organizer.interfaces.calendar import CalendarEvent
 from personal_organizer.messaging import briefing
-from personal_organizer.messaging.agent import shown_event
 from personal_organizer.messaging.briefing import (
     BRIEFING_KIND,
     briefing_key,
     fallback_briefing,
     send_briefing,
 )
-from personal_organizer.messaging.onboarding_text import t
 from personal_organizer.messaging.outbox import send_once
 from personal_organizer.messaging.proactive import proactive_target
 from personal_organizer.providers.calendar.memory import InMemoryCalendar
@@ -90,8 +89,11 @@ async def db(db_settings: Settings, owner_conn: Any) -> AsyncIterator[Database]:
         await owner_conn.execute(TRUNCATE_CONNECT_TABLES)
 
 
-async def _tenant(db: Database, *, connected: bool = True) -> UUID:
-    """An active Hebrew tenant in Jerusalem who has written on GOWA."""
+async def _tenant(
+    db: Database, *, connected: bool = True, events: tuple[CalendarEvent, ...] = (DENTIST,)
+) -> UUID:
+    """An active Hebrew tenant in Jerusalem who has written on GOWA, with ``events`` in Remi's
+    calendar."""
     tenant_id = await seed_tenant(db, language="he")
     await make_active(db, tenant_id)
     async with db.tenant_session(TenantId(tenant_id)) as session:
@@ -101,6 +103,9 @@ async def _tenant(db: Database, *, connected: bool = True) -> UUID:
                 session, tenant_id, connected_account_id="ca_bound", auth_config_id="ac_test"
             )
     await seed_inbound(db, tenant_id, channel="gowa", sent_at=NOW - timedelta(hours=10))
+    async with db.tenant_session(TenantId(tenant_id)) as session:
+        for event in events:
+            await event_rows.add_event(session, tenant_id, event, source="remi")
     return tenant_id
 
 
@@ -141,7 +146,7 @@ async def _brief(
         db=db,
         channels=resolver(gowa),
         llm=llm,
-        calendar=calendar if calendar is not None else InMemoryCalendar([DENTIST]),
+        calendar=calendar,
         now=NOW,
         last_attempt=last_attempt,
     )
@@ -214,13 +219,13 @@ class TestSendBriefing:
     async def test_only_todays_events_and_still_pending_reminders_are_used(
         self, db: Database
     ) -> None:
-        tenant_id = await _tenant(db)
         tomorrow = CalendarEvent(
             "e2",
             "Gym",
             datetime(2026, 10, 16, 8, tzinfo=ZONE),
             datetime(2026, 10, 16, 9, tzinfo=ZONE),
         )
+        tenant_id = await _tenant(db, events=(DENTIST, tomorrow))
         await _remind(db, tenant_id, datetime(2026, 10, 15, 18, tzinfo=ZONE))
         await _remind(db, tenant_id, datetime(2026, 10, 15, 6, tzinfo=ZONE), "already fired")
         cancelled = await _remind(db, tenant_id, datetime(2026, 10, 15, 20, tzinfo=ZONE), "off")
@@ -228,20 +233,20 @@ class TestSendBriefing:
         async with db.tenant_session(TenantId(tenant_id)) as session:
             await reminders.cancel_reminder(session, tenant_id, cancelled)
         llm = ScriptedLLM(said("Morning!"))
-        calendar = InMemoryCalendar([DENTIST, tomorrow])
 
-        await _brief(db, tenant_id, llm, calendar)
+        await _brief(db, tenant_id, llm)
 
-        [(_, _, start, end)] = calendar.calls
-        assert (start, end) == (
-            datetime(2026, 10, 15, tzinfo=ZONE),
-            datetime(2026, 10, 16, tzinfo=ZONE),
-        )
         [[_, user]] = llm.calls
-        assert json.loads(user.content) == {
-            "events": [shown_event(DENTIST, ZONE)],
-            "reminders": [{"text": "call mom", "at": "18:00"}],
-        }
+        data = json.loads(user.content)
+        assert [event["title"] for event in data["events"]] == ["Dentist"]
+        assert data["reminders"] == [{"text": "call mom", "at": "18:00"}]
+
+    async def test_briefing_without_google_lists_native_events(self, db: Database) -> None:
+        """No Composio at all (``calendar=None``) and no connection: Remi's own events still go."""
+        tenant_id = await _tenant(db, connected=False)
+        _, gowa = await _brief(db, tenant_id, None)
+        fallback = fallback_briefing([DENTIST], [], zone=ZONE, language="he")
+        assert [m.body for m in gowa.sent] == [fallback]
 
     async def test_a_gender_note_reaches_the_prompt(self, db: Database) -> None:
         tenant_id = await _tenant(db)
@@ -254,11 +259,12 @@ class TestSendBriefing:
         [[system, _]] = llm.calls
         assert "feminine" in system.content
 
-    async def test_an_empty_day_sends_the_fixed_line_without_the_model(self, db: Database) -> None:
-        tenant_id = await _tenant(db)
-        status, gowa = await _brief(db, tenant_id, NoLLM(), InMemoryCalendar())
-        assert status == "accepted"
-        assert [m.body for m in gowa.sent] == [t("briefing_empty", "he")]
+    async def test_an_empty_day_sends_nothing(self, db: Database) -> None:
+        tenant_id = await _tenant(db, events=())
+        status, gowa = await _brief(db, tenant_id, NoLLM())
+        assert status is None
+        assert gowa.attempts == []
+        assert await _briefed_on(db, tenant_id) == DAY
 
     async def test_the_model_down_on_the_last_attempt_sends_the_fixed_list(
         self, db: Database
@@ -291,58 +297,37 @@ class TestSendBriefing:
 
     async def test_no_calendar_sends_the_reminders_alone(self, db: Database) -> None:
         """The calendar is optional: no nagging line, and no model to call an unread day empty."""
-        tenant_id = await _tenant(db, connected=False)
+        tenant_id = await _tenant(db, connected=False, events=())
         await _remind(db, tenant_id, datetime(2026, 10, 15, 18, tzinfo=ZONE))
         _, gowa = await _brief(db, tenant_id, NoLLM())
         listed = fallback_briefing([], await _pending(db, tenant_id), zone=ZONE, language="he")
         assert [m.body for m in gowa.sent] == [listed]
 
     async def test_no_calendar_and_no_reminders_sends_nothing(self, db: Database) -> None:
-        tenant_id = await _tenant(db, connected=False)
+        tenant_id = await _tenant(db, connected=False, events=())
         status, gowa = await _brief(db, tenant_id, NoLLM())
         assert status is None
         assert gowa.attempts == []
         assert await _briefed_on(db, tenant_id) == DAY
 
-    async def test_a_connection_that_stopped_working_sends_reminders_and_says_so(
-        self, db: Database
-    ) -> None:
-        tenant_id = await _tenant(db)
-        await _remind(db, tenant_id, datetime(2026, 10, 15, 18, tzinfo=ZONE))
-        _, gowa = await _brief(db, tenant_id, NoLLM(), Failing(CalendarNotConnectedError(422)))
-        listed = fallback_briefing([], await _pending(db, tenant_id), zone=ZONE, language="he")
-        assert [m.body for m in gowa.sent] == [f"{listed}\n\n{t('calendar_disconnected', 'he')}"]
-
-    async def test_a_calendar_outage_retries_then_sends_reminders_and_says_so(
-        self, db: Database
-    ) -> None:
-        tenant_id = await _tenant(db)
-        await _remind(db, tenant_id, datetime(2026, 10, 15, 18, tzinfo=ZONE))
-        down = Failing(CalendarProviderUnavailableError())
-        with pytest.raises(CalendarProviderUnavailableError):
-            await _brief(db, tenant_id, None, down)
-        assert await _out(db, tenant_id) == []
-
-        _, gowa = await _brief(db, tenant_id, NoLLM(), down, last_attempt=True)
-        listed = fallback_briefing([], await _pending(db, tenant_id), zone=ZONE, language="he")
-        line = t("briefing_calendar_unavailable", "he")
-        assert [m.body for m in gowa.sent] == [f"{listed}\n\n{line}"]
-
     @pytest.mark.parametrize(
-        ("error", "last_attempt"),
-        [(CalendarProviderUnavailableError(), True), (CalendarProviderRejectedError(400), False)],
+        "error",
+        [
+            CalendarNotConnectedError(422),
+            CalendarProviderUnavailableError(),
+            CalendarProviderRejectedError(400),
+        ],
     )
-    async def test_a_failed_calendar_read_and_no_reminders_sends_nothing(
-        self, db: Database, error: Exception, last_attempt: bool
+    async def test_google_failing_serves_the_stored_events(
+        self, db: Database, error: Exception
     ) -> None:
-        """Never "nothing on your calendar" when the calendar could not be read."""
+        """A live read that fails changes nothing: no retry, no apology line."""
         tenant_id = await _tenant(db)
-        status, gowa = await _brief(
-            db, tenant_id, NoLLM(), Failing(error), last_attempt=last_attempt
-        )
-        assert status is None
-        assert gowa.attempts == []
-        assert await _briefed_on(db, tenant_id) == DAY
+        async with db.tenant_session(TenantId(tenant_id)) as session:
+            await tenants.set_live_calendar(session, tenant_id, True)
+        _, gowa = await _brief(db, tenant_id, None, Failing(error))
+        fallback = fallback_briefing([DENTIST], [], zone=ZONE, language="he")
+        assert [m.body for m in gowa.sent] == [fallback]
 
     async def test_nowhere_to_send_marks_the_day(self, db: Database) -> None:
         """Else the tick defers it again every minute of the window."""

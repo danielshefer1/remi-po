@@ -138,7 +138,11 @@ def _on_group(db: Database, *, last_attempt: bool) -> OnGroup | None:
     if llm is None:
         return None
     return functools.partial(
-        group_turn, db=db, llm=llm, calendar=agent_calendar(), last_attempt=last_attempt
+        group_turn,
+        db=db,
+        llm=llm,
+        calendar=agent_calendar() if get_settings().composio.enabled else None,
+        last_attempt=last_attempt,
     )
 
 

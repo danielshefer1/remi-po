@@ -223,8 +223,13 @@ class TestStrongLLM:
 
 
 class TestOnGroup:
-    def test_the_group_turn_when_enabled(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    @pytest.mark.parametrize("composio", [True, False])
+    def test_the_group_turn_when_enabled(
+        self, monkeypatch: pytest.MonkeyPatch, composio: bool
+    ) -> None:
         llm, calendar = object(), object()
+        settings = SimpleNamespace(composio=SimpleNamespace(enabled=composio))
+        monkeypatch.setattr(channel_tasks, "get_settings", lambda: settings)
         monkeypatch.setattr(channel_tasks, "agent_llm", lambda: llm)
         monkeypatch.setattr(channel_tasks, "agent_calendar", lambda: calendar)
         db = cast(Database, object())
@@ -234,7 +239,7 @@ class TestOnGroup:
         assert handoff.keywords == {
             "db": db,
             "llm": llm,
-            "calendar": calendar,
+            "calendar": calendar if composio else None,
             "last_attempt": True,
         }
 

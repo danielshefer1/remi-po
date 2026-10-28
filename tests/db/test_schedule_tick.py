@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 from collections.abc import AsyncIterator
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -23,7 +24,7 @@ from personal_organizer.db.repositories.outings import create_poll
 from personal_organizer.interfaces.calendar import CalendarEvent
 from personal_organizer.messaging.briefing import briefing_key
 from personal_organizer.messaging.reminders import reminder_key
-from personal_organizer.settings import Settings
+from personal_organizer.settings import Settings, get_settings
 from personal_organizer.worker.app import build_procrastinate_app
 from personal_organizer.worker.queues import Queue
 from personal_organizer.worker.tasks import schedule
@@ -31,6 +32,7 @@ from personal_organizer.worker.tasks.schedule import (
     BRIEFING_TASK,
     NUDGE_TASK,
     REMINDER_TASK,
+    TICK_TASK,
     run_tick,
 )
 from tests.db.test_reminders_repository import NOW, TODAY, _tenant
@@ -149,13 +151,19 @@ async def test_a_failing_briefing_scan_still_defers_the_reminders(
     assert [job[0] for job in await _jobs(owner_conn)] == [REMINDER_TASK]
 
 
-async def test_without_composio_there_is_no_briefing(
-    db: Database, app: procrastinate.App, owner_conn: Any
+async def test_tick_defers_briefings_without_composio(
+    db: Database, app: procrastinate.App, owner_conn: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The scheduled tick no longer reads Composio's switch: briefings are native."""
+    monkeypatch.setenv("COMPOSIO__ENABLED", "false")
+    get_settings.cache_clear()
     await _due_work(db)
 
-    assert await run_tick(app, NOW, briefings=False) == (1, 0, 0)
-    assert [job[0] for job in await _jobs(owner_conn)] == [REMINDER_TASK]
+    context = SimpleNamespace(app=app)
+    await app.tasks[TICK_TASK].func(context, int(NOW.timestamp()))
+
+    assert [job[0] for job in await _jobs(owner_conn)] == [BRIEFING_TASK, REMINDER_TASK]
+    get_settings.cache_clear()
 
 
 async def _due_nudge(db: Database, owner_conn: Any, now: datetime) -> tuple[UUID, UUID]:
