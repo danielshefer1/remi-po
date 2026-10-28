@@ -102,7 +102,8 @@ async def _group_turn(
     asker: str = "Dana",
     approved: bool = False,
 ) -> str:
-    system = group_prompt(detect_language(text), LOCAL_NOW, asker, True, approved=approved)
+    language = detect_language(text)
+    system = group_prompt(language, LOCAL_NOW, asker, True, approved=approved)
     reply = await converse(
         history,
         f"{asker}: {text}",
@@ -110,6 +111,7 @@ async def _group_turn(
         tools=GROUP_TOOLS,
         run_tool=group.run_tool,
         llm=llm,
+        hebrew=language == "he",
     )
     return reply.strip()
 
