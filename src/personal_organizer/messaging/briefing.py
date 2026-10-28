@@ -3,12 +3,12 @@
 Once per local day, a short message of today's events and the reminders still to come. One
 model call with no tools writes it from the day as JSON data, so an invite's title can at worst
 make an odd sentence. Code sends a fixed list instead when the model refuses, writes something
-unusable, is down on the job's last attempt, or there is no model at all. An empty day is one
-fixed line, with no model call. Events come from Remi's own calendar (``TenantCalendar``), so
-Google being down or disconnected changes nothing here: the stored copy is read, and a day
-with no events and no reminders sends nothing. Links never go out: they are stripped from the
-titles in the fixed list, a reply holding one is dropped, and an event's location (free text
-anyone can put a link in) is not given to the model.
+unusable, is down on the job's last attempt, or there is no model at all.
+Events come from Remi's own calendar (``TenantCalendar``), so Google being down or
+disconnected changes nothing here: the stored copy is read, and a day with no events and no
+reminders sends nothing. Links never go out: they are stripped from the titles in the fixed
+list, a reply holding one is dropped, and an event's location (free text anyone can put a
+link in) is not given to the model.
 
 Like "You're all set", it answers no inbound message: it goes through ``messaging.proactive``
 and is keyed ``briefing:<tenant_id>:<local day>`` (ADR 0003), so a re-run sends nothing new.
@@ -195,8 +195,7 @@ async def send_briefing(
             await mark_briefed(session, tenant_id, day)
         return None
     text = ""
-    # Reminders alone are a fixed list: a model could call the day empty.
-    if events and llm is not None:
+    if (events or reminders) and llm is not None:
         try:
             text = await compose_briefing(
                 events,

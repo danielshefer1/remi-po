@@ -157,13 +157,13 @@ async def test_tick_defers_briefings_without_composio(
     """The scheduled tick no longer reads Composio's switch: briefings are native."""
     monkeypatch.setenv("COMPOSIO__ENABLED", "false")
     get_settings.cache_clear()
-    await _due_work(db)
-
-    context = SimpleNamespace(app=app)
-    await app.tasks[TICK_TASK].func(context, int(NOW.timestamp()))
-
-    assert [job[0] for job in await _jobs(owner_conn)] == [BRIEFING_TASK, REMINDER_TASK]
-    get_settings.cache_clear()
+    try:
+        await _due_work(db)
+        context = SimpleNamespace(app=app)
+        await app.tasks[TICK_TASK].func(context, int(NOW.timestamp()))
+        assert [job[0] for job in await _jobs(owner_conn)] == [BRIEFING_TASK, REMINDER_TASK]
+    finally:
+        get_settings.cache_clear()
 
 
 async def _due_nudge(db: Database, owner_conn: Any, now: datetime) -> tuple[UUID, UUID]:

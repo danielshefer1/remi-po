@@ -24,7 +24,7 @@ model can answer the who's-free question again; a no goes on to ``read_answer``.
 **Silence.** The model may reply with nothing (the message was for someone else, or for a
 person named Rami): nothing is sent. Not-addressed messages cost no model call beyond
 ``approves``' and ``read_answer``'s, each only when its sender has an open ask or outing. An
-unavailable model or Composio raises for the job to retry, and the last attempt answers with
+unavailable model raises for the job to retry, and the last attempt answers with
 the fixed ``agent_unavailable`` line, as the agent does.
 """
 
@@ -41,7 +41,6 @@ from zoneinfo import ZoneInfo
 import structlog
 
 from personal_organizer.core.errors import (
-    CalendarProviderUnavailableError,
     LLMRejectedError,
     LLMUnavailableError,
 )
@@ -467,7 +466,7 @@ async def _answer(
             if "http" in reply.lower():
                 log.info("group.reply_dropped")
                 reply = t("agent_unavailable", language)
-        except LLMUnavailableError, CalendarProviderUnavailableError:
+        except LLMUnavailableError:
             if not last_attempt:
                 raise
             log.warning("group.fallback", reason="unavailable")

@@ -295,11 +295,20 @@ class TestSendBriefing:
         fallback = fallback_briefing([DENTIST], [], zone=ZONE, language="he")
         assert [m.body for m in gowa.sent] == [fallback]
 
-    async def test_no_calendar_sends_the_reminders_alone(self, db: Database) -> None:
-        """The calendar is optional: no nagging line, and no model to call an unread day empty."""
+    async def test_reminders_alone_are_written_by_the_model(self, db: Database) -> None:
+        """No events and no Google: no nagging line, and the model still writes the morning."""
         tenant_id = await _tenant(db, connected=False, events=())
         await _remind(db, tenant_id, datetime(2026, 10, 15, 18, tzinfo=ZONE))
-        _, gowa = await _brief(db, tenant_id, NoLLM())
+        llm = ScriptedLLM(said("Morning! Call mom at 6."))
+        _, gowa = await _brief(db, tenant_id, llm)
+        assert [m.body for m in gowa.sent] == ["Morning! Call mom at 6."]
+        [[_, user]] = llm.calls
+        assert json.loads(user.content)["events"] == []
+
+    async def test_reminders_alone_without_a_model_are_the_fixed_list(self, db: Database) -> None:
+        tenant_id = await _tenant(db, connected=False, events=())
+        await _remind(db, tenant_id, datetime(2026, 10, 15, 18, tzinfo=ZONE))
+        _, gowa = await _brief(db, tenant_id, None)
         listed = fallback_briefing([], await _pending(db, tenant_id), zone=ZONE, language="he")
         assert [m.body for m in gowa.sent] == [listed]
 
