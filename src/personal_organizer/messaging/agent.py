@@ -92,7 +92,7 @@ from personal_organizer.messaging.outbox import already_sent, send_once, send_pa
 from personal_organizer.messaging.recurrence import check_rule, describe_rule, first_at
 from personal_organizer.messaging.schedule import Schedule, TenantSchedule
 from personal_organizer.messaging.tenancy import TenantState, load_history, phone_of
-from personal_organizer.messaging.text import WHATSAPP_TEXT_LIMIT, bubbles, split_text
+from personal_organizer.messaging.text import BREAK, WHATSAPP_TEXT_LIMIT, bubbles, split_text
 from personal_organizer.messaging.timezones import match_zone, zone_label
 from personal_organizer.onboarding.links import issue_or_reuse_link
 from personal_organizer.settings import Settings
@@ -950,7 +950,8 @@ async def respond(
     ``calendar_not_connected`` line and the URL ``connect_link`` gives; with no
     ``connect_link``, with the link-less ``calendar_disconnected`` line.
     A ``propose_event`` the model makes is appended to ``proposed``, and the reply ends with
-    its confirm question; the caller stores it, or nothing confirms it. With ``schedule``
+    its summary and confirm question as a text of their own; the caller stores it, or nothing
+    confirms it. With ``schedule``
     ``None``, the reminder and morning-message tools answer that they are not available.
     With ``notes`` ``None``, the memory tools answer that they are not available and the profile
     is empty. With ``grants`` ``None``, the three sharing tools answer that they are not available.
@@ -1082,11 +1083,10 @@ async def respond(
     if found:
         language = tenant.language
         suffix = confirm_prompt(event_summary(found[0], zone, language), language)
-        # The question must arrive whole, or a "yes" would confirm what they never saw. It
-        # rides the last text, so that is the one it has to fit.
-        if len(f"{bubbles(said)[-1]}\n\n{suffix}") > WHATSAPP_TEXT_LIMIT:
-            said = ""
-        said = f"{said}\n\n{suffix}".strip()
+        # The question must arrive whole, or a "yes" would confirm what they never saw. It is
+        # its own text, unless three already came before it: then it rides the third.
+        joined = f"{said}\n{BREAK}\n{suffix}" if said else suffix
+        said = suffix if len(bubbles(joined)[-1]) > WHATSAPP_TEXT_LIMIT else joined
     # A proposal means a connected calendar, and its confirm question must stay last and whole.
     if disconnected and not found:
         language = tenant.language
