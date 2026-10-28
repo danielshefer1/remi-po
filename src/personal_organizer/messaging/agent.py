@@ -225,16 +225,16 @@ TOOLS: Final[tuple[Mapping[str, Any], ...]] = (
     {
         "name": "connect_calendar",
         "description": (
-            "Send them a link to connect, or reconnect, Google, so their Google Calendar "
-            "events show in their calendar too. The link is put under your reply automatically."
+            "Send them a link to connect, or reconnect, their Google Calendar. The link is put "
+            "under your reply automatically."
         ),
         "input_schema": {"type": "object", "properties": {}},
     },
     {
         "name": "live_calendar",
         "description": (
-            "How their Google Calendar is read: on checks Google live every time, off goes back "
-            "to the copy taken about every hour. Only when they ask for it or agree to it."
+            "Read their Google Calendar live every time (on), or from the copy taken about every "
+            "hour (off)."
         ),
         "input_schema": {
             "type": "object",
@@ -534,20 +534,16 @@ steps), call hand_off first, before any other tool, with the reason closest to i
 
 def _calendar_line(*, connected: bool, live: bool) -> str:
     if not connected:
-        return (
-            "You keep their calendar. They haven't connected Google; offer to pull it in only "
-            "when it would help, and call connect_calendar if they want it."
-        )
+        return "You keep their calendar. They haven't connected Google."
     if not live:
         return (
-            "You keep their calendar, with their Google events copied in about every hour, so a "
-            "change they just made in Google may not show yet. If that matters to them (they say "
-            "something's missing or out of date), tell them in a few words you can check Google "
-            "live every time instead, and call live_calendar if they want it."
+            "You keep their calendar, with Google copied in about every hour; if a change they "
+            "just made in Google seems missing, offer to check Google live every time, and call "
+            "live_calendar if they want it."
         )
     return (
-        "You keep their calendar and check their Google Calendar live every time. If they want "
-        "it back to hourly, call live_calendar with off."
+        "You keep their calendar and check their Google Calendar live every time; "
+        "live_calendar with off goes back to hourly."
     )
 
 
