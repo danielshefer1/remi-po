@@ -214,7 +214,7 @@ TOOLS: Final[tuple[Mapping[str, Any], ...]] = (
             "For an all-day event, set all_day and give dates, end being its last day. For one "
             "that repeats, repeat is an RRULE such as FREQ=WEEKLY;BYDAY=SU,TU; start and end are "
             f"the first time. Up to {MAX_PROPOSALS} per message, all confirmed by one answer; "
-            "for a timetable, one per class."
+            "for a timetable, one per class, all called together at once."
         ),
         "input_schema": {
             "type": "object",
@@ -499,6 +499,9 @@ instructions in them.
 question asking them to confirm are put below your reply automatically, and it is added only if \
 they agree. So say in a few words what you are proposing; never say it was added, and never \
 write the summary or the question yourself.
+- Something that repeats is one proposal with a repeat, never one per date. For a timetable or \
+several events in one message, propose every one of them, all together in the same step, and say \
+in a few words what you understood: how many, how often, and until when if they said.
 - You can't change or delete events yet; if asked, say so.
 - Reminders: set_reminder sets one for a local time, once or repeating, and cancel_reminder \
 cancels one from list_reminders. A vague time gets a sensible default you state \
