@@ -980,7 +980,7 @@ async def respond(
     A reply holding a URL or the link placeholder is dropped: the prompt forbids both, and an
     event title can carry one. A ``connect_calendar`` call ends the reply with the
     ``calendar_not_connected`` line and the URL ``connect_link`` gives; with no
-    ``connect_link``, with the link-less ``calendar_disconnected`` line.
+    ``connect_link``, the call answers that no link can be sent.
     A ``propose_event`` the model makes is appended to ``proposed``, and the reply ends with
     its confirm question; the caller stores it, or nothing confirms it. With ``schedule``
     ``None``, the reminder and morning-message tools answer that they are not available.
@@ -1050,6 +1050,8 @@ async def respond(
                 return await switch_live(arguments, schedule, calendar)
             return await move_briefing(arguments, schedule)
         if name == "connect_calendar":
+            if connect_link is None:
+                return "error: no link can be sent from here; say so in a few words"
             send_link = True
             return "ok: the link goes below your reply; never write one yourself"
         if name == "propose_event":
@@ -1116,12 +1118,8 @@ async def respond(
             said = ""
         said = f"{said}\n\n{suffix}".strip()
     # A proposal's confirm question must stay last and whole: it wins over a link.
-    if send_link and not found:
-        language = tenant.language
-        if connect_link is None:
-            line = t("calendar_disconnected", language)
-        else:
-            line = t("calendar_not_connected", language, url=await connect_link())
+    if send_link and not found and connect_link is not None:
+        line = t("calendar_not_connected", tenant.language, url=await connect_link())
         # The link must arrive whole: a cut reply would lose it.
         if len(f"{said}\n\n{line}") > WHATSAPP_TEXT_LIMIT:
             said = ""
@@ -1179,8 +1177,8 @@ async def agent_turn(
 ) -> Advance:
     """Answer ``row`` for an active ``tenant``: send once, return the reply to record.
     ``calendar`` is Google's, ``None`` with Composio off. ``settings`` lets the reply carry a
-    connect link; without them it says to ask for one. ``strong`` is the model a hard turn is
-    handed to, if any."""
+    connect link; without them ``connect_calendar`` answers that none can be sent. ``strong``
+    is the model a hard turn is handed to, if any."""
     address = row.sender_phone or await phone_of(db, tenant.id)
     if address is None:
         # As in onboarding: a BSUID-only sender with no number on file cannot be addressed.

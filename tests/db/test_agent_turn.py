@@ -277,13 +277,15 @@ class TestNoGoogle:
         # The link is a bearer credential: the history keeps a placeholder.
         assert advance.reply == text.replace(url, LINK_PLACEHOLDER)
 
-    async def test_without_settings_the_line_says_to_ask(
+    async def test_without_settings_no_link_is_promised(
         self, db: Database, owner_conn: Any
     ) -> None:
         tenant = await _active(db, connected=False)
-        llm = ScriptedLLM(said("", call("connect_calendar")), said(""))
+        llm = ScriptedLLM(said("", call("connect_calendar")), said("אין לי קישור כרגע."))
         _, channel, _ = await _turn(db, owner_conn, tenant, llm)
-        assert [m.body for m in channel.sent] == [t("calendar_disconnected", "he")]
+        # The model is told no link can go, and says so itself: no fixed line follows.
+        assert [m.body for m in channel.sent] == ["אין לי קישור כרגע."]
+        assert llm.calls[1][-1].content.startswith("error:")
 
 
 class TestLive:
