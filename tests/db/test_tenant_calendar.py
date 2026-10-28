@@ -15,6 +15,7 @@ from personal_organizer.core.errors import (
 )
 from personal_organizer.core.types import TenantId
 from personal_organizer.db.engine import Database
+from personal_organizer.db.repositories import events as event_rows
 from personal_organizer.db.repositories.connections import active_connection, bind_connection
 from personal_organizer.interfaces.calendar import CalendarEvent
 from personal_organizer.messaging.calendar import TenantCalendar
@@ -128,3 +129,23 @@ async def test_add_failure_reraises_and_stores_nothing(db: Database) -> None:
         with pytest.raises(type(error)):
             await cal.add(_event("Nope"))
     assert await cal.events(*WIDE) == []
+
+
+async def test_full_page_refresh_keeps_rows_past_the_cut(
+    db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("personal_organizer.messaging.calendar.PAGE_SIZE", 2)
+    google = InMemoryCalendar(
+        [_event("A", 1, "g1"), _event("B", 2, "g2"), _event("Late", 200, "g3")]
+    )
+    cal = await _calendar(db, google)
+    # A first page that holds only A and B; Late is past the cut.
+    page = InMemoryCalendar(google.events[:2])
+    cal._provider = page
+    await cal.refresh(*WIDE)
+    full = (NOW, NOW + timedelta(days=30))
+    async with db.tenant_session(TenantId(cal._tenant_id)) as session:
+        await event_rows.upsert_google(session, cal._tenant_id, google.events[2])
+    page.events = [_event("A2", 1, "g1"), _event("B", 2, "g2")]
+    await cal.refresh(*WIDE)
+    assert [e.title for e in await cal.events(*full)] == ["A2", "B", "Late"]

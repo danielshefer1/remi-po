@@ -71,6 +71,8 @@ SDK_LIMITER: Final = anyio.CapacityLimiter(4)
 #: arguments or the response shape under us. Upgrading means re-checking the test fixtures.
 TOOLKIT: Final = "googlecalendar"
 TOOLKIT_VERSION: Final = "20261010_00"
+#: Events in the one page ``list_events`` reads (Google's default).
+PAGE_SIZE: Final = 250
 LIST_EVENTS: Final = "GOOGLECALENDAR_EVENTS_LIST"
 CREATE_EVENT: Final = "GOOGLECALENDAR_CREATE_EVENT"
 
@@ -241,8 +243,8 @@ class ComposioConnector:
             "singleEvents": True,  # recurring events as their instances
             "orderBy": "startTime",
         }
-        # shortcut: one page (Google's default 250 events), nextPageToken ignored; plenty for a
-        # day or a week. Follow the token if someone asks for a month of a busy calendar.
+        # shortcut: one page (PAGE_SIZE events), nextPageToken ignored; the calendar copy cuts its
+        # window at the last event of a full page. Follow the token if the cut ever matters.
         payload = await self._execute(LIST_EVENTS, arguments, account_id, user_id)
         try:
             return [_event(item, start.tzinfo) for item in payload["items"]]

@@ -22,6 +22,7 @@ from personal_organizer.db.engine import Database
 from personal_organizer.db.models.tenant import CalendarConnection
 from personal_organizer.db.repositories import events as event_rows
 from personal_organizer.interfaces.calendar import CalendarEvent, CalendarProvider
+from personal_organizer.providers.calendar.composio import PAGE_SIZE
 
 log = structlog.get_logger(__name__)
 
@@ -63,9 +64,19 @@ class TenantCalendar:
                 start=start,
                 end=end,
             )
-        except CalendarProviderError:
-            log.warning("calendar.refresh_failed", tenant_id=str(self._tenant_id))
+        except CalendarProviderError as exc:
+            log.warning(
+                "calendar.refresh_failed",
+                tenant_id=str(self._tenant_id),
+                error=type(exc).__name__,
+            )
             return False
+        if len(found) >= PAGE_SIZE:
+            # A full page: the rest of the window was not read, so keep what is stored past it.
+            end = found[-1].start
+            log.warning(
+                "calendar.refresh_truncated", tenant_id=str(self._tenant_id), count=len(found)
+            )
         async with self._db.tenant_session(TenantId(self._tenant_id)) as session:
             await event_rows.replace_imported(session, self._tenant_id, start, end, found)
         return True
@@ -110,6 +121,10 @@ class InMemoryTenantCalendar:
 
     async def events(self, start: datetime, end: datetime) -> Sequence[CalendarEvent]:
         found = [e for e in self._events if e.start < end and e.end > start]
+        zone = start.tzinfo
+        found = [
+            replace(e, start=e.start.astimezone(zone), end=e.end.astimezone(zone)) for e in found
+        ]
         return sorted(found, key=lambda e: e.start)
 
     async def add(self, event: CalendarEvent) -> CalendarEvent:
