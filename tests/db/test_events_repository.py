@@ -185,3 +185,56 @@ async def test_events_between_reads_in_callers_zone(db: Database) -> None:
         )
     assert got[0].start.date() == day.date()
     assert got[0].start == day
+
+
+JLM = ZoneInfo("Asia/Jerusalem")
+CLASS_START = datetime(2026, 10, 19, 18, tzinfo=JLM)
+
+
+async def _series(db: Database, tenant_id: UUID, rule: str) -> CalendarEvent:
+    event = CalendarEvent("", "Class", CLASS_START, CLASS_START + timedelta(hours=1), rule=rule)
+    async with db.tenant_session(TenantId(tenant_id)) as session:
+        return await events.add_event(session, tenant_id, event, source="remi")
+
+
+async def _read(
+    db: Database, tenant_id: UUID, start: datetime, end: datetime
+) -> list[CalendarEvent]:
+    async with db.tenant_session(TenantId(tenant_id)) as session:
+        return await events.events_between(session, tenant_id, start, end, zone=JLM)
+
+
+async def test_native_series_expands(db: Database) -> None:
+    tenant_id = await _tenant(db)
+    series = await _series(db, tenant_id, "FREQ=WEEKLY;BYDAY=MO")
+    assert series.rule == "FREQ=WEEKLY;BYDAY=MO"
+    got = await _read(
+        db, tenant_id, CLASS_START - timedelta(days=1), CLASS_START + timedelta(days=15)
+    )
+    assert [e.start.day for e in got] == [19, 26, 2]
+    assert got[0].external_id == f"{series.external_id}:20261019T1800"
+    assert all(e.rule == series.rule and e.end - e.start == timedelta(hours=1) for e in got)
+
+
+async def test_native_series_keeps_wall_time_across_dst(db: Database) -> None:
+    tenant_id = await _tenant(db)
+    await _series(db, tenant_id, "FREQ=WEEKLY;BYDAY=MO")
+    got = await _read(
+        db, tenant_id, CLASS_START - timedelta(days=1), CLASS_START + timedelta(days=15)
+    )
+    assert {e.start.astimezone(JLM).hour for e in got} == {18}  # change was 2026-10-25
+
+
+async def test_open_series_expands_only_window(db: Database) -> None:
+    tenant_id = await _tenant(db)
+    await _series(db, tenant_id, "FREQ=DAILY")
+    start = datetime(2027, 3, 1, tzinfo=JLM)
+    got = await _read(db, tenant_id, start, start + timedelta(days=3))
+    assert [e.start.day for e in got] == [1, 2, 3]
+
+
+async def test_series_until_respected(db: Database) -> None:
+    tenant_id = await _tenant(db)
+    await _series(db, tenant_id, "FREQ=DAILY;UNTIL=20261021T180000")
+    got = await _read(db, tenant_id, CLASS_START, CLASS_START + timedelta(days=30))
+    assert [e.start.day for e in got] == [19, 20, 21]

@@ -36,6 +36,7 @@ class CalendarEvent:
     all_day: bool = False
     location: str | None = None
     link: str | None = None
+    rule: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

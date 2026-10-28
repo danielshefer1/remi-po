@@ -10,9 +10,10 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import replace
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Protocol
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 import structlog
 
@@ -21,7 +22,9 @@ from personal_organizer.core.types import TenantId
 from personal_organizer.db.engine import Database
 from personal_organizer.db.models.tenant import CalendarConnection
 from personal_organizer.db.repositories import events as event_rows
+from personal_organizer.db.repositories.tenants import get_tenant
 from personal_organizer.interfaces.calendar import CalendarEvent, CalendarProvider
+from personal_organizer.messaging.recurrence import occurrences
 from personal_organizer.providers.calendar.composio import PAGE_SIZE
 
 log = structlog.get_logger(__name__)
@@ -91,7 +94,9 @@ class TenantCalendar:
         if self.live and self.connected:
             await self.refresh(start, end)
         async with self._db.tenant_session(TenantId(self._tenant_id)) as session:
-            return await event_rows.events_between(session, self._tenant_id, start, end)
+            tenant = await get_tenant(session, self._tenant_id)
+            zone = ZoneInfo((tenant.timezone if tenant else None) or "UTC")
+            return await event_rows.events_between(session, self._tenant_id, start, end, zone=zone)
 
     async def add(self, event: CalendarEvent) -> CalendarEvent:
         """Add ``event``. Provider errors (not added to Google) are re-raised."""
@@ -128,8 +133,13 @@ class InMemoryTenantCalendar:
 
     async def events(self, start: datetime, end: datetime) -> Sequence[CalendarEvent]:
         self.calls.append((start, end))
-        found = [e for e in self._events if e.start < end and e.end > start]
-        zone = start.tzinfo
+        zone = start.tzinfo or UTC
+        found = [
+            o
+            for e in self._events
+            for o in occurrences(e, start, end, zone)
+            if o.start < end and o.end > start
+        ]
         found = [
             replace(e, start=e.start.astimezone(zone), end=e.end.astimezone(zone)) for e in found
         ]
