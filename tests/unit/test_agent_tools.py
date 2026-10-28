@@ -27,9 +27,12 @@ from personal_organizer.core.errors import (
 from personal_organizer.interfaces.calendar import CalendarEvent
 from personal_organizer.interfaces.llm import ToolCall
 from personal_organizer.messaging.agent import (
+    MAX_FIELD,
+    MAX_PROPOSALS,
     MAX_WINDOW,
     TOOLS,
     add_event,
+    add_events,
     agent_prompt,
     check_event,
     event_summary,
@@ -381,6 +384,23 @@ class TestLive:
 DENTIST = call(
     "propose_event", title="רופא שיניים", start="2026-10-13T09:00", end="2026-10-13T10:00"
 )
+LESSONS = [
+    ("מתמטיקה", "SU", "2026-10-18"),
+    ("אנגלית", "MO", "2026-10-19"),
+    ("היסטוריה", "TU", "2026-10-20"),
+    ("ספרות", "WE", "2026-10-21"),
+    ("מדעים", "TH", "2026-10-22"),
+]
+CLASSES = [
+    call(
+        "propose_event",
+        title=title,
+        start=f"{day}T08:00",
+        end=f"{day}T08:45",
+        repeat=f"FREQ=WEEKLY;BYDAY={code}",
+    )
+    for title, code, day in LESSONS
+]
 
 
 class TestPropose:
@@ -435,15 +455,90 @@ class TestPropose:
         assert "http" not in reply
         assert len(proposed) == 1
 
-    async def test_one_proposal_per_turn(self) -> None:
+    async def test_propose_repeating(self) -> None:
+        """A Tuesday start for a Mondays-and-Wednesdays rule starts on the Wednesday."""
         proposed: list[CalendarEvent] = []
-        other = call(
-            "propose_event", title="other", start="2026-10-14T09:00", end="2026-10-14T10:00"
+        gym = call(
+            "propose_event",
+            title="חדר כושר",
+            start="2026-10-13T18:00",
+            end="2026-10-13T19:00",
+            repeat="freq=weekly;byday=MO,WE",
         )
-        llm = ScriptedLLM(said("", DENTIST), said("", other), said("ok"))
+        llm = ScriptedLLM(said("", gym), said("כל שני ורביעי?"))
+        reply = await self._respond(llm, proposed)
+        [event] = proposed
+        assert (event.start.isoformat(), event.end.isoformat(), event.rule) == (
+            "2026-10-14T18:00:00+03:00",
+            "2026-10-14T19:00:00+03:00",
+            "FREQ=WEEKLY;BYDAY=MO,WE",
+        )
+        summary = "\n".join(["חדר כושר", "יום רביעי 2026-10-14, 18:00-19:00", "כל יום שני ורביעי"])
+        assert bubbles(reply) == ["כל שני ורביעי?", confirm_prompt(summary, "he")]
+        assert llm.calls[1][-1].content.startswith("ok: proposed")
+
+    async def test_timetable_five_proposals_one_confirm(self) -> None:
+        proposed: list[CalendarEvent] = []
+        llm = ScriptedLLM(said("", *CLASSES), said("זו המערכת?"))
+        reply = await self._respond(llm, proposed)
+        assert [event.title for event in proposed] == [title for title, _, _ in LESSONS]
+        summaries = "\n\n".join(event_summary(e, JERUSALEM, "he") for e in proposed)
+        assert bubbles(reply) == ["זו המערכת?", confirm_prompt(summaries, "he", many=True)]
+        assert "\n".join(["מתמטיקה", "יום ראשון 2026-10-18, 08:00-08:45", "כל יום ראשון"]) in reply
+        assert reply.endswith("להוסיף את הכול ליומן?")
+
+    async def test_ninth_proposal_refused(self) -> None:
+        proposed: list[CalendarEvent] = []
+        nine = [
+            call(
+                "propose_event",
+                title=f"שיעור {n}",
+                start=f"2026-10-{12 + n}T08:00",
+                end=f"2026-10-{12 + n}T09:00",
+            )
+            for n in range(1, MAX_PROPOSALS + 2)
+        ]
+        llm = ScriptedLLM(said("", *nine), said("שמונה מתוך תשעה"))
         await self._respond(llm, proposed)
-        assert [event.title for event in proposed] == ["רופא שיניים"]
-        assert llm.calls[2][-1].content.startswith("error: one proposal")
+        assert [event.title for event in proposed] == [f"שיעור {n}" for n in range(1, 9)]
+        results = [m.content for m in llm.calls[1][-len(nine) :]]
+        assert all(r.startswith("ok: proposed") for r in results[:-1])
+        assert results[-1].startswith("error: ")
+        assert "not proposed" in results[-1]
+
+    async def test_a_confirm_never_outgrows_one_message(self) -> None:
+        """Eight at the field limits would be over 4096 characters: the one that would push the
+        confirm past it is refused, and the question still arrives whole."""
+        proposed: list[CalendarEvent] = []
+        eight = [
+            call(
+                "propose_event",
+                title=f"{n} " + "x" * (MAX_FIELD - 2),
+                start=f"2026-10-{12 + n}T08:00",
+                end=f"2026-10-{13 + n}T09:00",  # a day long: the longest "when" line
+                location="y" * MAX_FIELD,
+                repeat="FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR,SA,SU;UNTIL=20270630T090000",
+            )
+            for n in range(1, MAX_PROPOSALS + 1)
+        ]
+        llm = ScriptedLLM(said("", *eight), said("Here they are"))
+        reply = await respond(
+            [],
+            "Add these",
+            replace(TENANT, language="en"),
+            llm=llm,
+            calendar=_calendar(),
+            now=datetime(2026, 10, 12, 9, 0, tzinfo=UTC),
+            proposed=proposed,
+        )
+        results = [m.content for m in llm.calls[1][-len(eight) :]]
+        assert 0 < len(proposed) < MAX_PROPOSALS
+        assert all(r.startswith("ok: proposed") for r in results[: len(proposed)])
+        assert all("not proposed" in r for r in results[len(proposed) :])
+        texts = bubbles(reply)
+        assert all(len(text) <= WHATSAPP_TEXT_LIMIT for text in texts)
+        summaries = "\n\n".join(event_summary(e, JERUSALEM, "en") for e in proposed)
+        assert texts[-1] == confirm_prompt(summaries, "en", many=True)
 
     async def test_propose_without_google_is_allowed(self) -> None:
         proposed: list[CalendarEvent] = []
@@ -501,6 +596,39 @@ class TestCheckEvent:
             location="Haifa",
         )
 
+    @pytest.mark.parametrize(
+        "repeat",
+        [
+            "FREQ=HOURLY",
+            "FREQ=WEEKLY;BYDAY=XX",
+            "FREQ=DAILY;COUNT=0",
+            "FREQ=WEEKLY;UNTIL=20261001T000000",  # before the first time
+            7,
+        ],
+    )
+    def test_bad_repeat_is_error(self, repeat: object) -> None:
+        result = check_event({**self.GOOD, "repeat": repeat}, JERUSALEM)
+        assert isinstance(result, str)
+        assert result.startswith("error: repeat: ")
+
+    def test_a_repeating_all_day_event_moves_to_its_first_day(self) -> None:
+        event = check_event(
+            {
+                "title": "Sabbath dinner",
+                "start": "2026-10-13",
+                "end": "2026-10-13",
+                "all_day": True,
+                "repeat": "FREQ=WEEKLY;BYDAY=FR",
+            },
+            JERUSALEM,
+        )
+        assert isinstance(event, CalendarEvent)
+        assert (event.start, event.end, event.rule) == (
+            datetime(2026, 10, 16, tzinfo=JERUSALEM),
+            datetime(2026, 10, 17, tzinfo=JERUSALEM),
+            "FREQ=WEEKLY;BYDAY=FR",
+        )
+
     def test_an_all_day_event_ends_the_midnight_after_its_last_day(self) -> None:
         event = check_event(
             {"title": "Sukkot", "start": "2026-10-13", "end": "2026-10-13", "all_day": True},
@@ -537,6 +665,15 @@ class TestSummary:
         start = datetime(2026, 10, 17, tzinfo=JERUSALEM)
         event = _event(start, start + timedelta(days=days), all_day=True)
         assert event_summary(event, JERUSALEM, "en").splitlines()[1] == when
+
+    @pytest.mark.parametrize(
+        ("language", "repeat"),
+        [("en", "Every Monday and Wednesday"), ("he", "כל יום שני ורביעי")],
+    )
+    def test_a_repeat_in_plain_words(self, language: str, repeat: str) -> None:
+        start = datetime(2026, 10, 14, 18, 0, tzinfo=JERUSALEM)
+        event = _event(start, start + timedelta(hours=1), rule="FREQ=WEEKLY;BYDAY=MO,WE")
+        assert event_summary(event, JERUSALEM, language).splitlines()[2] == repeat
 
 
 class TestAddEvent:
@@ -577,6 +714,81 @@ class TestAddEvent:
         calendar = _calendar()
         calendar.fail = error
         assert await self._add(calendar) == t(key, "en")
+
+
+class TestAddEvents:
+    EVENTS: ClassVar[list[CalendarEvent]] = [
+        replace(
+            TestAddEvent.EVENT,
+            title=title,
+            start=TestAddEvent.EVENT.start + timedelta(days=n),
+            end=TestAddEvent.EVENT.end + timedelta(days=n),
+        )
+        for n, title in enumerate(["Math", "English", "History"])
+    ]
+
+    async def _add(self, calendar: InMemoryTenantCalendar, language: str = "en") -> str:
+        return await add_events(self.EVENTS, calendar=calendar, zone=JERUSALEM, language=language)
+
+    def _summary(self, *events: CalendarEvent, language: str = "en") -> str:
+        return "\n\n".join(event_summary(e, JERUSALEM, language) for e in events)
+
+    async def test_one_reads_as_today(self) -> None:
+        calendar = Linked()
+        assert await add_events(
+            [TestAddEvent.EVENT], calendar=calendar, zone=JERUSALEM, language="en"
+        ) == await add_event(TestAddEvent.EVENT, calendar=Linked(), zone=JERUSALEM, language="en")
+
+    async def test_all_added_in_order(self) -> None:
+        calendar = Linked()
+        assert await self._add(calendar) == t(
+            "events_added", "en", summary=self._summary(*self.EVENTS)
+        )
+        assert [e.title for e in calendar.added] == ["Math", "English", "History"]
+
+    @pytest.mark.parametrize(
+        "error", [CalendarProviderUnavailableError("down"), CalendarProviderRejectedError(400)]
+    )
+    async def test_a_failed_one_is_said_and_the_rest_still_added(self, error: Exception) -> None:
+        calendar = FailsOn("English", error)
+        math, _, history = self.EVENTS
+        assert await self._add(calendar) == "\n\n".join(
+            [
+                t("events_some_added", "en", summary=self._summary(math, history)),
+                t("events_not_added", "en", titles="English"),
+            ]
+        )
+        assert [e.title for e in calendar.added] == ["Math", "History"]
+
+    async def test_a_disconnected_calendar_stops_the_rest(self) -> None:
+        calendar = FailsOn("English", CalendarNotConnectedError(401))
+        assert await self._add(calendar, "he") == "\n\n".join(
+            [
+                t("events_some_added", "he", summary=self._summary(self.EVENTS[0], language="he")),
+                t("events_disconnected", "he", titles="English ו-History"),  # noqa: RUF001
+            ]
+        )
+        assert [e.title for e in calendar.added] == ["Math"]
+
+    async def test_none_added_never_claims_any(self) -> None:
+        calendar = _calendar()
+        calendar.fail = CalendarProviderUnavailableError("down")
+        assert await self._add(calendar) == t(
+            "events_not_added", "en", titles="Math, English and History"
+        )
+
+
+class FailsOn(InMemoryTenantCalendar):
+    """Adding the event titled ``title`` raises ``error``; the others go in."""
+
+    def __init__(self, title: str, error: Exception) -> None:
+        super().__init__(connected=True)
+        self.title, self.error = title, error
+
+    async def add(self, event: CalendarEvent) -> CalendarEvent:
+        if event.title == self.title:
+            raise self.error
+        return await super().add(event)
 
 
 class Linked(InMemoryTenantCalendar):

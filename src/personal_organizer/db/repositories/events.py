@@ -12,11 +12,12 @@ sync tick's cross-tenant scan, through the ``SECURITY DEFINER`` function of migr
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import datetime, timedelta, tzinfo
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta, tzinfo
 from typing import Final
 from uuid import UUID
 
-from sqlalchemy import Uuid, bindparam, column, delete, func, insert, select, update
+from sqlalchemy import Uuid, and_, bindparam, column, delete, func, insert, or_, select, update
 from sqlalchemy.dialects.postgresql import INTERVAL
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from personal_organizer.db.models.tenant import CalendarConnection, Event
 from personal_organizer.db.repositories.scope import scoped
 from personal_organizer.interfaces.calendar import CalendarEvent
+from personal_organizer.messaging.recurrence import occurrences
 
 #: How far ahead a sync, an import or a live refresh copies Google's events.
 IMPORT_AHEAD: Final = timedelta(days=90)
@@ -39,6 +41,7 @@ def _to_event(row: Event, zone: tzinfo | None = None) -> CalendarEvent:
         end=row.ends_at.astimezone(zone),
         all_day=row.all_day,
         location=row.location,
+        rule=row.rule,
     )
 
 
@@ -66,6 +69,7 @@ async def add_event(
             location=event.location,
             source=source,
             external_id=external_id,
+            rule=event.rule,
         )
         .returning(Event.id)
     )
@@ -81,20 +85,36 @@ async def add_event(
         end=event.end,
         all_day=event.all_day,
         location=event.location,
+        rule=event.rule,
     )
 
 
 async def events_between(
-    session: AsyncSession, tenant_id: UUID, start: datetime, end: datetime
+    session: AsyncSession,
+    tenant_id: UUID,
+    start: datetime,
+    end: datetime,
+    *,
+    zone: tzinfo | None = None,
 ) -> list[CalendarEvent]:
     """Events overlapping ``[start, end)``, by start, in ``start``'s zone (so an all-day event
-    reads back on its own date). One ending exactly at ``start`` is out."""
+    reads back on its own date). One ending exactly at ``start`` is out. A repeating event comes
+    back as its occurrences, worked out in ``zone`` (the owner's; ``start``'s when not given)."""
+    zone = zone or start.tzinfo or UTC
     rows = await session.scalars(
-        scoped(select(Event), Event, tenant_id)
-        .where(Event.starts_at < end, Event.ends_at > start)
-        .order_by(Event.starts_at, Event.id)
+        scoped(select(Event), Event, tenant_id).where(
+            or_(
+                and_(Event.rule.is_(None), Event.starts_at < end, Event.ends_at > start),
+                and_(Event.rule.is_not(None), Event.starts_at < end),
+            )
+        )
     )
-    return [_to_event(row, start.tzinfo) for row in rows]
+    found = [o for row in rows for o in occurrences(_to_event(row), start, end, zone)]
+    found = [
+        replace(e, start=e.start.astimezone(start.tzinfo), end=e.end.astimezone(start.tzinfo))
+        for e in found
+    ]
+    return sorted(found, key=lambda e: (e.start, e.external_id))
 
 
 async def replace_imported(

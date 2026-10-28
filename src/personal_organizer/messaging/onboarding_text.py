@@ -14,7 +14,8 @@ instead when the import on connect failed), and says that it is synced about hou
 read live instead, on request (#50). ``agent_unavailable``,
 ``calendar_not_connected`` (the link to connect Google, or reconnect it),
 ``calendar_disconnected`` (a failed add, with no link) and the confirm outcomes (``event_*``,
-``proposal_closed``) are the agent's (``messaging.agent``). ``reminder`` is sent by the
+``proposal_closed``, and ``events_*`` for several at once, ``{titles}`` naming the ones not
+added) are the agent's (``messaging.agent``). ``reminder`` is sent by the
 reminder job, and the ``briefing_*`` lines by the morning briefing (Iteration 05).
 ``voice_unheard`` answers a voice note that couldn't be heard (Iteration 06). The ``group_*``
 and ``outing_*`` lines are the family groups' (Iteration 07). ``{zone}`` is a
@@ -75,6 +76,16 @@ _EN: Final = {
     "event_not_added": (
         "I couldn't add it just now. Check your calendar, and ask me again if it isn't there."
     ),
+    "events_added": "Done, they're all in your calendar:\n{summary}",
+    "events_some_added": "Here's what I added to your calendar:\n{summary}",
+    "events_not_added": (
+        "I couldn't add {titles} just now. Check your calendar, and ask me again for anything "
+        "that isn't there."
+    ),
+    "events_disconnected": (
+        "I couldn't add {titles}: your Google Calendar connection has stopped working. Just ask "
+        "me and I'll send you a link to reconnect it."
+    ),
     "reminder": "Just a reminder: {text}",
     "voice_unheard": "Sorry, I couldn't quite catch that voice note. Could you type it for me?",
     "briefing_intro": "Good morning! Here's your day:",
@@ -130,6 +141,15 @@ _HE: Final = {
     "proposal_closed": "ההצעה הזו כבר לא בתוקף, אז לא הוספתי כלום. אפשר לבקש שוב מה להוסיף.",
     "event_not_added": (
         "לא הצלחתי להוסיף את זה כרגע. כדאי לבדוק ביומן, ולבקש שוב אם האירוע לא שם."
+    ),
+    "events_added": "בוצע, הכול ביומן:\n{summary}",
+    "events_some_added": "הנה מה שהוספתי ליומן:\n{summary}",
+    "events_not_added": (
+        "לא הצלחתי להוסיף כרגע את {titles}. כדאי לבדוק ביומן, ולבקש שוב אם משהו חסר."
+    ),
+    "events_disconnected": (
+        "לא הצלחתי להוסיף את {titles}, כי החיבור ליומן Google שלך הפסיק לעבוד. אפשר לבקש ממני "
+        "ואשלח קישור לחבר אותו מחדש."
     ),
     "reminder": "תזכורת: {text}",
     "voice_unheard": "סליחה, לא הצלחתי לשמוע טוב את ההודעה הקולית. אפשר לכתוב לי אותה?",

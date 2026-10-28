@@ -5,7 +5,14 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from personal_organizer.messaging.recurrence import check_rule, describe_rule, first_at, next_after
+from personal_organizer.interfaces.calendar import CalendarEvent
+from personal_organizer.messaging.recurrence import (
+    check_rule,
+    describe_rule,
+    first_at,
+    next_after,
+    occurrences,
+)
 
 J = ZoneInfo("Asia/Jerusalem")
 FIRST = datetime(2026, 11, 1, 9, 0, tzinfo=J)
@@ -98,3 +105,83 @@ def test_describe() -> None:
     assert describe_rule("FREQ=MONTHLY;BYMONTHDAY=1") == "monthly on the 1st"
     assert describe_rule("FREQ=MONTHLY;BYMONTHDAY=-1") == "monthly on the last day"
     assert describe_rule("FREQ=YEARLY;UNTIL=20270630T090000") == "every year until 2027-06-30"
+
+
+def test_describe_weekly_several_days() -> None:
+    assert describe_rule("FREQ=WEEKLY;BYDAY=MO,WE") == "every Monday and Wednesday"
+
+
+def test_describe_hebrew() -> None:
+    def he(rule: str) -> str:
+        return describe_rule(rule, "he")
+
+    assert he("FREQ=WEEKLY;BYDAY=MO,WE") == "כל יום שני ורביעי"
+    assert he("FREQ=DAILY") == "כל יום"
+    assert he("FREQ=WEEKLY;BYDAY=SU") == "כל יום ראשון"
+    assert he("FREQ=WEEKLY;BYDAY=MO,FR,SA") == "כל יום שני, שישי ושבת"
+    assert he("FREQ=WEEKLY;INTERVAL=2") == "כל שבועיים"
+    assert he("FREQ=WEEKLY;INTERVAL=2;BYDAY=TU") == "כל שבועיים ביום שלישי"
+    assert he("FREQ=MONTHLY;BYMONTHDAY=15") == "ב-15 לחודש"
+    # Israelis count the week from Sunday, so Saturday comes last.
+    assert he("FREQ=WEEKLY;BYDAY=SA,MO") == "כל יום שני ושבת"
+    assert he("FREQ=WEEKLY;BYDAY=MO,SU") == "כל יום ראשון ושני"
+    assert he("FREQ=MONTHLY;BYMONTHDAY=-1") == "ביום האחרון של כל חודש"
+    assert he("FREQ=YEARLY") == "כל שנה"
+    assert he("FREQ=WEEKLY;BYDAY=MO;UNTIL=20270131T180000") == "כל יום שני עד 2027-01-31"
+
+
+JLM = ZoneInfo("Asia/Jerusalem")
+
+
+def _class(rule: str, first: datetime, hours: int = 1) -> CalendarEvent:
+    return CalendarEvent(
+        "series", "Class", first, first.replace(hour=first.hour + hours), rule=rule
+    )
+
+
+def test_occurrences_plain_event_passes_through() -> None:
+    plain = CalendarEvent(
+        "x", "Dentist", datetime(2026, 11, 2, 9, tzinfo=JLM), datetime(2026, 11, 2, 10, tzinfo=JLM)
+    )
+    assert occurrences(
+        plain, datetime(2026, 1, 1, tzinfo=JLM), datetime(2026, 2, 1, tzinfo=JLM), JLM
+    ) == [plain]
+
+
+def test_occurrences_keep_wall_time_across_dst() -> None:
+    # Israel went back to winter time on 2026-10-25.
+    series = _class("FREQ=WEEKLY;BYDAY=MO", datetime(2026, 10, 19, 18, tzinfo=JLM))
+    got = occurrences(
+        series, datetime(2026, 10, 19, tzinfo=JLM), datetime(2026, 11, 3, tzinfo=JLM), JLM
+    )
+    assert [(o.start.hour, o.start.day, o.end.hour) for o in got] == [
+        (18, 19, 19),
+        (18, 26, 19),
+        (18, 2, 19),
+    ]
+    assert got[1].external_id == "series:20261026T1800"
+    assert got[1].rule == series.rule
+    assert got[0].start.utcoffset() != got[1].start.utcoffset()
+
+
+def test_occurrences_open_series_only_window_and_overlap_from_before() -> None:
+    night = CalendarEvent(
+        "s",
+        "Shift",
+        datetime(2026, 1, 1, 22, tzinfo=JLM),
+        datetime(2026, 1, 2, 2, tzinfo=JLM),
+        rule="FREQ=DAILY",
+    )
+    got = occurrences(
+        night, datetime(2026, 6, 10, 1, tzinfo=JLM), datetime(2026, 6, 10, 23, tzinfo=JLM), JLM
+    )
+    # the 9th's shift is still on at 01:00; the 10th's starts at 22:00
+    assert [o.start.day for o in got] == [9, 10]
+
+
+def test_occurrences_until_respected() -> None:
+    series = _class("FREQ=DAILY;UNTIL=20261102T180000", datetime(2026, 11, 1, 18, tzinfo=JLM))
+    got = occurrences(
+        series, datetime(2026, 11, 1, tzinfo=JLM), datetime(2026, 12, 1, tzinfo=JLM), JLM
+    )
+    assert [o.start.day for o in got] == [1, 2]

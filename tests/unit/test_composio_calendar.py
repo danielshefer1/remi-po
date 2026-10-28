@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import time
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -241,6 +242,58 @@ class TestTimes:
         assert created == CalendarEvent(
             external_id="ev_new", title="Sukkot", start=START, end=END, all_day=True
         )
+
+
+class TestRecurrence:
+    # Argument per https://docs.composio.dev/toolkits/googlecalendar (CREATE_EVENT `recurrence`).
+    async def test_create_recurring_passes_rrule(self) -> None:
+        api = create_api()
+        rule = "FREQ=WEEKLY;BYDAY=MO,WE;UNTIL=20261231T235900"
+        created = await connector(api).create_event(ACCOUNT, TENANT, replace(DINNER, rule=rule))
+        arguments = sent(api, CREATE_EVENT)["arguments"]
+        # Google wants UNTIL in UTC; 23:59 in Jerusalem (+02:00 in December) is 21:59Z.
+        assert arguments["recurrence"] == ["RRULE:FREQ=WEEKLY;BYDAY=MO,WE;UNTIL=20261231T215900Z"]
+        assert arguments["timezone"] == "Asia/Jerusalem"
+        assert created.rule == rule
+
+    async def test_an_all_day_series_gets_a_date_until(self) -> None:
+        api = create_api(
+            {
+                "id": "ev_new",
+                "summary": "Sukkot",
+                "start": {"date": "2026-10-13"},
+                "end": {"date": "2026-10-14"},
+            }
+        )
+        event = CalendarEvent(
+            external_id="",
+            title="Sukkot",
+            start=START,
+            end=END,
+            all_day=True,
+            rule="FREQ=DAILY;UNTIL=20261020T000000",
+        )
+        await connector(api).create_event(ACCOUNT, TENANT, event)
+        assert sent(api, CREATE_EVENT)["arguments"]["recurrence"] == [
+            "RRULE:FREQ=DAILY;UNTIL=20261020"
+        ]
+
+    async def test_a_single_event_sends_no_recurrence(self) -> None:
+        api = create_api()
+        await connector(api).create_event(ACCOUNT, TENANT, DINNER)
+        assert "recurrence" not in sent(api, CREATE_EVENT)["arguments"]
+
+    async def test_create_recurring_rejected(self) -> None:
+        api = Api(
+            {
+                schema_route(CREATE_EVENT): schema(CREATE_EVENT),
+                execute_route(CREATE_EVENT): executed({"status_code": 400}, successful=False),
+            }
+        )
+        with pytest.raises(CalendarProviderRejectedError):
+            await connector(api).create_event(
+                ACCOUNT, TENANT, replace(DINNER, rule="FREQ=WEEKLY;BYDAY=TH")
+            )
 
 
 class TestParsing:

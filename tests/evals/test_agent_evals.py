@@ -38,7 +38,13 @@ import pytest
 from personal_organizer.db.models.tenant import Reminder
 from personal_organizer.interfaces.calendar import CalendarEvent
 from personal_organizer.interfaces.llm import Completion, LLMProvider, Message
-from personal_organizer.messaging.agent import add_event, event_summary, respond
+from personal_organizer.messaging.agent import (
+    add_event,
+    add_events,
+    event_summary,
+    events_summary,
+    respond,
+)
 from personal_organizer.messaging.calendar import InMemoryTenantCalendar
 from personal_organizer.messaging.confirm import (
     CONFIRM_ADD,
@@ -281,6 +287,11 @@ PROPOSALS = [
 ]
 
 
+def _asks_to_confirm(reply: str, language: str, proposed: Sequence[CalendarEvent]) -> bool:
+    """The question is code's, at the end: about all of them when several are proposed."""
+    return reply.endswith(confirm_prompt("", language, many=len(proposed) > 1).strip())
+
+
 @pytest.mark.parametrize("scenario", PROPOSALS, ids=lambda s: s.name)
 async def test_propose(scenario: Proposal, llm: AnthropicLLM) -> None:
     """The model proposes the right local window; nothing is created without a "yes"."""
@@ -313,8 +324,7 @@ async def test_propose(scenario: Proposal, llm: AnthropicLLM) -> None:
     assert event.all_day is scenario.all_day, reply
     if scenario.location:
         assert scenario.location in (event.location or ""), reply
-    # The question is code's, at the end.
-    assert reply.endswith(confirm_prompt("", scenario.language).strip()), reply
+    assert _asks_to_confirm(reply, scenario.language, proposed), reply
     assert "http" not in reply.lower(), reply
     assert detect_language(reply) == scenario.language, reply
 
@@ -755,6 +765,123 @@ async def test_timetable_hands_off(llm: AnthropicLLM, strong: AnthropicLLM) -> N
     assert "hand_off" in cheap.called, (cheap.called, reply)
     assert "set_reminder" in hard.called, (hard.called, reply)
     assert any(r.rule for r in schedule.reminders), (schedule.reminders, reply)
+
+
+#: BYDAY's day names, by Python weekday.
+BYDAY = ("MO", "TU", "WE", "TH", "FR", "SA", "SU")
+_HE_DAYS = {"ראשון": "SU", "שני": "MO", "שלישי": "TU", "רביעי": "WE", "חמישי": "TH"}
+#: TIMETABLE's classes as (BYDAY, local start, title), read from its text.
+CLASSES = [
+    (_HE_DAYS[day], at, title)
+    for day, at, title in re.findall(r"^יום (\S+) (\d\d:\d\d) (.+)$", TIMETABLE, re.M)
+]
+assert len(CLASSES) == 6  # at most MAX_PROPOSALS, so every class must be proposed
+
+
+def _day_and_time(event: CalendarEvent) -> tuple[str, str]:
+    local = event.start.astimezone(ZoneInfo(JERUSALEM))
+    return BYDAY[local.weekday()], f"{local:%H:%M}"
+
+
+async def test_gym_mon_wed(llm: AnthropicLLM) -> None:
+    proposed: list[CalendarEvent] = []
+    reply = await _turn(
+        "add the gym every Monday and Wednesday at 7pm",
+        "en",
+        InMemorySchedule(NOW),
+        llm,
+        proposed=proposed,
+    )
+    assert len(proposed) == 1, (proposed, reply)
+    [event] = proposed
+    rule = _rule(event.rule, reply)
+    assert rule.get("FREQ") == "WEEKLY", (event.rule, reply)
+    assert set(rule.get("BYDAY", "").split(",")) == {"MO", "WE"}, (event.rule, reply)
+    assert _day_and_time(event)[1] == "19:00", (event, reply)
+    assert _asks_to_confirm(reply, "en", proposed), reply
+    assert detect_language(reply) == "en", reply
+
+
+async def test_until_end_of_semester(llm: AnthropicLLM) -> None:
+    proposed: list[CalendarEvent] = []
+    reply = await _turn(
+        "תוסיפי לי חוג קרמיקה בימי שלישי ב-18:00 עד סוף הסמסטר, הוא נגמר ב-28 בינואר",
+        "he",
+        InMemorySchedule(NOW),
+        llm,
+        proposed=proposed,
+    )
+    assert len(proposed) == 1, (proposed, reply)
+    [event] = proposed
+    rule = _rule(event.rule, reply)
+    assert (rule.get("FREQ"), rule.get("BYDAY")) == ("WEEKLY", "TU"), (event.rule, reply)
+    # The 28th is a Thursday: an UNTIL from the last Tuesday, the 26th, to the 28th reads right.
+    assert "20270126" <= rule.get("UNTIL", "")[:8] <= "20270128", (event.rule, reply)
+    assert _day_and_time(event) == ("TU", "18:00"), (event, reply)
+    assert detect_language(reply) == "he", reply
+
+
+async def test_hebrew_timetable_all_classes(llm: AnthropicLLM, strong: AnthropicLLM) -> None:
+    """Staging, 2026-10-26: every class is proposed, weekly, and one "yes" adds them all."""
+    zone = ZoneInfo(JERUSALEM)
+    cheap = Recording(llm)
+    calendar = InMemoryTenantCalendar()
+    proposed: list[CalendarEvent] = []
+    reply = await _turn(
+        TIMETABLE,
+        "he",
+        InMemorySchedule(NOW),
+        cheap,  # type: ignore[arg-type]
+        strong=strong,
+        calendar=calendar,
+        proposed=proposed,
+    )
+    assert "hand_off" in cheap.called, (cheap.called, reply)
+    assert len(proposed) == len(CLASSES), ([e.title for e in proposed], reply)
+    for event in proposed:
+        day = _day_and_time(event)[0]
+        rule = _rule(event.rule, reply)
+        assert (rule.get("FREQ"), rule.get("BYDAY", day)) == ("WEEKLY", day), (event, reply)
+    assert sorted(map(_day_and_time, proposed)) == sorted((d, t) for d, t, _ in CLASSES), reply
+    assert _asks_to_confirm(reply, "he", proposed), reply
+    # As agent_turn does: the confirm call reads the "yes", and code adds them.
+    assert await decide(events_summary(proposed, zone, "he"), "כן", llm=llm) == CONFIRM_ADD
+    done = await add_events(proposed, calendar=calendar, zone=zone, language="he")
+    assert len(calendar.added) == len(CLASSES), done
+
+
+def _timetable(zone: ZoneInfo) -> list[CalendarEvent]:
+    """TIMETABLE's classes as proposed: weekly, from each one's next day."""
+    events = []
+    for day, at, title in CLASSES:
+        hour, minute = map(int, at.split(":"))
+        start = datetime(2026, 10, 12, hour, minute, tzinfo=zone)
+        start += timedelta(days=(BYDAY.index(day) - start.weekday()) % 7)
+        rule = f"FREQ=WEEKLY;BYDAY={day}"
+        events.append(CalendarEvent("", title, start, start + timedelta(hours=1), rule=rule))
+    return events
+
+
+#: Replies to a whole proposed timetable: only agreeing to all of it adds.
+TIMETABLE_DECISIONS = [
+    ("כן", "he", CONFIRM_ADD),
+    ("מעולה, תוסיפי", "he", CONFIRM_ADD),
+    ("yes, add them all", "en", CONFIRM_ADD),
+    ("לא, עזבי", "he", CONFIRM_CANCEL),
+    ("no thanks", "en", CONFIRM_CANCEL),
+    ("only the Monday one", "en", None),
+    ("רק את השיעור של יום שני", "he", None),
+]
+
+
+@pytest.mark.parametrize(
+    ("text", "language", "expected"), TIMETABLE_DECISIONS, ids=[t for t, *_ in TIMETABLE_DECISIONS]
+)
+async def test_decide_timetable(
+    text: str, language: str, expected: str | None, llm: AnthropicLLM
+) -> None:
+    summary = events_summary(_timetable(ZoneInfo(JERUSALEM)), ZoneInfo(JERUSALEM), language)
+    assert await decide(summary, text, llm=llm) == expected
 
 
 @pytest.mark.parametrize(

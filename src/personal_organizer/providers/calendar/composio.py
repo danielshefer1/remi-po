@@ -33,7 +33,8 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Sequence
-from datetime import date, datetime, time, tzinfo
+from dataclasses import replace
+from datetime import UTC, date, datetime, time, tzinfo
 from typing import Any, Final
 from zoneinfo import ZoneInfo
 
@@ -109,6 +110,22 @@ def _rfc3339(moment: datetime) -> str:
         msg = "calendar times must be timezone-aware"
         raise ValueError(msg)
     return moment.isoformat(timespec="seconds")
+
+
+def _google_rule(event: CalendarEvent) -> str:
+    """``RRULE:...`` for Google. Our UNTIL is local wall time; Google wants UTC with a ``Z`` for a
+    timed event and a plain date for an all-day one."""
+    parts = []
+    for part in (event.rule or "").split(";"):
+        key, _, value = part.partition("=")
+        if key == "UNTIL":
+            if event.all_day:
+                value = value[:8]
+            else:
+                local = datetime.strptime(value, "%Y%m%dT%H%M%S").replace(tzinfo=event.start.tzinfo)
+                value = local.astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
+        parts.append(f"{key}={value}")
+    return "RRULE:" + ";".join(parts)
 
 
 def _when(field: Any, zone: tzinfo | None) -> tuple[datetime, bool]:
@@ -271,9 +288,12 @@ class ComposioConnector:
             arguments["timezone"] = event.start.tzinfo.key
         if event.location:
             arguments["location"] = event.location
+        if event.rule:
+            arguments["recurrence"] = [_google_rule(event)]
         payload = await self._execute(CREATE_EVENT, arguments, account_id, user_id)
         try:
-            return _event(payload, event.start.tzinfo)
+            # Keep the rule we sent: Google's reply is the master, but the stored copy is rule-less.
+            return replace(_event(payload, event.start.tzinfo), rule=event.rule)
         except KeyError, TypeError, ValueError:
             raise CalendarProviderRejectedError(None) from None
 
