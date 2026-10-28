@@ -250,10 +250,11 @@ class TestSplitReply:
         propose = call(
             "propose_event", title="Dentist", start="2026-10-13T09:00", end="2026-10-13T10:00"
         )
-        llm = ScriptedLLM(said("", propose), said("Got it.\n---\nTuesday at nine, then."))
+        # Hebrew, as the message is: an English reply would be redone in Hebrew (#62).
+        llm = ScriptedLLM(said("", propose), said("הבנתי.\n---\nמחר בתשע, אז."))
         advance, channel, _ = await _turn(db, owner_conn, tenant, llm)
         [first, second, last] = channel.sent
-        assert (first.body, second.body) == ("Got it.", "Tuesday at nine, then.")
+        assert (first.body, second.body) == ("הבנתי.", "מחר בתשע, אז.")
         assert last.body.startswith("Dentist\n")
         assert last.body.endswith("להוסיף ליומן?")
         assert advance.reply == f"{first.body}\n\n{second.body}\n\n{last.body}"
