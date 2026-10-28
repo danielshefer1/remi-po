@@ -12,6 +12,7 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -29,7 +30,7 @@ from personal_organizer.db.repositories.connections import bind_connection
 from personal_organizer.db.repositories.tenants import set_timezone
 from personal_organizer.interfaces.calendar import CalendarEvent
 from personal_organizer.interfaces.channel import OutboundMessage
-from personal_organizer.messaging.agent import CREATE_EVENT, agent_turn
+from personal_organizer.messaging.agent import CREATE_EVENT, agent_turn, event_summary
 from personal_organizer.messaging.confirm import confirm_prompt
 from personal_organizer.messaging.inbox import load_row
 from personal_organizer.messaging.onboarding import Advance
@@ -53,6 +54,23 @@ DENTIST = call(
 SUMMARY = "\n".join(["רופא שיניים", "יום שלישי 2026-10-13, 09:00-10:00"])
 CHOICE = confirm_prompt(SUMMARY, "he")
 ADDED = t("event_added", "he", summary=SUMMARY)
+LESSONS = [
+    ("מתמטיקה", "SU", "2026-10-18"),
+    ("אנגלית", "MO", "2026-10-19"),
+    ("היסטוריה", "TU", "2026-10-20"),
+    ("ספרות", "WE", "2026-10-21"),
+    ("מדעים", "TH", "2026-10-22"),
+]
+TIMETABLE = [
+    call(
+        "propose_event",
+        title=title,
+        start=f"{day}T08:00",
+        end=f"{day}T08:45",
+        repeat=f"FREQ=WEEKLY;BYDAY={code}",
+    )
+    for title, code, day in LESSONS
+]
 
 
 class Outbound(FakeOutbound):
@@ -136,6 +154,18 @@ async def _propose(
     return inbox_id
 
 
+async def _propose_timetable(
+    db: Database, conn: Any, tenant: TenantState, calendar: InMemoryCalendar
+) -> None:
+    llm = ScriptedLLM(said("", *TIMETABLE), said("זו המערכת?"))
+    await _turn(db, conn, tenant, llm, calendar, "תוסיף לי את מערכת השעות")
+    action = await _current(db, tenant)
+    assert action is not None
+    assert [e["rule"] for e in action.payload["events"]] == [
+        f"FREQ=WEEKLY;BYDAY={code}" for _, code, _ in LESSONS
+    ]
+
+
 async def _current(
     db: Database, tenant: TenantState, now: datetime = NOW
 ) -> pending.PendingAction | None:
@@ -154,11 +184,16 @@ class TestPropose:
         assert action is not None
         assert action.kind == CREATE_EVENT
         assert action.payload == {
-            "title": "רופא שיניים",
-            "start": "2026-10-13T09:00",
-            "end": "2026-10-13T10:00",
-            "all_day": False,
-            "location": None,
+            "events": [
+                {
+                    "title": "רופא שיניים",
+                    "start": "2026-10-13T09:00",
+                    "end": "2026-10-13T10:00",
+                    "all_day": False,
+                    "location": None,
+                    "rule": None,
+                }
+            ],
             "proposed_by": str(inbox_id),
         }
         assert calendar.events == []
@@ -316,6 +351,51 @@ class TestConfirm:
             )
         assert event.external_id == created.external_id
 
+    async def test_timetable_five_proposals_one_confirm(
+        self, db: Database, owner_conn: Any
+    ) -> None:
+        tenant = await _active(db)
+        calendar = InMemoryCalendar()
+        await _propose_timetable(db, owner_conn, tenant, calendar)
+        llm = _yes()
+        advance, channel, _ = await _turn(db, owner_conn, tenant, llm, calendar, "כן, הכול")
+        [[system, _]] = llm.calls
+        assert all(title in system.content for title, _, _ in LESSONS)
+        assert [(e.title, e.rule) for e in calendar.events] == [
+            (title, f"FREQ=WEEKLY;BYDAY={code}") for title, code, _ in LESSONS
+        ]
+        zone = ZoneInfo("Asia/Jerusalem")
+        summary = "\n\n".join(event_summary(e, zone, "he") for e in calendar.events)
+        assert [m.body for m in channel.sent] == [t("events_added", "he", summary=summary)]
+        assert advance.reply == t("events_added", "he", summary=summary)
+        assert await _current(db, tenant) is None
+
+    async def test_legacy_payload_still_confirms(self, db: Database, owner_conn: Any) -> None:
+        """One proposed before #53 stored a single event; it lives up to an hour."""
+        tenant = await _active(db)
+        legacy = {
+            "title": "רופא שיניים",
+            "start": "2026-10-13T09:00",
+            "end": "2026-10-13T10:00",
+            "all_day": False,
+            "location": None,
+            "proposed_by": str(uuid4()),
+        }
+        async with db.tenant_session(TenantId(tenant.id)) as session:
+            await pending.propose(session, tenant.id, kind=CREATE_EVENT, payload=legacy, now=NOW)
+        calendar = InMemoryCalendar()
+        llm = _yes()
+        _, channel, _ = await _turn(db, owner_conn, tenant, llm, calendar)
+        [[system, _]] = llm.calls
+        assert SUMMARY in system.content
+        [event] = calendar.events
+        assert (event.title, event.start.isoformat(), event.rule) == (
+            "רופא שיניים",
+            "2026-10-13T09:00:00+03:00",
+            None,
+        )
+        assert [m.body for m in channel.sent] == [ADDED]
+
     async def test_an_unavailable_confirm_call_is_retried_with_the_proposal_kept(
         self, db: Database, owner_conn: Any
     ) -> None:
@@ -344,6 +424,16 @@ class TestNoConfirm:
         await _propose(db, owner_conn, tenant, calendar)
         llm = ScriptedLLM(said("CANCEL"))
         _, channel, _ = await _turn(db, owner_conn, tenant, llm, calendar, "לא, עזוב")
+        assert [m.body for m in channel.sent] == [t("event_cancelled", "he")]
+        assert await _current(db, tenant) is None
+        assert calendar.events == []
+
+    async def test_no_drops_all(self, db: Database, owner_conn: Any) -> None:
+        tenant = await _active(db)
+        calendar = InMemoryCalendar()
+        await _propose_timetable(db, owner_conn, tenant, calendar)
+        llm = ScriptedLLM(said("CANCEL"))
+        _, channel, _ = await _turn(db, owner_conn, tenant, llm, calendar, "לא, עזוב את זה")
         assert [m.body for m in channel.sent] == [t("event_cancelled", "he")]
         assert await _current(db, tenant) is None
         assert calendar.events == []
@@ -383,7 +473,7 @@ class TestNoConfirm:
         await _turn(db, owner_conn, tenant, llm, calendar, "בעצם בעשר")
         action = await _current(db, tenant)
         assert action is not None
-        assert action.payload["start"] == "2026-10-13T10:00"
+        assert action.payload["events"][0]["start"] == "2026-10-13T10:00"
         await _turn(db, owner_conn, tenant, _yes(), calendar)
         assert [e.start.isoformat() for e in calendar.events] == ["2026-10-13T10:00:00+03:00"]
 

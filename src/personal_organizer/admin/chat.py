@@ -36,7 +36,7 @@ from personal_organizer.db.engine import Database
 from personal_organizer.db.repositories.connections import active_connection
 from personal_organizer.interfaces.calendar import CalendarEvent
 from personal_organizer.interfaces.llm import LLMProvider, Message
-from personal_organizer.messaging.agent import AGENT_REPLY, add_event, event_summary, respond
+from personal_organizer.messaging.agent import AGENT_REPLY, add_events, events_summary, respond
 from personal_organizer.messaging.calendar import Calendar, InMemoryTenantCalendar, TenantCalendar
 from personal_organizer.messaging.confirm import CONFIRM_ADD, decide
 from personal_organizer.messaging.inbox import InboxRow
@@ -155,13 +155,14 @@ async def agent_chat(
             continue
         picked = None
         if waiting:
-            picked = await decide(event_summary(waiting[0], zone, language), line, llm=llm)
+            picked = await decide(events_summary(waiting, zone, language), line, llm=llm)
         if picked is not None:
-            event = waiting.pop()
+            events = waiting[:]
+            waiting.clear()
             if picked != CONFIRM_ADD:
                 text = t("event_cancelled", language)
             elif isinstance(calendar, InMemoryTenantCalendar):
-                text = await add_event(event, calendar=calendar, zone=zone, language=language)
+                text = await add_events(events, calendar=calendar, zone=zone, language=language)
             else:
                 text = NOT_ADDED
         else:

@@ -21,21 +21,24 @@ from personal_organizer.messaging.language import ENGLISH
 CONFIRM_ADD: Final = "confirm:add"
 CONFIRM_CANCEL: Final = "confirm:cancel"
 
-_EN: Final = {"confirm_question": "Add this to your calendar?"}
-_HE: Final = {"confirm_question": "להוסיף ליומן?"}
+_EN: Final = {
+    "confirm_question": "Add this to your calendar?",
+    "confirm_question_many": "Add all of these to your calendar?",
+}
+_HE: Final = {"confirm_question": "להוסיף ליומן?", "confirm_question_many": "להוסיף את הכול ליומן?"}
 
 CONFIRM_TEXT: Final[Mapping[str, Mapping[str, str]]] = MappingProxyType(
     {"en": MappingProxyType(_EN), "he": MappingProxyType(_HE)}
 )
 
 _DECIDE: Final = """\
-You asked someone whether to add this event to their calendar:
+You asked someone whether to add this to their calendar (one event, or several):
 
 {summary}
 
 Their reply follows, in Hebrew or English. Answer with exactly one word: ADD if they agree to \
-add it as it is, CANCEL if they decline, or OTHER if they want it changed, ask something, talk \
-about something else, or you are not sure."""
+add all of it as it is, CANCEL if they decline all of it, or OTHER if they want any of it \
+changed or left out, ask something, talk about something else, or you are not sure."""
 
 _ANSWERS: Final = MappingProxyType({"ADD": CONFIRM_ADD, "CANCEL": CONFIRM_CANCEL})
 
@@ -44,9 +47,11 @@ def _t(key: str, language: str) -> str:
     return CONFIRM_TEXT.get(language, CONFIRM_TEXT[ENGLISH])[key]
 
 
-def confirm_prompt(summary: str, language: str) -> str:
-    """``summary`` (what would be written, in the tenant's words) and the question."""
-    return f"{summary}\n\n{_t('confirm_question', language)}"
+def confirm_prompt(summary: str, language: str, *, many: bool = False) -> str:
+    """``summary`` (what would be written, in the tenant's words) and the question, asked
+    about all of them when ``many`` events are proposed at once."""
+    question = _t("confirm_question_many" if many else "confirm_question", language)
+    return f"{summary}\n\n{question}"
 
 
 async def decide(summary: str, text: str, *, llm: LLMProvider) -> str | None:

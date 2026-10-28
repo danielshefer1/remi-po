@@ -121,7 +121,10 @@ def test_describe_hebrew() -> None:
     assert he("FREQ=WEEKLY;BYDAY=MO,FR,SA") == "כל יום שני, שישי ושבת"
     assert he("FREQ=WEEKLY;INTERVAL=2") == "כל שבועיים"
     assert he("FREQ=WEEKLY;INTERVAL=2;BYDAY=TU") == "כל שבועיים ביום שלישי"
-    assert he("FREQ=MONTHLY;BYMONTHDAY=15") == "ב-15 של כל חודש"
+    assert he("FREQ=MONTHLY;BYMONTHDAY=15") == "ב-15 לחודש"
+    # Israelis count the week from Sunday, so Saturday comes last.
+    assert he("FREQ=WEEKLY;BYDAY=SA,MO") == "כל יום שני ושבת"
+    assert he("FREQ=WEEKLY;BYDAY=MO,SU") == "כל יום ראשון ושני"
     assert he("FREQ=MONTHLY;BYMONTHDAY=-1") == "ביום האחרון של כל חודש"
     assert he("FREQ=YEARLY") == "כל שנה"
     assert he("FREQ=WEEKLY;BYDAY=MO;UNTIL=20270131T180000") == "כל יום שני עד 2027-01-31"

@@ -152,7 +152,10 @@ def _he_days(days: list[int], *, on: bool) -> str:
 
 def _describe_he(parts: dict[str, str]) -> str:
     freq, n = parts["FREQ"], int(parts.get("INTERVAL", "1"))
-    days = [_DAYS.index(d) for d in parts.get("BYDAY", "").split(",") if d]
+    # Sunday first, as the week is counted here, so Saturday comes last.
+    days = sorted(
+        (_DAYS.index(d) for d in parts.get("BYDAY", "").split(",") if d), key=lambda d: (d + 1) % 7
+    )
     singular, dual, plural = {
         "DAILY": ("יום", "יומיים", "ימים"),
         "WEEKLY": ("שבוע", "שבועיים", "שבועות"),
@@ -165,7 +168,8 @@ def _describe_he(parts: dict[str, str]) -> str:
     elif "BYMONTHDAY" in parts:
         day = int(parts["BYMONTHDAY"])
         on = "ביום האחרון" if day == -1 else f"ב-{day}"
-        text = f"{on} של כל חודש" if n == 1 else f"{every} {on}"
+        month = "של כל חודש" if day == -1 else "לחודש"  # "ב-15 לחודש"
+        text = f"{on} {month}" if n == 1 else f"{every} {on}"
     else:
         text = every
     if "UNTIL" in parts:

@@ -17,8 +17,10 @@ into it about every hour, or read live on every look once they ask for that (``l
 
 **Writes (D5).** ``propose_event`` writes nothing. :func:`respond` hands the checked
 event back in ``proposed`` and puts its summary and "Add this to your calendar?" under the
-model's words: code writes them, never the model, as in onboarding's D10. :func:`agent_turn`
-stores the event as the tenant's pending action before sending. The next message goes to
+model's words: code writes them, never the model, as in onboarding's D10. One message may
+propose up to :data:`MAX_PROPOSALS` (a timetable, #53), each repeating or not, under one
+question that one answer settles. :func:`agent_turn` stores them as the tenant's pending
+action before sending. The next message goes to
 ``confirm.decide``, a separate model call that sees only the summary and that message. On
 CANCEL code drops the action; on ADD it claims it in its own committed transaction, then
 creates the event, so a re-run or a second "yes" never creates it twice (ADR 0003). Anything
@@ -111,6 +113,8 @@ MAX_WINDOW: Final = timedelta(days=62)
 #: The longest title or location ``propose_event`` takes, so the confirm fits one message, and
 #: the longest reminder text.
 MAX_FIELD: Final = 200
+#: The most events one message proposes: a week's timetable, one per class, with room to spare.
+MAX_PROPOSALS: Final = 8
 
 #: The furthest ahead ``set_reminder`` sets one.
 MAX_AHEAD: Final = timedelta(days=366)
@@ -207,8 +211,10 @@ TOOLS: Final[tuple[Mapping[str, Any], ...]] = (
             "Propose adding one event to their calendar. This adds nothing: its "
             "summary and a question asking them to confirm are put under your reply, and it is "
             f"added only if they agree. {_TIME_FORMAT}. If they gave no end, make it an hour long. "
-            "For an all-day event, set all_day and give dates, end being its last day. At "
-            "most one proposal per message."
+            "For an all-day event, set all_day and give dates, end being its last day. For one "
+            "that repeats, repeat is an RRULE such as FREQ=WEEKLY;BYDAY=SU,TU; start and end are "
+            f"the first time. Up to {MAX_PROPOSALS} per message, all confirmed by one answer; "
+            "for a timetable, one per class."
         ),
         "input_schema": {
             "type": "object",
@@ -218,6 +224,16 @@ TOOLS: Final[tuple[Mapping[str, Any], ...]] = (
                 "end": {"type": "string", "description": "Local end, e.g. 2026-10-13T19:00"},
                 "location": {"type": "string", "description": "Where, only if they said"},
                 "all_day": {"type": "boolean", "description": "True for an all-day event"},
+                "repeat": {
+                    "type": "string",
+                    "description": (
+                        "Only if it repeats: an RRULE, at most daily, ending with UNTIL (local "
+                        "time, e.g. 20270630T235900) or COUNT if they said when it stops. A "
+                        "timetable, or anything on given weekdays (classes, lessons, shifts), "
+                        "repeats weekly by default: FREQ=WEEKLY;BYDAY=…, a day already past "
+                        "starts next week. Something said as a one-time thing stays one-time."
+                    ),
+                },
             },
             "required": ["title", "start", "end"],
         },
@@ -686,7 +702,18 @@ def check_event(arguments: Mapping[str, Any], zone: ZoneInfo) -> CalendarEvent |
         return "error: end must be after start"
     if end - start > MAX_WINDOW:
         return f"error: an event lasts at most {MAX_WINDOW.days} days"
-    return CalendarEvent("", title.strip(), start, end, all_day, (location or "").strip() or None)
+    rule = None
+    if repeat := arguments.get("repeat"):
+        try:
+            rule = check_rule(str(repeat), start)
+            first = first_at(rule, start)
+        except ValueError as error:
+            return f"error: repeat: {error}"
+        # Google counts the start as an occurrence, so a Tuesday start for a MO,WE rule would
+        # add a Tuesday; it becomes the Wednesday, wall times kept.
+        start, end = first, end + (first - start)
+    location = (location or "").strip() or None
+    return CalendarEvent("", title.strip(), start, end, all_day, location, rule=rule)
 
 
 def day_label(when: date, language: str) -> str:
@@ -696,7 +723,7 @@ def day_label(when: date, language: str) -> str:
 
 
 def event_summary(event: CalendarEvent, zone: ZoneInfo, language: str) -> str:
-    """The title, the local day and times, and the location, one per line."""
+    """The title, the local day and times, how it repeats, and the location, one per line."""
     start, end = event.start.astimezone(zone), event.end.astimezone(zone)
 
     def day(when: date) -> str:
@@ -709,7 +736,14 @@ def event_summary(event: CalendarEvent, zone: ZoneInfo, language: str) -> str:
         when = f"{day(start.date())}, {start:%H:%M}-{end:%H:%M}"
     else:
         when = f"{day(start.date())} {start:%H:%M} - {day(end.date())} {end:%H:%M}"
-    return "\n".join(line for line in (event.title, when, event.location) if line)
+    repeat = describe_rule(event.rule, language) if event.rule else None
+    repeat = repeat and repeat[0].upper() + repeat[1:]  # "Every Monday"; Hebrew has no case
+    return "\n".join(line for line in (event.title, when, repeat, event.location) if line)
+
+
+def events_summary(events: Sequence[CalendarEvent], zone: ZoneInfo, language: str) -> str:
+    """Each event's :func:`event_summary`, a blank line between them."""
+    return "\n\n".join(event_summary(event, zone, language) for event in events)
 
 
 def outing_event(poll: GroupPoll, zone: ZoneInfo) -> CalendarEvent:
@@ -724,31 +758,42 @@ def outing_line(poll: GroupPoll, zone: ZoneInfo, language: str | None = None) ->
     return summary.replace("\n", ", ")
 
 
-def _payload(event: CalendarEvent, inbox_id: UUID) -> dict[str, Any]:
+def _payload(events: Sequence[CalendarEvent], inbox_id: UUID) -> dict[str, Any]:
     """The pending action's payload: local wall times, as the model gave them (D6)."""
     return {
-        "title": event.title,
-        "start": event.start.replace(tzinfo=None).isoformat(timespec="minutes"),
-        "end": event.end.replace(tzinfo=None).isoformat(timespec="minutes"),
-        "all_day": event.all_day,
-        "location": event.location,
-        # The message that proposed it: see agent_turn.
+        "events": [
+            {
+                "title": event.title,
+                "start": event.start.replace(tzinfo=None).isoformat(timespec="minutes"),
+                "end": event.end.replace(tzinfo=None).isoformat(timespec="minutes"),
+                "all_day": event.all_day,
+                "location": event.location,
+                "rule": event.rule,
+            }
+            for event in events
+        ],
+        # The message that proposed them: see agent_turn.
         "proposed_by": str(inbox_id),
     }
 
 
-def _stored(payload: Mapping[str, Any], zone: ZoneInfo) -> CalendarEvent:
+def _stored(payload: Mapping[str, Any], zone: ZoneInfo) -> list[CalendarEvent]:
     def local(value: str) -> datetime:
         return datetime.fromisoformat(value).replace(tzinfo=zone)
 
-    return CalendarEvent(
-        "",
-        payload["title"],
-        local(payload["start"]),
-        local(payload["end"]),
-        payload["all_day"],
-        payload["location"],
-    )
+    # One proposed before #53 is a single event at the top level; it lives up to pending.TTL.
+    return [
+        CalendarEvent(
+            "",
+            item["title"],
+            local(item["start"]),
+            local(item["end"]),
+            item["all_day"],
+            item["location"],
+            rule=item.get("rule"),
+        )
+        for item in payload.get("events", [payload])
+    ]
 
 
 async def add_event(
@@ -773,6 +818,59 @@ async def add_event(
         return t("event_not_added", language)
     text = t("event_added", language, summary=event_summary(created, zone, language))
     return f"{text}\n{created.link}" if created.link else text
+
+
+def _titles(events: Sequence[CalendarEvent], language: str) -> str:
+    """ "Math, English and History"; in Hebrew "and" is a prefix, with a dash before a word
+    that isn't Hebrew. A title said twice is said once."""
+    titles = list(dict.fromkeys(event.title for event in events))
+    if len(titles) == 1:
+        return titles[0]
+    *rest, last = titles
+    if language != HEBREW:
+        return f"{', '.join(rest)} and {last}"
+    vav = "ו" if "\u05d0" <= last[0] <= "\u05ea" else "ו-"  # noqa: RUF001
+    return f"{', '.join(rest)} {vav}{last}"
+
+
+async def add_events(
+    events: Sequence[CalendarEvent],
+    *,
+    calendar: Calendar,
+    zone: ZoneInfo,
+    language: str,
+) -> str:
+    """Create the confirmed ``events`` in order; return one fixed reply saying how they went.
+
+    One event reads exactly as :func:`add_event`. Of several, the ones added are listed under
+    one line and the ones that failed are named, so a timetable is never claimed whole when part
+    of it failed. A calendar that stopped working stops the rest. As in :func:`add_event`, no
+    create is ever tried again.
+    """
+    if len(events) == 1:
+        return await add_event(events[0], calendar=calendar, zone=zone, language=language)
+    added: list[CalendarEvent] = []
+    failed: list[CalendarEvent] = []
+    stopped: list[CalendarEvent] = []
+    for n, event in enumerate(events):
+        try:
+            added.append(await calendar.add(event))
+        except CalendarNotConnectedError:
+            stopped = list(events[n:])
+            break
+        except CalendarProviderUnavailableError, CalendarProviderRejectedError:
+            log.warning("agent.create_failed")
+            failed.append(event)
+    lines = []
+    if added:
+        # No links: one per event would bury the list.
+        done = "events_some_added" if failed or stopped else "events_added"
+        lines.append(t(done, language, summary=events_summary(added, zone, language)))
+    if failed:
+        lines.append(t("events_not_added", language, titles=_titles(failed, language)))
+    if stopped:
+        lines.append(t("events_disconnected", language, titles=_titles(stopped, language)))
+    return "\n\n".join(lines)
 
 
 async def remind(
@@ -1055,13 +1153,22 @@ async def respond(
             send_link = True
             return "ok: the link goes below your reply; never write one yourself"
         if name == "propose_event":
-            if found:
-                return "error: one proposal per message; the first one stands"
+            if len(found) == MAX_PROPOSALS:
+                return (
+                    f"error: at most {MAX_PROPOSALS} proposals per message, so this one was "
+                    "not proposed; tell them which ones didn't fit and to ask again after"
+                )
             event = check_event(arguments, zone)
             if isinstance(event, str):
                 return event
             found.append(event)
-            return "ok: proposed; the summary and the confirm question go below your reply"
+            if event.rule is None:
+                return "ok: proposed; the summary and the confirm question go below your reply"
+            return (
+                f"ok: proposed, first on {event.start:%Y-%m-%dT%H:%M}, repeating "
+                f"{describe_rule(event.rule)}; the summary and the confirm question go below "
+                "your reply"
+            )
         if name != "list_events":
             return "error: unknown tool"
         return await read_calendar(arguments, calendar=calendar, zone=zone)
@@ -1113,7 +1220,8 @@ async def respond(
         said = ""
     if found:
         language = tenant.language
-        suffix = confirm_prompt(event_summary(found[0], zone, language), language)
+        summary = events_summary(found, zone, language)
+        suffix = confirm_prompt(summary, language, many=len(found) > 1)
         # The question must arrive whole, or a "yes" would confirm what they never saw. It is
         # its own text, unless three already came before it: then it rides the third.
         joined = f"{said}\n{BREAK}\n{suffix}" if said else suffix
@@ -1158,8 +1266,8 @@ async def _confirmed(
     if claimed is None:
         return t("proposal_closed", language)
     zone = ZoneInfo(tenant.timezone or "UTC")
-    event = _stored(claimed.payload, zone)
-    return await add_event(event, calendar=calendar, zone=zone, language=language)
+    events = _stored(claimed.payload, zone)
+    return await add_events(events, calendar=calendar, zone=zone, language=language)
 
 
 async def agent_turn(
@@ -1209,7 +1317,7 @@ async def agent_turn(
         picked = None
         if row.body and not own:
             zone = ZoneInfo(tenant.timezone or "UTC")
-            summary = event_summary(_stored(action.payload, zone), zone, tenant.language)
+            summary = events_summary(_stored(action.payload, zone), zone, tenant.language)
             try:
                 picked = await decide(summary, row.body, llm=llm)
             except LLMUnavailableError:
@@ -1278,7 +1386,7 @@ async def agent_turn(
                 session,
                 tenant.id,
                 kind=CREATE_EVENT,
-                payload=_payload(proposed[0], row.id),
+                payload=_payload(proposed, row.id),
                 now=now,
             )
     parts = [
@@ -1313,6 +1421,7 @@ __all__ = [
     "LANGUAGE_NAMES",
     "MAX_AHEAD",
     "MAX_FIELD",
+    "MAX_PROPOSALS",
     "MAX_WINDOW",
     "NO_GOOGLE",
     "NO_GRANTS",
@@ -1322,11 +1431,13 @@ __all__ = [
     "TOOLS",
     "WEEKDAYS",
     "add_event",
+    "add_events",
     "agent_prompt",
     "agent_turn",
     "check_event",
     "day_label",
     "event_summary",
+    "events_summary",
     "fit_message",
     "looks_secret",
     "outing_event",
