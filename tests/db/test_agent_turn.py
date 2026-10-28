@@ -19,6 +19,7 @@ from personal_organizer.core.errors import (
     CalendarProviderUnavailableError,
     LLMRejectedError,
     LLMUnavailableError,
+    TransientChannelError,
 )
 from personal_organizer.core.types import TenantId
 from personal_organizer.db.engine import Database
@@ -26,6 +27,7 @@ from personal_organizer.db.repositories.connections import bind_connection
 from personal_organizer.db.repositories.messages import record_inbound, record_outbound
 from personal_organizer.db.repositories.tenants import set_timezone
 from personal_organizer.interfaces.calendar import CalendarEvent
+from personal_organizer.interfaces.channel import OutboundMessage
 from personal_organizer.interfaces.llm import Message
 from personal_organizer.messaging.agent import AGENT_REPLY, agent_turn
 from personal_organizer.messaging.inbound import handle_inbound
@@ -254,6 +256,38 @@ class TestSplitReply:
         assert last.body.endswith("להוסיף ליומן?")
         assert advance.reply == f"{first.body}\n\n{last.body}"
         assert "---" not in advance.reply
+
+    async def test_a_later_part_going_down_still_records_the_reply(
+        self, db: Database, owner_conn: Any
+    ) -> None:
+        class SecondTransient(FakeOutbound):
+            async def send_text(self, message: OutboundMessage) -> str:
+                if len(self.attempts) == 1:
+                    self.attempts.append(message)
+                    raise TransientChannelError("down")
+                return await super().send_text(message)
+
+        tenant = await _active(db)
+        row_id = await insert_inbox(owner_conn, phone=IL_PHONE, body="hi")
+        row = await load_row(db, row_id)
+        assert row is not None
+        channel = SecondTransient(name="gowa")
+        advance = await agent_turn(
+            row,
+            channel,
+            tenant,
+            NOW,
+            db=db,
+            llm=ScriptedLLM(said("one\n---\ntwo\n---\nthree")),
+            calendar=InMemoryCalendar(),
+        )
+        assert [m.body for m in channel.sent] == ["one"]
+        assert advance.reply == "one\n\ntwo\n\nthree"
+
+    async def test_only_break_lines_is_the_fallback(self, db: Database, owner_conn: Any) -> None:
+        tenant = await _active(db)
+        _, channel, _ = await _turn(db, owner_conn, tenant, ScriptedLLM(said("---")))
+        assert [m.body for m in channel.sent] == [t("agent_unavailable", "he")]
 
 
 class TestNoCalendar:

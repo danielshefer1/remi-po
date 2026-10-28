@@ -196,6 +196,13 @@ async def test_group_reply_split(
     )
 
 
+async def test_group_reply_of_only_break_lines_sends_nothing(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    channel, _ = await _say(db, owner_conn, onboarding_settings, ScriptedLLM(said("---")))
+    assert channel.sent == []
+
+
 async def test_not_shared_member_is_not_read(
     db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
 ) -> None:

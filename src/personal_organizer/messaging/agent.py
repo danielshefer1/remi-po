@@ -1101,9 +1101,8 @@ async def respond(
 def fit_message(text: str) -> str:
     if len(text) <= WHATSAPP_TEXT_LIMIT:
         return text
-    # shortcut: a reply longer than one message is cut at a line or sentence, so one send
-    # stays one kind and a re-run sends nothing new. Send the rest as numbered parts if the
-    # 1024-token cap ever lets a real answer overflow.
+    # shortcut: one text longer than a message is cut at a line or sentence, so a part stays
+    # one send. The model splits a long answer into texts; this only guards one that overflows.
     return split_text(text, WHATSAPP_TEXT_LIMIT - 1)[0].rstrip() + "…"
 
 
@@ -1241,6 +1240,8 @@ async def agent_turn(
         except LLMRejectedError:
             log.warning("agent.fallback", reason="rejected")
             reply = ""
+    if bubbles(reply) == [""]:  # nothing but break lines says nothing
+        reply = ""
     if reply and proposed:
         async with db.tenant_session(TenantId(tenant.id)) as session:
             await pending.propose(

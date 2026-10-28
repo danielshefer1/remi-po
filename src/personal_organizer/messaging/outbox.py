@@ -57,6 +57,15 @@ async def _set(db: Database, outbox_id: UUID, **values: object) -> None:
         )
 
 
+async def _set_failed(db: Database, inbox_id: UUID, kind: str) -> None:
+    async with db.system_session() as session:
+        await session.execute(
+            update(ChannelOutbox)
+            .where(ChannelOutbox.inbox_id == inbox_id, ChannelOutbox.kind == kind)
+            .values(status="failed", updated_at=func.now())
+        )
+
+
 async def _claim(
     db: Database,
     *,
@@ -198,7 +207,7 @@ async def send_parts(
     the rest. Returns part 1's status.
     """
     # shortcut: a crash between parts loses the later parts; a re-run would write a different
-    # reply
+    # reply. A stopped later part can leave a proposal whose question never arrived.
     first = await _status(db, inbox_id, kind)
     if first is not None and first != "pending":
         return first
@@ -206,15 +215,25 @@ async def send_parts(
     for n, text in enumerate(parts, 1):
         if n > 1:
             await asyncio.sleep(PART_GAP_S)
-        sent = await send_once(
-            db,
-            channel,
-            inbox_id=inbox_id,
-            kind=kind if n == 1 else f"{kind}:{n}",
-            recipient_key=recipient_key,
-            to=to,
-            text=text,
-        )
+        part_kind = kind if n == 1 else f"{kind}:{n}"
+        try:
+            sent = await send_once(
+                db,
+                channel,
+                inbox_id=inbox_id,
+                kind=part_kind,
+                recipient_key=recipient_key,
+                to=to,
+                text=text,
+            )
+        except TransientChannelError:
+            # Part 1 retries the whole job; once it is out a retry returns early, so a later
+            # part that stays pending would stall the turn and its record.
+            if n == 1:
+                raise
+            await _set_failed(db, inbox_id, part_kind)
+            log.warning("outbox.part_stopped", part=n, kind=part_kind)
+            break
         status = status or sent
         if sent != "accepted":
             break

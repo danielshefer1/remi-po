@@ -514,8 +514,8 @@ async def _answer(
             language=language,
             last_attempt=last_attempt,
         )
-    if reply:
-        parts = [fit_message(part) for part in bubbles(reply)]
+    parts = [fit_message(part) for part in bubbles(reply)]
+    if parts != [""]:
         await send_parts(
             db,
             channel,

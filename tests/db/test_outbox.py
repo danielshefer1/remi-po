@@ -233,6 +233,14 @@ class SecondRefused(FakeOutbound):
         return await super().send_text(message)
 
 
+class SecondTransient(FakeOutbound):
+    async def send_text(self, message: OutboundMessage) -> str:
+        if len(self.attempts) == 1:
+            self.attempts.append(message)
+            raise TransientChannelError("down")
+        return await super().send_text(message)
+
+
 class TestSendParts:
     async def _parts(self, db: Database, channel: FakeOutbound, inbox_id: UUID, *parts: str) -> str:
         return await send_parts(
@@ -267,6 +275,19 @@ class TestSendParts:
     async def test_refused_part_stops_rest(self, db: Database, owner_conn: Any) -> None:
         inbox_id = await insert_inbox(owner_conn)
         channel = SecondRefused()
+        assert await self._parts(db, channel, inbox_id, "one", "two", "three") == "accepted"
+        assert [m.body for m in channel.attempts] == ["one", "two"]
+        rows = await owner_conn.fetch("SELECT kind, status FROM channel_outbox ORDER BY kind")
+        assert [(r["kind"], r["status"]) for r in rows] == [
+            ("agent_reply", "accepted"),
+            ("agent_reply:2", "failed"),
+        ]
+
+    async def test_transient_later_part_stops_and_fails_it(
+        self, db: Database, owner_conn: Any
+    ) -> None:
+        inbox_id = await insert_inbox(owner_conn)
+        channel = SecondTransient()
         assert await self._parts(db, channel, inbox_id, "one", "two", "three") == "accepted"
         assert [m.body for m in channel.attempts] == ["one", "two"]
         rows = await owner_conn.fetch("SELECT kind, status FROM channel_outbox ORDER BY kind")
