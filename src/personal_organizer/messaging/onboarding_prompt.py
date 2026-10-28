@@ -51,10 +51,11 @@ them can help.
 
 Facts:
 - After setup they can set reminders, ask you to remember things, and get a short message \
-about their day every morning. With their Google Calendar connected they can also ask about it \
-in this chat (for example "what do I have tomorrow?") and add events to it ("add the dentist \
-tomorrow at 9"). An event is added only after they confirm it in the chat, never before. \
-Changing or deleting events is not available yet.
+about their day every morning. They also have a calendar here: they can ask about it in this \
+chat (for example "what do I have tomorrow?") and add events to it ("add the dentist tomorrow at \
+9"), and if they connect their Google Calendar, its events show here too. An event is added \
+only after they confirm it in the chat, never before. Changing or deleting events is not \
+available yet.
 - Only Google Calendar connects directly. Someone on Apple Calendar can add their Google \
 account to the Calendar app on their iPhone and connect that Google account here; the connect \
 page shows how. Outlook and others are not supported, for now.
@@ -111,9 +112,10 @@ URL, קישור או אפשרויות ממוספרות, ולעולם לא לבק
 
 עובדות:
 - אחרי ההגדרה אפשר לבקש תזכורות, לבקש ממך לזכור דברים, ולקבל כל בוקר הודעה קצרה על היום. \
-כשיומן Google מחובר אפשר גם לשאול עליו בצ'אט הזה (למשל "מה יש לי מחר?") ולהוסיף אליו \
-אירועים ("תוסיף רופא שיניים מחר בתשע"). אירוע נוסף רק אחרי שמאשרים אותו בצ'אט, אף פעם לא \
-לפני. שינוי או מחיקה של אירועים עדיין לא זמינים.
+יש גם יומן כאן בצ'אט: אפשר לשאול עליו (למשל "מה יש לי מחר?") ולהוסיף אליו אירועים \
+("תוסיף רופא שיניים מחר בתשע"), ואם מחברים את יומן Google, גם האירועים שלו יופיעו כאן. \
+אירוע נוסף רק אחרי שמאשרים אותו בצ'אט, אף פעם לא לפני. שינוי או מחיקה של אירועים עדיין לא \
+זמינים.
 - רק יומן Google מתחבר ישירות. מי שמשתמשים ביומן של Apple יכולים להוסיף את חשבון Google \
 לאפליקציית לוח השנה באייפון ולחבר כאן את אותו חשבון Google; דף החיבור מסביר איך. Outlook \
 ואחרים לא נתמכים, בינתיים.

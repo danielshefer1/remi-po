@@ -9,8 +9,9 @@ never itself parsed as a template.
 ``connect_link`` ends setup: the calendar is optional, so it offers the link rather than
 asking for it, and ends with the URL on a line of its own. WhatsApp linkifies a bare URL
 reliably, but not one with a character glued to it. ``all_set`` is sent by the
-``onboarding:connected`` task once Google connects, whenever that is, and says that it is synced
-about hourly and can be read live instead, on request (#50). ``agent_unavailable``,
+``onboarding:connected`` task once Google connects, whenever that is (``all_set_pending``
+instead when the import on connect failed), and says that it is synced about hourly and can be
+read live instead, on request (#50). ``agent_unavailable``,
 ``calendar_not_connected`` (the link to connect Google, or reconnect it),
 ``calendar_disconnected`` (a failed add, with no link) and the confirm outcomes (``event_*``,
 ``proposal_closed``) are the agent's (``messaging.agent``). ``reminder`` is sent by the
@@ -31,8 +32,9 @@ from personal_organizer.messaging.language import ENGLISH
 
 _EN: Final = {
     "welcome": (
-        "Hi! I'm your personal organizer, right here in WhatsApp. I can remind you of things, "
-        "remember what matters to you and, if you connect it, keep an eye on your Google Calendar."
+        "Hi! I'm your personal organizer, right here in WhatsApp. I can keep your calendar, "
+        "remind you of things and remember what matters to you. If you use Google Calendar, "
+        "you can connect it too."
     ),
     "zone_guessed": (
         "I've set your clock to {zone} time, going by your number. If you're somewhere else, "
@@ -51,10 +53,15 @@ _EN: Final = {
         "Your Google Calendar is connected, and your events are in! I'll keep them in sync "
         "about every hour. If you'd rather I check Google live every time, just say so."
     ),
+    "all_set_pending": (
+        "Your Google Calendar is connected! Your events should be in within the hour, and after "
+        "that I'll keep them in sync about every hour. If you'd rather I check Google live every "
+        "time, just say so."
+    ),
     "agent_unavailable": "Sorry, I couldn't answer just now. Try me again in a minute.",
     "calendar_not_connected": (
-        "Here's the link to connect your Google Calendar. Once you do, your Google events will "
-        "show right alongside what I keep for you:\n{url}"
+        "To connect your Google Calendar, just open the link below, and your Google events "
+        "will show right alongside what I keep for you:\n{url}"
     ),
     "calendar_disconnected": (
         "I couldn't add it: your Google Calendar connection has stopped working. Just ask me "
@@ -89,8 +96,8 @@ _EN: Final = {
 
 _HE: Final = {
     "welcome": (
-        "היי! אני העוזר האישי שלך, ישר כאן בוואטסאפ. אפשר לבקש ממני תזכורות, לספר לי דברים "
-        "שכדאי שאזכור, ואם מחברים את יומן Google, גם לשאול מה יש בו ולהוסיף אליו דברים."
+        "היי! אני העוזר האישי שלך, ישר כאן בוואטסאפ. אני יכול לנהל לך את היומן, לשלוח לך "
+        "תזכורות ולזכור את מה שחשוב לך. ואם יש לך יומן Google, אפשר לחבר גם אותו."
     ),
     "zone_guessed": (
         "כיוונתי לך את השעון לשעון {zone}, לפי המספר שלך. ואם זה לא נכון, "
@@ -108,9 +115,13 @@ _HE: Final = {
         "יומן Google שלך מחובר, והאירועים שלך כבר אצלי! אני מעדכן אותם מ-Google בערך פעם "
         "בשעה. אם עדיף שאבדוק ישר ב-Google בכל פעם, מספיק לבקש."
     ),
+    "all_set_pending": (
+        "יומן Google שלך מחובר! האירועים שלך אמורים להגיע אליי תוך שעה, ומשם אעדכן אותם "
+        "מ-Google פעם בשעה בערך. אם עדיף שאבדוק ישר ב-Google בכל פעם, מספיק לבקש."
+    ),
     "agent_unavailable": "סליחה, לא הצלחתי לענות כרגע. אפשר לנסות שוב בעוד דקה.",
     "calendar_not_connected": (
-        "הנה הקישור לחבר את יומן Google שלך. אחרי שמחברים, האירועים מ-Google יופיעו לצד "
+        "כדי לחבר את יומן Google, נכנסים לקישור כאן למטה, ואז האירועים מ-Google יופיעו לצד "
         "מה שכבר שמור אצלי:\n{url}"
     ),
     "calendar_disconnected": (

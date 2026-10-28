@@ -878,8 +878,10 @@ async def test_stale_google_offers_live(
 
 #: Saying Google is now read every time, in either language: any of these words will do.
 SAYS_LIVE = re.compile(
-    r"\blive\b|every (single )?time|each time|directly|real[- ]?time|always|from now on|"
-    r"\bישר\b|ישירות|בזמן אמת|כל פעם|תמיד|מעכשיו|מהיום|\bחי(ה)?\b|לייב",  # noqa: RUF001
+    r"\blive\b|every (single )?time|each time|every (request|question|look|read)|whenever|"
+    r"directly|straight|fresh|up[- ]to[- ]date|real[- ]?time|always|from now on|"
+    r"\bישר\b|ישירות|בזמן אמת|כל פעם|בכל (בקשה|שאלה)|תמיד|מעכשיו|מהיום|עדכני|מעודכנ|"  # noqa: RUF001
+    r"\bחי(ה)?\b|לייב",  # noqa: RUF001
     re.I,
 )
 

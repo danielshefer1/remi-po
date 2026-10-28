@@ -427,7 +427,8 @@ class TestCallback:
                 db=db,
                 channels={"gowa": gowa}.__getitem__,
             )
-        assert [message.body for message in gowa.sent] == [t("all_set", "he")]
+        # No Google provider here, so the line says the events are still to come.
+        assert [message.body for message in gowa.sent] == [t("all_set_pending", "he")]
 
     async def test_an_account_not_yet_active_can_be_reloaded(
         self, http: AsyncClient, db: Database, linker: FakeConnectLinker, queue: FakeProcrastinate

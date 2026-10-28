@@ -47,13 +47,16 @@ async def announce_connected(
     no phone, a channel this worker does not run, or a tenant no longer active. Each of those is
     logged and finishes the job, because a retry would find the same thing. Re-raises
     ``TransientChannelError`` from :func:`send_once`, which the task's retry strategy retries.
-    Their Google events are imported first, so the message is true; a failed import is only
-    logged (the hourly sync retries it).
+    Their Google events are imported first, so "your events are in" is true; after a failed
+    import (logged, and retried by the hourly sync) it says they will be in within the hour.
     """
     try:
-        await sync_calendar(tenant_id, db=db, provider=calendar, now=now or datetime.now(UTC))
+        imported = await sync_calendar(
+            tenant_id, db=db, provider=calendar, now=now or datetime.now(UTC)
+        )
     except Exception:
         log.exception("onboarding.import_failed", tenant_id=str(tenant_id))
+        imported = False
     target = await proactive_target(
         db, tenant_id, channels=channels, event="onboarding.all_set_skipped"
     )
@@ -66,7 +69,7 @@ async def announce_connected(
         kind=ALL_SET_KIND,
         recipient_key=f"tel:{target.phone}",
         to=target.phone,
-        text=t("all_set", target.tenant.language),
+        text=t("all_set" if imported else "all_set_pending", target.tenant.language),
         idempotency_key=all_set_key(connection_id),
     )
 
