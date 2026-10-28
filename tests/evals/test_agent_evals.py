@@ -14,11 +14,15 @@ the confirm call must read a reply to that proposal as ADD, CANCEL or neither. A
 morning-message request must leave the in-memory schedule as asked (Iteration 05). A memory
 request must leave the in-memory notes as asked, and a stated lasting fact must be saved *and*
 mentioned (Iteration 06); their gender, read from how they write in Hebrew, is saved quietly.
+Without Google, an event added through Remi is read back from Remi's own calendar, and a plain
+question brings no push to connect; with Google copied hourly, a change they just made there
+gets an offer to read Google live, which their "yes" turns on (#50).
 """
 
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, time, timedelta
@@ -32,7 +36,7 @@ import pytest
 from personal_organizer.db.models.tenant import Reminder
 from personal_organizer.interfaces.calendar import CalendarEvent
 from personal_organizer.interfaces.llm import Completion, LLMProvider, Message
-from personal_organizer.messaging.agent import respond
+from personal_organizer.messaging.agent import add_event, event_summary, respond
 from personal_organizer.messaging.calendar import InMemoryTenantCalendar
 from personal_organizer.messaging.confirm import (
     CONFIRM_ADD,
@@ -754,3 +758,149 @@ async def test_simple_question_stays_cheap(
     cheap = Recording(llm)
     await _turn(text, language, InMemorySchedule(NOW), cheap, strong=strong)  # type: ignore[arg-type]
     assert "hand_off" not in cheap.called, cheap.called
+
+
+def _member(language: str) -> TenantState:
+    return TenantState(
+        id=UUID(int=1),
+        status="active",
+        step=None,
+        language=language,
+        first_message=False,
+        timezone=JERUSALEM,
+    )
+
+
+@pytest.mark.parametrize(
+    ("language", "add", "yes", "ask", "title"),
+    [
+        ("en", "dentist tomorrow at 10", "yes", "what do I have tomorrow?", "dentist"),
+        ("he", "רופא שיניים מחר ב-10", "כן", "מה יש לי מחר?", "שיניים"),
+    ],
+    ids=["en", "he"],
+)
+async def test_no_google_add_then_list(
+    language: str, add: str, yes: str, ask: str, title: str, llm: AnthropicLLM
+) -> None:
+    """Without Google, what they add through Remi is kept by Remi and read back from there."""
+    zone = ZoneInfo(JERUSALEM)
+    calendar = InMemoryTenantCalendar()
+    tenant = _member(language)
+    proposed: list[CalendarEvent] = []
+    first = await respond([], add, tenant, llm=llm, calendar=calendar, now=NOW, proposed=proposed)
+    assert len(proposed) == 1, first
+    [event] = proposed
+    assert event.start.astimezone(zone).replace(tzinfo=None) == _local("2026-10-13T10:00"), first
+    # As agent_turn does: the confirm call reads the "yes", and code adds it.
+    assert await decide(event_summary(event, zone, language), yes, llm=llm) == CONFIRM_ADD
+    done = await add_event(event, calendar=calendar, zone=zone, language=language)
+    assert len(calendar.added) == 1, done
+    read_before = len(calendar.calls)
+    history = (
+        Message("user", add),
+        Message("assistant", first),
+        Message("user", yes),
+        Message("assistant", done),
+    )
+    reply = await respond(history, ask, tenant, llm=llm, calendar=calendar, now=NOW)
+    windows = [
+        (s.astimezone(zone).replace(tzinfo=None), e.astimezone(zone).replace(tzinfo=None))
+        for s, e in calendar.calls[read_before:]
+    ]
+    # Read from the calendar, not recalled from the history above.
+    assert _covered(windows, TOMORROW), (windows, reply)
+    assert title in reply.lower(), reply
+    assert any(hour in reply.lower() for hour in ("10", "ten", "עשר")), reply
+    assert detect_language(reply) == language, reply
+    assert "http" not in reply.lower(), reply
+
+
+#: Talk of connecting Google, in either language.
+CONNECT_TALK = re.compile(r"google|גוגל|connect|לחבר|חיבור|מחובר", re.I)
+
+
+@pytest.mark.parametrize(
+    ("language", "text"),
+    [("en", "What's on this week?"), ("he", "מה יש לי השבוע?")],
+    ids=["en", "he"],
+)
+async def test_no_google_no_nagging(language: str, text: str, llm: AnthropicLLM) -> None:
+    """Remi's calendar is the calendar: a plain question gets an answer, not a pitch."""
+    links: list[str] = []
+
+    async def connect_link() -> str:
+        links.append("sent")
+        return "https://po.example/connect/TOKEN"
+
+    reply = await respond(
+        [],
+        text,
+        _member(language),
+        llm=llm,
+        calendar=InMemoryTenantCalendar(_events(ZoneInfo(JERUSALEM))),
+        now=NOW,
+        connect_link=connect_link,
+    )
+    assert reply.strip(), "an empty reply falls back to the fixed text"
+    assert links == [], reply
+    assert not CONNECT_TALK.search(reply), reply
+    assert detect_language(reply) == language, reply
+
+
+@pytest.mark.parametrize(
+    ("language", "text", "agree"),
+    [
+        ("en", "I just moved my team sync in Google, why don't you see it?", "yes please"),
+        ("he", "הרגע הזזתי את הפגישה עם הצוות ביומן של גוגל, למה אתה לא רואה את זה?", "כן, בבקשה"),
+    ],
+    ids=["en", "he"],
+)
+async def test_stale_google_offers_live(
+    language: str, text: str, agree: str, llm: AnthropicLLM
+) -> None:
+    """A Google change Remi hasn't copied yet gets the offer, and only their yes turns it on.
+
+    The offer is checked by what it leads to, not by its words: answered with a plain yes, it
+    must turn live reading on."""
+    calendar = InMemoryTenantCalendar(_events(ZoneInfo(JERUSALEM)), connected=True)
+    schedule = InMemorySchedule(NOW)
+    tenant = _member(language)
+    first = await respond([], text, tenant, llm=llm, calendar=calendar, now=NOW, schedule=schedule)
+    assert first.strip(), "an empty reply falls back to the fixed text"
+    assert (schedule.live_calendar, calendar.live) == (False, False), first
+    assert detect_language(first) == language, first
+    history = (Message("user", text), Message("assistant", first))
+    reply = await respond(
+        history, agree, tenant, llm=llm, calendar=calendar, now=NOW, schedule=schedule
+    )
+    assert (schedule.live_calendar, calendar.live) == (True, True), (first, reply)
+
+
+#: Saying Google is now read every time, in either language: any of these words will do.
+SAYS_LIVE = re.compile(
+    r"\blive\b|every (single )?time|each time|directly|real[- ]?time|always|from now on|"
+    r"\bישר\b|ישירות|בזמן אמת|כל פעם|תמיד|מעכשיו|מהיום|\bחי(ה)?\b|לייב",  # noqa: RUF001
+    re.I,
+)
+
+
+@pytest.mark.parametrize(
+    ("language", "text"),
+    [
+        ("en", "always check my Google calendar live"),
+        ("he", "מעכשיו תבדוק תמיד ישר ביומן גוגל שלי"),
+    ],
+    ids=["en", "he"],
+)
+async def test_asks_for_live_turns_it_on(language: str, text: str, llm: AnthropicLLM) -> None:
+    calendar = InMemoryTenantCalendar(_events(ZoneInfo(JERUSALEM)), connected=True)
+    schedule = InMemorySchedule(NOW)
+    reply = await respond(
+        [], text, _member(language), llm=llm, calendar=calendar, now=NOW, schedule=schedule
+    )
+    assert schedule.live_calendar is True, reply
+    assert calendar.live is True, reply
+    # Said in plain words: no setting or tool name.
+    assert SAYS_LIVE.search(reply), reply
+    assert "_" not in reply, reply
+    assert detect_language(reply) == language, reply
