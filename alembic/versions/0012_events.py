@@ -82,7 +82,7 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.execute(f"DROP FUNCTION {_SIGNATURE}")
-    op.execute(f'REVOKE SELECT ON calendar_connections FROM "{DEFINER_ROLE_NAME}"')
+    op.execute(f'REVOKE SELECT ON calendar_connections FROM "{DEFINER_ROLE_NAME}"')  # noqa: S608 - a constant role name
     disable_tenant_rls("events")
     op.drop_table("events")
     op.drop_column("calendar_connections", "synced_at")
