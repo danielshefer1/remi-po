@@ -240,6 +240,18 @@ UPDATE tenants SET status = 'onboarding', onboarding_step = 'connect' WHERE id =
 Their next message gets a new link. The new connection marks the old one `revoked`, but with
 `allow_multiple` the old account stays ACTIVE at Composio (ADR 0005).
 
+### Removing a repeating event
+
+There is no way to change or delete events in chat yet (#63). To remove a series from Remi's
+own calendar, as the superuser (run the same `WHERE` as a `SELECT` first to see what would go):
+
+```sql
+DELETE FROM events WHERE tenant_id = '<uuid>' AND source = 'remi' AND rule IS NOT NULL AND title = '<title>';
+```
+
+For someone with Google connected, delete the series in Google Calendar itself; the next sync
+(hourly) drops Remi's copies.
+
 ## 6. Day-1 and day-8 checks
 
 None of these block the iteration. They decide later work, so write each answer down where

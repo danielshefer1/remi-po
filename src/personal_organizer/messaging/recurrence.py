@@ -1,7 +1,8 @@
-"""Repeating-reminder rules: a small, never-sub-daily subset of RFC 5545 RRULE.
+"""Repeating rules for reminders and calendar events: a never-sub-daily subset of RFC 5545 RRULE.
 
-Occurrences are computed on local wall time and then made aware, so an 08:00 reminder stays
-08:00 across DST. ``UNTIL`` is local wall time (no ``Z``). A stored rule never has ``COUNT``.
+Occurrences (``occurrences`` expands a series for reads) are computed on local wall time and
+then made aware, so an 08:00 reminder or event stays 08:00 across DST.
+``UNTIL`` is local wall time (no ``Z``). A stored rule never has ``COUNT``.
 """
 
 from __future__ import annotations
