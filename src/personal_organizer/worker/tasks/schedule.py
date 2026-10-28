@@ -1,5 +1,5 @@
 """Reminders, the morning briefing (Iteration 05) and outing follow-ups (Iteration 07): the
-tick and the three jobs it defers.
+tick and the jobs it defers.
 
 ``schedule:tick`` runs every minute. It reads the three ``SECURITY DEFINER`` scans, which
 return ids only, and defers one job per due reminder, briefing or follow-up on ``webhooks``,
@@ -27,9 +27,11 @@ import procrastinate
 import structlog
 
 from personal_organizer.db.engine import get_database
+from personal_organizer.db.repositories.events import due_syncs
 from personal_organizer.db.repositories.groups import due_nudges, sweep_context
 from personal_organizer.db.repositories.reminders import due_briefings, due_reminders
 from personal_organizer.messaging.briefing import briefing_key, send_briefing
+from personal_organizer.messaging.calendar_sync import sync_calendar
 from personal_organizer.messaging.groups.nudge import send_nudge
 from personal_organizer.messaging.reminders import reminder_key, send_reminder
 from personal_organizer.messaging.runtime import get_outbound_channel
@@ -48,6 +50,7 @@ TICK_TASK: Final = "schedule:tick"
 REMINDER_TASK: Final = "schedule:reminder"
 BRIEFING_TASK: Final = "schedule:briefing"
 NUDGE_TASK: Final = "schedule:nudge"
+SYNC_TASK: Final = "calendar:sync"
 
 
 async def _defer(app: procrastinate.App, task: str, key: str, **kwargs: str) -> int:
@@ -61,9 +64,9 @@ async def _defer(app: procrastinate.App, task: str, key: str, **kwargs: str) -> 
 
 async def run_tick(
     app: procrastinate.App, now: datetime, *, briefings: bool
-) -> tuple[int, int, int]:
+) -> tuple[int, int, int, int]:
     """Defer what is due at ``now``, and delete group chatter past its age. Returns how many
-    reminder, briefing and follow-up jobs were new.
+    reminder, briefing, follow-up and calendar sync jobs were new.
 
     Reminders, then follow-ups, are scanned and deferred first, each on its own, so a failing
     briefing scan never holds them back. Follow-ups need no calendar, so not ``briefings``.
@@ -105,11 +108,23 @@ async def run_tick(
             tenant_id=str(tenant_id),
             day=day.isoformat(),
         )
-    if sent_reminders or sent_briefings or sent_nudges:
+    sent_syncs = 0
+    if get_settings().composio.enabled:  # no Google to copy without it
+        async with get_database().system_session() as session:
+            syncs = await due_syncs(session, now)
+        for tenant_id in syncs:
+            sent_syncs += await _defer(
+                app, SYNC_TASK, f"sync:{tenant_id}", tenant_id=str(tenant_id)
+            )
+    if sent_reminders or sent_briefings or sent_nudges or sent_syncs:
         log.info(
-            "schedule.tick", reminders=sent_reminders, briefings=sent_briefings, nudges=sent_nudges
+            "schedule.tick",
+            reminders=sent_reminders,
+            briefings=sent_briefings,
+            nudges=sent_nudges,
+            syncs=sent_syncs,
         )
-    return sent_reminders, sent_briefings, sent_nudges
+    return sent_reminders, sent_briefings, sent_nudges, sent_syncs
 
 
 def register(app: procrastinate.App) -> None:
@@ -148,6 +163,12 @@ def register(app: procrastinate.App) -> None:
             last_attempt=is_last_attempt(context.job.attempts),
         )
 
+    @app.task(queue=Queue.WEBHOOKS.value, name=SYNC_TASK)
+    async def calendar_sync(tenant_id: str) -> None:
+        await sync_calendar(
+            UUID(tenant_id), db=get_database(), provider=agent_calendar(), now=datetime.now(UTC)
+        )
+
     @app.task(queue=Queue.WEBHOOKS.value, name=NUDGE_TASK, retry=INBOUND_RETRY, pass_context=True)
     async def nudge(context: procrastinate.JobContext, poll_id: str, tenant_id: str) -> None:
         await send_nudge(
@@ -161,4 +182,12 @@ def register(app: procrastinate.App) -> None:
         )
 
 
-__all__ = ["BRIEFING_TASK", "NUDGE_TASK", "REMINDER_TASK", "TICK_TASK", "register", "run_tick"]
+__all__ = [
+    "BRIEFING_TASK",
+    "NUDGE_TASK",
+    "REMINDER_TASK",
+    "SYNC_TASK",
+    "TICK_TASK",
+    "register",
+    "run_tick",
+]

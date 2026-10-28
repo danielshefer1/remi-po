@@ -20,6 +20,7 @@ from personal_organizer.core.types import TenantId
 from personal_organizer.db import engine
 from personal_organizer.db.engine import Database
 from personal_organizer.db.repositories import groups, reminders
+from personal_organizer.db.repositories.connections import bind_connection
 from personal_organizer.db.repositories.outings import create_poll
 from personal_organizer.interfaces.calendar import CalendarEvent
 from personal_organizer.messaging.briefing import briefing_key
@@ -32,6 +33,7 @@ from personal_organizer.worker.tasks.schedule import (
     BRIEFING_TASK,
     NUDGE_TASK,
     REMINDER_TASK,
+    SYNC_TASK,
     TICK_TASK,
     run_tick,
 )
@@ -85,7 +87,7 @@ async def test_the_tick_defers_one_job_per_due_reminder_and_briefing(
 ) -> None:
     tenant_id, reminder_id = await _due_work(db)
 
-    assert await run_tick(app, NOW, briefings=True) == (1, 1, 0)
+    assert await run_tick(app, NOW, briefings=True) == (1, 1, 0, 0)
 
     briefing, reminder = briefing_key(tenant_id, TODAY), reminder_key(reminder_id)
     assert await _jobs(owner_conn) == [
@@ -112,7 +114,7 @@ async def test_a_second_tick_in_the_same_minute_defers_nothing_new(
     await _due_work(db)
     await run_tick(app, NOW, briefings=True)
 
-    assert await run_tick(app, NOW, briefings=True) == (0, 0, 0)
+    assert await run_tick(app, NOW, briefings=True) == (0, 0, 0, 0)
     assert len(await _jobs(owner_conn)) == 2
 
 
@@ -127,7 +129,7 @@ async def test_a_running_job_is_not_deferred_again_and_can_still_be_retried(
         "UPDATE procrastinate_jobs SET status = 'doing' WHERE task_name = $1", REMINDER_TASK
     )
 
-    assert await run_tick(app, NOW + timedelta(minutes=1), briefings=True) == (0, 0, 0)
+    assert await run_tick(app, NOW + timedelta(minutes=1), briefings=True) == (0, 0, 0, 0)
     assert len(await _jobs(owner_conn)) == 2
 
     [job] = await app.job_manager.list_jobs_async(lock=reminder_key(reminder_id))
@@ -198,7 +200,7 @@ async def test_tick_defers_due_nudges(
     now = NOW + timedelta(hours=6)
     poll_id, tenant_id = await _due_nudge(db, owner_conn, now)
 
-    assert await run_tick(app, now, briefings=False) == (0, 0, 1)
+    assert await run_tick(app, now, briefings=False) == (0, 0, 1, 0)
     assert await _jobs(owner_conn) == [
         (
             NUDGE_TASK,
@@ -208,8 +210,8 @@ async def test_tick_defers_due_nudges(
             {"poll_id": str(poll_id), "tenant_id": str(tenant_id)},
         )
     ]
-    assert await run_tick(app, now, briefings=False) == (0, 0, 0)
-    assert await run_tick(app, now + timedelta(days=1), briefings=False) == (0, 0, 0)
+    assert await run_tick(app, now, briefings=False) == (0, 0, 0, 0)
+    assert await run_tick(app, now + timedelta(days=1), briefings=False) == (0, 0, 0, 0)
 
 
 @pytest.mark.usefixtures("clean_channel_tables")
@@ -254,5 +256,48 @@ async def test_nothing_due_defers_nothing(
     db: Database, app: procrastinate.App, owner_conn: Any
 ) -> None:
     await _due_work(db)
-    assert await run_tick(app, NOW - timedelta(hours=1), briefings=True) == (0, 0, 0)
+    assert await run_tick(app, NOW - timedelta(hours=1), briefings=True) == (0, 0, 0, 0)
     assert await _jobs(owner_conn) == []
+
+
+async def _connected(db: Database, phone: str) -> UUID:
+    tenant_id = await _tenant(db, phone)
+    async with db.tenant_session(TenantId(tenant_id)) as session:
+        await bind_connection(
+            session, tenant_id, connected_account_id=f"ca_{phone}", auth_config_id="ac"
+        )
+    return tenant_id
+
+
+async def test_tick_defers_due_syncs_once(
+    db: Database, app: procrastinate.App, owner_conn: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Composio's full settings are needed to enable it for real; the tick reads only the switch.
+    monkeypatch.setattr(
+        schedule, "get_settings", lambda: SimpleNamespace(composio=SimpleNamespace(enabled=True))
+    )
+    tenant_id = await _connected(db, "+972500000003")
+    assert await run_tick(app, NOW, briefings=False) == (0, 0, 0, 1)
+    assert await run_tick(app, NOW, briefings=False) == (0, 0, 0, 0)
+    assert [job for job in await _jobs(owner_conn) if job[0] == SYNC_TASK] == [
+        (
+            SYNC_TASK,
+            Queue.WEBHOOKS.value,
+            f"sync:{tenant_id}",
+            None,
+            {"tenant_id": str(tenant_id)},
+        )
+    ]
+
+
+async def test_tick_defers_no_syncs_without_composio(
+    db: Database, app: procrastinate.App, owner_conn: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("COMPOSIO__ENABLED", "false")
+    get_settings.cache_clear()
+    try:
+        await _connected(db, "+972500000003")
+        assert await run_tick(app, NOW, briefings=False) == (0, 0, 0, 0)
+        assert [job for job in await _jobs(owner_conn) if job[0] == SYNC_TASK] == []
+    finally:
+        get_settings.cache_clear()

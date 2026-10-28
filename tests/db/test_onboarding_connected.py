@@ -13,8 +13,14 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from personal_organizer.core.errors import ChannelNotConfiguredError, TransientChannelError
+from personal_organizer.core.errors import (
+    CalendarProviderUnavailableError,
+    ChannelNotConfiguredError,
+    TransientChannelError,
+)
+from personal_organizer.core.types import TenantId
 from personal_organizer.db.engine import Database
+from personal_organizer.db.repositories.connections import bind_connection
 from personal_organizer.interfaces.channel import OutboundChannel
 from personal_organizer.messaging.onboarding_text import t
 from personal_organizer.onboarding.connected import (
@@ -22,6 +28,7 @@ from personal_organizer.onboarding.connected import (
     all_set_key,
     announce_connected,
 )
+from personal_organizer.providers.calendar.memory import InMemoryCalendar
 from personal_organizer.settings import Settings
 from tests.db.test_handle_inbound import FakeOutbound
 from tests.fixtures.connect import (
@@ -148,3 +155,22 @@ class TestAnnounceConnected:
         meta = FakeOutbound(name="whatsapp")
         assert await announce_connected(tenant_id, uuid4(), db=db, channels=resolver(meta)) is None
         assert meta.attempts == []
+
+    async def test_import_failure_still_sends_all_set(self, db: Database) -> None:
+        tenant_id = await active_tenant(db)
+        await seed_inbound(db, tenant_id, channel="gowa", sent_at=datetime.now(UTC))
+        google = InMemoryCalendar()
+        google.fail = CalendarProviderUnavailableError("down")
+        async with db.tenant_session(TenantId(tenant_id)) as session:
+            await bind_connection(
+                session, tenant_id, connected_account_id="ca_1", auth_config_id="ac"
+            )
+        gowa = FakeOutbound(name="gowa")
+
+        status = await announce_connected(
+            tenant_id, uuid4(), db=db, channels=resolver(gowa), calendar=google
+        )
+
+        assert status == "accepted"
+        assert len(google.calls) == 1
+        assert len(gowa.sent) == 1

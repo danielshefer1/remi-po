@@ -16,7 +16,7 @@ from uuid import UUID
 
 import structlog
 
-from personal_organizer.core.errors import CalendarProviderError
+from personal_organizer.core.errors import CalendarNotConnectedError, CalendarProviderError
 from personal_organizer.core.types import TenantId
 from personal_organizer.db.engine import Database
 from personal_organizer.db.models.tenant import CalendarConnection
@@ -52,9 +52,13 @@ class TenantCalendar:
         self.connected = provider is not None and account is not None
         self.live = live
 
-    async def refresh(self, start: datetime, end: datetime) -> bool:
+    async def refresh(
+        self, start: datetime, end: datetime, *, raise_not_connected: bool = False
+    ) -> bool:
         """Copy Google's ``[start, end)`` into the stored events. ``False`` when there is no
-        Google, or it failed (the stored copy stays as it was)."""
+        Google, or it failed (the stored copy stays as it was). With ``raise_not_connected``, an
+        account that no longer works raises ``CalendarNotConnectedError`` instead (the sync
+        disconnects it)."""
         if self._provider is None or self._account is None:
             return False
         try:
@@ -65,6 +69,8 @@ class TenantCalendar:
                 end=end,
             )
         except CalendarProviderError as exc:
+            if raise_not_connected and isinstance(exc, CalendarNotConnectedError):
+                raise
             log.warning(
                 "calendar.refresh_failed",
                 tenant_id=str(self._tenant_id),

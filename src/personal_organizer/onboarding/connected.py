@@ -8,14 +8,21 @@ wrote on, through ``messaging.proactive``: ADR 0004's "proactive sends need a ch
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Final
 from uuid import UUID
 
+import structlog
+
 from personal_organizer.db.engine import Database
+from personal_organizer.interfaces.calendar import CalendarProvider
+from personal_organizer.messaging.calendar_sync import sync_calendar
 from personal_organizer.messaging.inbound import ChannelResolver
 from personal_organizer.messaging.onboarding_text import t
 from personal_organizer.messaging.outbox import send_once
 from personal_organizer.messaging.proactive import proactive_target
+
+log = structlog.get_logger(__name__)
 
 ALL_SET_KIND: Final = "onboarding:all_set"
 
@@ -26,7 +33,13 @@ def all_set_key(connection_id: UUID) -> str:
 
 
 async def announce_connected(
-    tenant_id: UUID, connection_id: UUID, *, db: Database, channels: ChannelResolver
+    tenant_id: UUID,
+    connection_id: UUID,
+    *,
+    db: Database,
+    channels: ChannelResolver,
+    calendar: CalendarProvider | None = None,
+    now: datetime | None = None,
 ) -> str | None:
     """Send "You're all set" at most once.
 
@@ -34,7 +47,13 @@ async def announce_connected(
     no phone, a channel this worker does not run, or a tenant no longer active. Each of those is
     logged and finishes the job, because a retry would find the same thing. Re-raises
     ``TransientChannelError`` from :func:`send_once`, which the task's retry strategy retries.
+    Their Google events are imported first, so the message is true; a failed import is only
+    logged (the hourly sync retries it).
     """
+    try:
+        await sync_calendar(tenant_id, db=db, provider=calendar, now=now or datetime.now(UTC))
+    except Exception:
+        log.exception("onboarding.import_failed", tenant_id=str(tenant_id))
     target = await proactive_target(
         db, tenant_id, channels=channels, event="onboarding.all_set_skipped"
     )

@@ -15,8 +15,9 @@ import procrastinate
 from personal_organizer.db.engine import get_database
 from personal_organizer.messaging.runtime import get_outbound_channel
 from personal_organizer.onboarding.connected import announce_connected
+from personal_organizer.settings import get_settings
 from personal_organizer.worker.queues import Queue
-from personal_organizer.worker.tasks.channel import INBOUND_RETRY
+from personal_organizer.worker.tasks.channel import INBOUND_RETRY, agent_calendar
 
 ONBOARDING_CONNECTED_TASK: Final = "onboarding:connected"
 
@@ -29,6 +30,7 @@ def register(app: procrastinate.App) -> None:
             UUID(connection_id),
             db=get_database(),
             channels=get_outbound_channel,
+            calendar=agent_calendar() if get_settings().composio.enabled else None,
         )
 
 
