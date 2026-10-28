@@ -98,6 +98,17 @@ async def test_sync_failure_keeps_rows(db: Database) -> None:
     assert await _due(db, later + timedelta(hours=1, minutes=1)) == [tenant_id]
 
 
+async def test_sync_unexpected_error_still_stamps(db: Database) -> None:
+    """A non-provider error (a DB error, a repeated external_id) surfaces, but is not retried
+    every tick."""
+    tenant_id = await _tenant(db)
+    google = InMemoryCalendar()
+    google.fail = RuntimeError("boom")
+    with pytest.raises(RuntimeError, match="boom"):
+        await sync_calendar(tenant_id, db=db, provider=google, now=NOW)
+    assert await _due(db, NOW + timedelta(minutes=1)) == []
+
+
 async def test_new_account_import_replaces_imported_rows(db: Database) -> None:
     tenant_id = await _tenant(db)
     old = InMemoryCalendar([_event("Old account", 3, "g1")])

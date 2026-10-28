@@ -28,8 +28,10 @@ async def sync_calendar(
     tenant_id: UUID, *, db: Database, provider: CalendarProvider | None, now: datetime
 ) -> bool:
     """Import yesterday through ``IMPORT_AHEAD`` from Google; ``True`` once copied (and marked
-    synced). On failure the stored rows stay and ``synced_at`` too, so the next tick retries.
-    An account Google no longer accepts is revoked, so the person counts as not connected."""
+    synced). ``synced_at`` is stamped after every try, failed or not (an unexpected error
+    still propagates), so a failure is retried in an hour; on failure the stored rows stay.
+    An account Google no longer accepts is revoked instead, so the person counts as not
+    connected."""
     async with db.tenant_session(TenantId(tenant_id)) as session:
         tenant = await get_tenant(session, tenant_id)
         account = await active_connection(session, tenant_id)
@@ -43,19 +45,22 @@ async def sync_calendar(
     # is ever cut (refresh keeps what is stored past the last event it got).
     revoke = False
     try:
-        copied = await theirs.refresh(start, end, raise_not_connected=True)
-    except CalendarNotConnectedError:
-        # Composio's 422 is ambiguous: revoke only if it says the account no longer works.
-        copied = False
-        revoke = await _account_is_dead(provider, account.connected_account_id)
+        try:
+            copied = await theirs.refresh(start, end, raise_not_connected=True)
+        except CalendarNotConnectedError:
+            # Composio's 422 is ambiguous: revoke only if it says the account no longer works.
+            copied = False
+            revoke = await _account_is_dead(provider, account.connected_account_id)
+    finally:
+        # Stamped after every try, even one that raised: asked again in an hour, not every tick.
+        if not revoke:
+            async with db.tenant_session(TenantId(tenant_id)) as session:
+                await mark_synced(session, tenant_id, now)
     if revoke:
         log.warning("calendar.sync_disconnected", tenant_id=str(tenant_id))
         async with db.tenant_session(TenantId(tenant_id)) as session:
             await revoke_connection(session, tenant_id, account.id)
         return False
-    # Stamped after every try: a failing Google is asked again in an hour, not every tick.
-    async with db.tenant_session(TenantId(tenant_id)) as session:
-        await mark_synced(session, tenant_id, now)
     return copied
 
 
