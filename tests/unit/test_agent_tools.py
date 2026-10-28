@@ -27,6 +27,7 @@ from personal_organizer.core.errors import (
 from personal_organizer.interfaces.calendar import CalendarEvent
 from personal_organizer.interfaces.llm import ToolCall
 from personal_organizer.messaging.agent import (
+    MAX_FIELD,
     MAX_PROPOSALS,
     MAX_WINDOW,
     TOOLS,
@@ -504,6 +505,40 @@ class TestPropose:
         assert all(r.startswith("ok: proposed") for r in results[:-1])
         assert results[-1].startswith("error: ")
         assert "not proposed" in results[-1]
+
+    async def test_a_confirm_never_outgrows_one_message(self) -> None:
+        """Eight at the field limits would be over 4096 characters: the one that would push the
+        confirm past it is refused, and the question still arrives whole."""
+        proposed: list[CalendarEvent] = []
+        eight = [
+            call(
+                "propose_event",
+                title=f"{n} " + "x" * (MAX_FIELD - 2),
+                start=f"2026-10-{12 + n}T08:00",
+                end=f"2026-10-{13 + n}T09:00",  # a day long: the longest "when" line
+                location="y" * MAX_FIELD,
+                repeat="FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR,SA,SU;UNTIL=20270630T090000",
+            )
+            for n in range(1, MAX_PROPOSALS + 1)
+        ]
+        llm = ScriptedLLM(said("", *eight), said("Here they are"))
+        reply = await respond(
+            [],
+            "Add these",
+            replace(TENANT, language="en"),
+            llm=llm,
+            calendar=_calendar(),
+            now=datetime(2026, 10, 12, 9, 0, tzinfo=UTC),
+            proposed=proposed,
+        )
+        results = [m.content for m in llm.calls[1][-len(eight) :]]
+        assert 0 < len(proposed) < MAX_PROPOSALS
+        assert all(r.startswith("ok: proposed") for r in results[: len(proposed)])
+        assert all("not proposed" in r for r in results[len(proposed) :])
+        texts = bubbles(reply)
+        assert all(len(text) <= WHATSAPP_TEXT_LIMIT for text in texts)
+        summaries = "\n\n".join(event_summary(e, JERUSALEM, "en") for e in proposed)
+        assert texts[-1] == confirm_prompt(summaries, "en", many=True)
 
     async def test_propose_without_google_is_allowed(self) -> None:
         proposed: list[CalendarEvent] = []

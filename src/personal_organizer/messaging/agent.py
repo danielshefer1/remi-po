@@ -110,8 +110,8 @@ AGENT_REPLY: Final = "agent:reply"
 #: The widest window one ``list_events`` call reads, so a "this year" stays one page. Also the
 #: longest event ``propose_event`` takes.
 MAX_WINDOW: Final = timedelta(days=62)
-#: The longest title or location ``propose_event`` takes, so the confirm fits one message, and
-#: the longest reminder text.
+#: The longest title or location ``propose_event`` takes, so one event's confirm always fits one
+#: message (several are refused once they would not), and the longest reminder text.
 MAX_FIELD: Final = 200
 #: The most events one message proposes: a week's timetable, one per class, with room to spare.
 MAX_PROPOSALS: Final = 8
@@ -746,6 +746,11 @@ def events_summary(events: Sequence[CalendarEvent], zone: ZoneInfo, language: st
     return "\n\n".join(event_summary(event, zone, language) for event in events)
 
 
+def _confirm_text(events: Sequence[CalendarEvent], zone: ZoneInfo, language: str) -> str:
+    """The text :func:`respond` puts under the reply: the events and the question."""
+    return confirm_prompt(events_summary(events, zone, language), language, many=len(events) > 1)
+
+
 def outing_event(poll: GroupPoll, zone: ZoneInfo) -> CalendarEvent:
     """The outing a group poll plans, in ``zone``."""
     start, end = poll.starts_at.astimezone(zone), poll.ends_at.astimezone(zone)
@@ -1161,6 +1166,13 @@ async def respond(
             event = check_event(arguments, zone)
             if isinstance(event, str):
                 return event
+            # The confirm must arrive as one whole text, or a "yes" would confirm what they
+            # never saw: one that would outgrow it is refused, as past the cap.
+            if len(_confirm_text([*found, event], zone, tenant.language)) > WHATSAPP_TEXT_LIMIT:
+                return (
+                    "error: too long to confirm in one message with the others, so this one "
+                    "was not proposed; tell them which ones didn't fit and to ask again after"
+                )
             found.append(event)
             if event.rule is None:
                 return "ok: proposed; the summary and the confirm question go below your reply"
@@ -1219,9 +1231,7 @@ async def respond(
         log.info("agent.reply_dropped")
         said = ""
     if found:
-        language = tenant.language
-        summary = events_summary(found, zone, language)
-        suffix = confirm_prompt(summary, language, many=len(found) > 1)
+        suffix = _confirm_text(found, zone, tenant.language)
         # The question must arrive whole, or a "yes" would confirm what they never saw. It is
         # its own text, unless three already came before it: then it rides the third.
         joined = f"{said}\n{BREAK}\n{suffix}" if said else suffix
