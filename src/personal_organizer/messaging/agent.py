@@ -1257,7 +1257,7 @@ async def agent_turn(
     parts = [
         fit_message(part) for part in bubbles(reply or t("agent_unavailable", tenant.language))
     ]
-    await send_parts(
+    _, every = await send_parts(
         db,
         channel,
         inbox_id=row.id,
@@ -1266,6 +1266,9 @@ async def agent_turn(
         to=address,
         parts=parts,
     )
+    if proposed and reply and not every:  # the question never reached them: nothing to confirm
+        async with db.tenant_session(TenantId(tenant.id)) as session:
+            await pending.drop(session, tenant.id)
     # The history holds the texts as one reply, so the model never sees a break line echoed.
     recorded = "\n\n".join(parts)
     for url in links:

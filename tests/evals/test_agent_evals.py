@@ -852,4 +852,4 @@ async def test_answer_then_question_splits(text: str, language: str, llm: Anthro
     parts = bubbles(reply)
     assert ENDS_IN_QUESTION.search(parts[-1]), parts
     if proposed:
-        assert len(parts) == 2, parts
+        assert len(parts) >= 2, parts

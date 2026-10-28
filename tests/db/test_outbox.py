@@ -243,7 +243,7 @@ class SecondTransient(FakeOutbound):
 
 class TestSendParts:
     async def _parts(self, db: Database, channel: FakeOutbound, inbox_id: UUID, *parts: str) -> str:
-        return await send_parts(
+        sent, _ = await send_parts(
             db,
             channel,
             inbox_id=inbox_id,
@@ -252,6 +252,7 @@ class TestSendParts:
             to=SENDER_PHONE,
             parts=parts,
         )
+        return sent
 
     async def test_parts_sent_in_order_with_own_keys(self, db: Database, owner_conn: Any) -> None:
         inbox_id = await insert_inbox(owner_conn)

@@ -199,19 +199,20 @@ async def send_parts(
     recipient_key: str,
     to: str,
     parts: Sequence[str],
-) -> str:
+) -> tuple[str, bool]:
     """Send ``parts`` to ``to`` as separate texts, in order, each at most once.
 
     Part 1 is the ``kind`` reply to ``inbox_id``, so a re-run that finds it claimed sends
     nothing at all; part ``n`` is keyed ``kind:n``. A part the channel did not accept stops
-    the rest. Returns part 1's status.
+    the rest. Returns part 1's status and whether every part was accepted.
     """
     # shortcut: a crash between parts loses the later parts; a re-run would write a different
     # reply. A stopped later part can leave a proposal whose question never arrived.
     first = await _status(db, inbox_id, kind)
     if first is not None and first != "pending":
-        return first
+        return first, False
     status = ""
+    every = True
     for n, text in enumerate(parts, 1):
         if n > 1:
             await asyncio.sleep(PART_GAP_S)
@@ -233,11 +234,13 @@ async def send_parts(
                 raise
             await _set_failed(db, inbox_id, part_kind)
             log.warning("outbox.part_stopped", part=n, kind=part_kind)
+            every = False
             break
         status = status or sent
         if sent != "accepted":
+            every = False
             break
-    return status
+    return status, every
 
 
 __all__ = ["PART_GAP_S", "SETTLED", "already_sent", "send_once", "send_parts", "sent_message_id"]
