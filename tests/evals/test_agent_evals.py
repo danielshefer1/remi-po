@@ -14,6 +14,8 @@ the confirm call must read a reply to that proposal as ADD, CANCEL or neither. A
 morning-message request must leave the in-memory schedule as asked (Iteration 05). A memory
 request must leave the in-memory notes as asked, and a stated lasting fact must be saved *and*
 mentioned (Iteration 06); their gender, read from how they write in Hebrew, is saved quietly.
+A reply's shape (#56) is judged on its texts as sent, ``bubbles(reply)``: the answer first and
+short, no filler, a question last.
 """
 
 from __future__ import annotations
@@ -45,6 +47,7 @@ from personal_organizer.messaging.notes import InMemoryNotes, gender
 from personal_organizer.messaging.onboarding_text import t
 from personal_organizer.messaging.schedule import InMemorySchedule
 from personal_organizer.messaging.tenancy import TenantState
+from personal_organizer.messaging.text import bubbles
 from personal_organizer.providers.calendar.memory import InMemoryCalendar
 from personal_organizer.providers.llm.anthropic import AnthropicLLM
 from personal_organizer.settings import AgentSettings
@@ -375,6 +378,8 @@ async def _turn(
     notes: InMemoryNotes | None = None,
     history: tuple[Message, ...] = (),
     strong: LLMProvider | None = None,
+    calendar: InMemoryCalendar | None = None,
+    proposed: list[CalendarEvent] | None = None,
 ) -> str:
     tenant = TenantState(
         id=UUID(int=1),
@@ -390,9 +395,10 @@ async def _turn(
         text,
         tenant,
         llm=llm,
-        calendar=InMemoryCalendar(_events(ZoneInfo(JERUSALEM))),
+        calendar=calendar or InMemoryCalendar(_events(ZoneInfo(JERUSALEM))),
         account=ACCOUNT,
         now=NOW,
+        proposed=proposed,
         schedule=schedule,
         notes=notes,
         strong=strong,
@@ -765,3 +771,81 @@ async def test_simple_question_stays_cheap(
     cheap = Recording(llm)
     await _turn(text, language, InMemorySchedule(NOW), cheap, strong=strong)  # type: ignore[arg-type]
     assert "hand_off" not in cheap.called, cheap.called
+
+
+#: Filler the prompt rules out. "Sure" only capitalised, so "make sure" passes.
+FILLER = re.compile(r"\bSure\b|(?i:happy to|let me know)|בשמחה|אשמח|תודיע")
+#: A question ends the text, give or take an emoji.
+ENDS_IN_QUESTION = re.compile(r"\?\W*$")
+
+
+@pytest.mark.parametrize(
+    ("text", "language"),
+    [("what do I have tomorrow?", "en"), ("מה יש לי מחר?", "he")],
+    ids=["tomorrow", "tomorrow, he"],
+)
+async def test_tomorrow_is_short(text: str, language: str, llm: AnthropicLLM) -> None:
+    """Two events tomorrow: the first text answers, naming the first, in a line or two."""
+    zone = ZoneInfo(JERUSALEM)
+    lunch = datetime(2026, 10, 13, 13, tzinfo=zone)
+    calendar = InMemoryCalendar(
+        [*_events(zone), CalendarEvent("e5", "Lunch with Avi", lunch, lunch + timedelta(hours=1))]
+    )
+    reply = await _turn(text, language, InMemorySchedule(NOW), llm, calendar=calendar)
+    first = bubbles(reply)[0]
+    # The fixture's "Dentist", or how a Hebrew reply says it.
+    assert re.search(r"dentist|שיניים|דנטיסט", first, re.IGNORECASE), reply
+    assert len(first) <= 160, reply
+    assert detect_language(reply) == language, reply
+
+
+@pytest.mark.parametrize(
+    ("text", "language"),
+    [("remind me at 5 to call the bank", "en"), ("תזכיר לי בחמש להתקשר לבנק", "he")],
+    ids=["at 5", "at 5, he"],
+)
+async def test_remind_at_5_is_one_line(text: str, language: str, llm: AnthropicLLM) -> None:
+    """It is 05:00, so "at 5" is 17:00 and needs no question: one short text."""
+    schedule = InMemorySchedule(NOW)
+    reply = await _turn(text, language, schedule, llm)
+    assert len(schedule.reminders) == 1, (schedule.reminders, reply)
+    parts = bubbles(reply)
+    assert len(parts) == 1, parts
+    assert len(parts[0]) <= 100, reply
+
+
+#: Five everyday turns in each language.
+TYPICAL = [
+    ("what do I have tomorrow?", "en"),
+    ("remind me at 5 to call the bank", "en"),
+    ("add dentist on Sunday at 10", "en"),
+    ("what's on this week?", "en"),
+    ("thanks!", "en"),
+    ("מה יש לי מחר?", "he"),
+    ("תזכיר לי בחמש להתקשר לבנק", "he"),
+    ("תוסיף לי רופא שיניים ביום ראשון בעשר", "he"),
+    ("מה יש לי השבוע?", "he"),
+    ("תודה!", "he"),
+]
+
+
+@pytest.mark.parametrize(("text", "language"), TYPICAL, ids=[text for text, _ in TYPICAL])
+async def test_no_filler(text: str, language: str, llm: AnthropicLLM) -> None:
+    reply = await _turn(text, language, InMemorySchedule(NOW), llm)
+    assert not FILLER.search(reply), reply
+
+
+@pytest.mark.parametrize(
+    ("text", "language"),
+    [("dinner with Dana Thursday", "en"), ("ארוחת ערב עם דנה ביום חמישי", "he")],
+    ids=["dinner with Dana", "dinner with Dana, he"],
+)
+async def test_answer_then_question_splits(text: str, language: str, llm: AnthropicLLM) -> None:
+    """No time given: a question ends the reply, its own (what time?) or the confirm's. A
+    proposal is the model's words, then the summary and confirm as a text of their own."""
+    proposed: list[CalendarEvent] = []
+    reply = await _turn(text, language, InMemorySchedule(NOW), llm, proposed=proposed)
+    parts = bubbles(reply)
+    assert ENDS_IN_QUESTION.search(parts[-1]), parts
+    if proposed:
+        assert len(parts) == 2, parts
