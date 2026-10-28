@@ -85,7 +85,7 @@ _EN: Final = {
         "Got it. It's still in your calendar, though, since I can't take things out yet. "
         "You can delete it there whenever you like."
     ),
-    "outing_nudge_fallback": "Hey, just checking if you're coming: {summary}.",
+    "outing_nudge_fallback": "Hey, just checking if you're coming: {summary}. No pressure.",
 }
 
 _HE: Final = {
@@ -139,7 +139,7 @@ _HE: Final = {
         "קיבלתי. רק שזה עדיין ביומן שלך, כי אני עוד לא יכול להוריד משם דברים. "
         "אפשר למחוק את זה ביומן מתי שנוח."
     ),
-    "outing_nudge_fallback": "היי, רציתי לבדוק אם מסתדר לך להגיע: {summary}.",
+    "outing_nudge_fallback": "היי, רציתי לבדוק אם מסתדר לך להגיע: {summary}. בלי לחץ.",
 }
 
 ONBOARDING_TEXT: Final[Mapping[str, Mapping[str, str]]] = MappingProxyType(
