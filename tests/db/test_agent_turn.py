@@ -240,6 +240,22 @@ class TestFallbacks:
         assert advance.reply == sent.body
 
 
+class TestSplitReply:
+    async def test_confirm_rides_last_part(self, db: Database, owner_conn: Any) -> None:
+        tenant = await _active(db)
+        propose = call(
+            "propose_event", title="Dentist", start="2026-10-13T09:00", end="2026-10-13T10:00"
+        )
+        llm = ScriptedLLM(said("", propose), said("Got it.\n---\nTuesday at nine, then."))
+        advance, channel, _ = await _turn(db, owner_conn, tenant, llm)
+        [first, last] = channel.sent
+        assert first.body == "Got it."
+        assert last.body.startswith("Tuesday at nine, then.\n\n")
+        assert last.body.endswith("להוסיף ליומן?")
+        assert advance.reply == f"{first.body}\n\n{last.body}"
+        assert "---" not in advance.reply
+
+
 class TestNoCalendar:
     async def test_no_connection_gets_a_link_to_connect(
         self, db: Database, owner_conn: Any, onboarding_settings: Settings

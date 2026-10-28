@@ -20,6 +20,8 @@ send again. Missing one acknowledgement is better than sending two. See docs/adr
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Final
 from uuid import UUID
@@ -41,6 +43,9 @@ log = structlog.get_logger(__name__)
 
 #: States in which the reply is finished with, one way or another.
 SETTLED: Final = frozenset({"unknown", "accepted", "sent", "delivered", "read", "failed"})
+
+#: The pause between the texts of one reply, so they arrive as someone typing, in order.
+PART_GAP_S: Final = 1.2
 
 
 async def _set(db: Database, outbox_id: UUID, **values: object) -> None:
@@ -97,15 +102,19 @@ async def _claim(
         return row.id, row.status
 
 
-async def already_sent(db: Database, inbox_id: UUID, kind: str) -> bool:
-    """Whether an earlier attempt claimed the ``kind`` reply to ``inbox_id``: it went out, or
-    may have. A caller can then skip working out a reply :func:`send_once` would not send."""
+async def _status(db: Database, inbox_id: UUID, kind: str) -> str | None:
     async with db.system_session() as session:
-        status = await session.scalar(
+        return await session.scalar(
             select(ChannelOutbox.status).where(
                 ChannelOutbox.inbox_id == inbox_id, ChannelOutbox.kind == kind
             )
         )
+
+
+async def already_sent(db: Database, inbox_id: UUID, kind: str) -> bool:
+    """Whether an earlier attempt claimed the ``kind`` reply to ``inbox_id``: it went out, or
+    may have. A caller can then skip working out a reply :func:`send_once` would not send."""
+    status = await _status(db, inbox_id, kind)
     return status is not None and status != "pending"
 
 
@@ -172,4 +181,44 @@ async def send_once(
     return "accepted"
 
 
-__all__ = ["SETTLED", "already_sent", "send_once", "sent_message_id"]
+async def send_parts(
+    db: Database,
+    channel: OutboundChannel,
+    *,
+    inbox_id: UUID,
+    kind: str,
+    recipient_key: str,
+    to: str,
+    parts: Sequence[str],
+) -> str:
+    """Send ``parts`` to ``to`` as separate texts, in order, each at most once.
+
+    Part 1 is the ``kind`` reply to ``inbox_id``, so a re-run that finds it claimed sends
+    nothing at all; part ``n`` is keyed ``kind:n``. A part the channel did not accept stops
+    the rest. Returns part 1's status.
+    """
+    # shortcut: a crash between parts loses the later parts; a re-run would write a different
+    # reply
+    first = await _status(db, inbox_id, kind)
+    if first is not None and first != "pending":
+        return first
+    status = ""
+    for n, text in enumerate(parts, 1):
+        if n > 1:
+            await asyncio.sleep(PART_GAP_S)
+        sent = await send_once(
+            db,
+            channel,
+            inbox_id=inbox_id,
+            kind=kind if n == 1 else f"{kind}:{n}",
+            recipient_key=recipient_key,
+            to=to,
+            text=text,
+        )
+        status = status or sent
+        if sent != "accepted":
+            break
+    return status
+
+
+__all__ = ["PART_GAP_S", "SETTLED", "already_sent", "send_once", "send_parts", "sent_message_id"]

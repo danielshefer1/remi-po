@@ -88,11 +88,11 @@ from personal_organizer.messaging.language import ENGLISH, HEBREW
 from personal_organizer.messaging.notes import Notes, TenantNotes
 from personal_organizer.messaging.onboarding import LINK_PLACEHOLDER, Advance
 from personal_organizer.messaging.onboarding_text import t
-from personal_organizer.messaging.outbox import already_sent, send_once
+from personal_organizer.messaging.outbox import already_sent, send_once, send_parts
 from personal_organizer.messaging.recurrence import check_rule, describe_rule, first_at
 from personal_organizer.messaging.schedule import Schedule, TenantSchedule
 from personal_organizer.messaging.tenancy import TenantState, load_history, phone_of
-from personal_organizer.messaging.text import WHATSAPP_TEXT_LIMIT, split_text
+from personal_organizer.messaging.text import WHATSAPP_TEXT_LIMIT, bubbles, split_text
 from personal_organizer.messaging.timezones import match_zone, zone_label
 from personal_organizer.onboarding.links import issue_or_reuse_link
 from personal_organizer.settings import Settings
@@ -1079,8 +1079,9 @@ async def respond(
     if found:
         language = tenant.language
         suffix = confirm_prompt(event_summary(found[0], zone, language), language)
-        # The question must arrive whole, or a "yes" would confirm what they never saw.
-        if len(f"{said}\n\n{suffix}") > WHATSAPP_TEXT_LIMIT:
+        # The question must arrive whole, or a "yes" would confirm what they never saw. It
+        # rides the last text, so that is the one it has to fit.
+        if len(f"{bubbles(said)[-1]}\n\n{suffix}") > WHATSAPP_TEXT_LIMIT:
             said = ""
         said = f"{said}\n\n{suffix}".strip()
     # A proposal means a connected calendar, and its confirm question must stay last and whole.
@@ -1090,8 +1091,8 @@ async def respond(
             line = t("calendar_disconnected", language)
         else:
             line = t("calendar_not_connected", language, url=await connect_link())
-        # The link must arrive whole: a cut reply would lose it.
-        if len(f"{said}\n\n{line}") > WHATSAPP_TEXT_LIMIT:
+        # The link must arrive whole: a cut reply would lose it. It rides the last text.
+        if len(f"{bubbles(said)[-1]}\n\n{line}") > WHATSAPP_TEXT_LIMIT:
             said = ""
         return f"{said}\n\n{line}".strip()
     return said
@@ -1249,17 +1250,20 @@ async def agent_turn(
                 payload=_payload(proposed[0], row.id),
                 now=now,
             )
-    text = fit_message(reply or t("agent_unavailable", tenant.language))
-    await send_once(
+    parts = [
+        fit_message(part) for part in bubbles(reply or t("agent_unavailable", tenant.language))
+    ]
+    await send_parts(
         db,
         channel,
         inbox_id=row.id,
         kind=AGENT_REPLY,
         recipient_key=row.sender_key,
         to=address,
-        text=text,
+        parts=parts,
     )
-    recorded = text
+    # The history holds the texts as one reply, so the model never sees a break line echoed.
+    recorded = "\n\n".join(parts)
     for url in links:
         recorded = recorded.replace(url, LINK_PLACEHOLDER)
     return Advance(reply=recorded)

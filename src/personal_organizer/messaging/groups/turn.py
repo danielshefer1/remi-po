@@ -76,8 +76,9 @@ from personal_organizer.messaging.groups.prompt import group_prompt
 from personal_organizer.messaging.inbox import InboxRow
 from personal_organizer.messaging.language import detect_language
 from personal_organizer.messaging.onboarding_text import t
-from personal_organizer.messaging.outbox import already_sent, send_once
+from personal_organizer.messaging.outbox import already_sent, send_once, send_parts
 from personal_organizer.messaging.tenancy import phone_of
+from personal_organizer.messaging.text import bubbles
 
 log = structlog.get_logger(__name__)
 
@@ -514,18 +515,20 @@ async def _answer(
             last_attempt=last_attempt,
         )
     if reply:
-        sent = fit_message(reply)
-        await send_once(
+        parts = [fit_message(part) for part in bubbles(reply)]
+        await send_parts(
             db,
             channel,
             inbox_id=row.id,
             kind=GROUP_REPLY,
             recipient_key=group_key(turn.jid),
             to=turn.jid,
-            text=sent,
+            parts=parts,
         )
         async with db.system_session() as session:
-            await add_context(session, turn.group_id, sender_name=REMI, body=sent, sent_at=turn.now)
+            await add_context(
+                session, turn.group_id, sender_name=REMI, body="\n\n".join(parts), sent_at=turn.now
+            )
 
 
 __all__ = [
