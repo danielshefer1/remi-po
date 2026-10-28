@@ -110,6 +110,10 @@ class TenantCalendar:
         # Keep Google's copy under its own id, so the next refresh replaces it, not doubles it.
         async with self._db.tenant_session(TenantId(self._tenant_id)) as session:
             await event_rows.upsert_google(session, self._tenant_id, stored)
+        if stored.rule:
+            # Google's instances replace the stored master, so the whole series shows now, not
+            # at the next hourly sync. A failed refresh leaves the master row; the add stands.
+            await self.refresh(stored.start, stored.start + event_rows.IMPORT_AHEAD)
         return stored
 
 

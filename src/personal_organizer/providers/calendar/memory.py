@@ -9,9 +9,10 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 from dataclasses import replace
-from datetime import datetime
+from datetime import UTC, datetime
 
 from personal_organizer.interfaces.calendar import CalendarEvent
+from personal_organizer.messaging.recurrence import occurrences
 
 
 class InMemoryCalendar:
@@ -26,7 +27,13 @@ class InMemoryCalendar:
         self.calls.append((account_id, user_id, start, end))
         if self.fail:
             raise self.fail
-        found = [event for event in self.events if event.start < end and event.end > start]
+        # Like singleEvents=True: a series comes back as rule-less instances.
+        found = [
+            replace(o, rule=None)
+            for event in self.events
+            for o in occurrences(event, start, end, event.start.tzinfo or UTC)
+            if o.start < end and o.end > start
+        ]
         return sorted(found, key=lambda event: event.start)
 
     async def create_event(
