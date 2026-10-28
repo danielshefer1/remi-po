@@ -14,7 +14,6 @@ from uuid import UUID, uuid4
 import pytest
 
 from personal_organizer.core.errors import (
-    CalendarProviderUnavailableError,
     ChannelNotConfiguredError,
     TransientChannelError,
 )
@@ -23,6 +22,7 @@ from personal_organizer.db.engine import Database
 from personal_organizer.db.repositories.connections import bind_connection
 from personal_organizer.interfaces.channel import OutboundChannel
 from personal_organizer.messaging.onboarding_text import t
+from personal_organizer.onboarding import connected
 from personal_organizer.onboarding.connected import (
     ALL_SET_KIND,
     all_set_key,
@@ -156,11 +156,17 @@ class TestAnnounceConnected:
         assert await announce_connected(tenant_id, uuid4(), db=db, channels=resolver(meta)) is None
         assert meta.attempts == []
 
-    async def test_import_failure_still_sends_all_set(self, db: Database) -> None:
+    async def test_import_failure_still_sends_all_set(
+        self, db: Database, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         tenant_id = await active_tenant(db)
         await seed_inbound(db, tenant_id, channel="gowa", sent_at=datetime.now(UTC))
         google = InMemoryCalendar()
-        google.fail = CalendarProviderUnavailableError("down")
+
+        async def boom(*args: Any, **kwargs: Any) -> bool:
+            raise RuntimeError("import blew up")
+
+        monkeypatch.setattr(connected, "sync_calendar", boom)
         async with db.tenant_session(TenantId(tenant_id)) as session:
             await bind_connection(
                 session, tenant_id, connected_account_id="ca_1", auth_config_id="ac"
@@ -172,5 +178,4 @@ class TestAnnounceConnected:
         )
 
         assert status == "accepted"
-        assert len(google.calls) == 1
         assert len(gowa.sent) == 1

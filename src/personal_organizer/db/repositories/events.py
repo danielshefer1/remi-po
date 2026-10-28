@@ -156,7 +156,8 @@ async def _upsert_google(
 
 
 async def mark_synced(session: AsyncSession, tenant_id: UUID, now: datetime) -> None:
-    """Google's events were copied at ``now``, on the tenant's active connection."""
+    """A sync of the tenant's active connection was tried at ``now``, whether or not it worked:
+    ``synced_at`` is the last try, so a failing Google is asked again in an hour, not every tick."""
     await session.execute(
         scoped(update(CalendarConnection), CalendarConnection, tenant_id)
         .where(CalendarConnection.status == "active")

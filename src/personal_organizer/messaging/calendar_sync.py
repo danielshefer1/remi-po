@@ -8,13 +8,17 @@ from zoneinfo import ZoneInfo
 
 import structlog
 
-from personal_organizer.core.errors import CalendarNotConnectedError
+from personal_organizer.core.errors import CalendarNotConnectedError, CalendarProviderError
 from personal_organizer.core.types import TenantId
 from personal_organizer.db.engine import Database
 from personal_organizer.db.repositories.connections import active_connection, revoke_connection
 from personal_organizer.db.repositories.events import IMPORT_AHEAD, mark_synced
 from personal_organizer.db.repositories.tenants import get_tenant
-from personal_organizer.interfaces.calendar import CalendarProvider
+from personal_organizer.interfaces.calendar import (
+    ACCOUNT_ACTIVE,
+    CalendarProvider,
+    ConnectLinker,
+)
 from personal_organizer.messaging.calendar import TenantCalendar
 
 log = structlog.get_logger(__name__)
@@ -37,17 +41,31 @@ async def sync_calendar(
     theirs = TenantCalendar(db, tenant_id, provider=provider, account=account)
     # shortcut: one Google page (250 events) per read; follow nextPageToken if a 90-day import
     # is ever cut (refresh keeps what is stored past the last event it got).
+    revoke = False
     try:
         copied = await theirs.refresh(start, end, raise_not_connected=True)
     except CalendarNotConnectedError:
+        # Composio's 422 is ambiguous: revoke only if it says the account no longer works.
+        copied = False
+        revoke = await _account_is_dead(provider, account.connected_account_id)
+    if revoke:
         log.warning("calendar.sync_disconnected", tenant_id=str(tenant_id))
         async with db.tenant_session(TenantId(tenant_id)) as session:
-            await revoke_connection(session, tenant_id)
+            await revoke_connection(session, tenant_id, account.id)
         return False
-    if copied:
-        async with db.tenant_session(TenantId(tenant_id)) as session:
-            await mark_synced(session, tenant_id, now)
+    # Stamped after every try: a failing Google is asked again in an hour, not every tick.
+    async with db.tenant_session(TenantId(tenant_id)) as session:
+        await mark_synced(session, tenant_id, now)
     return copied
+
+
+async def _account_is_dead(provider: CalendarProvider, account_id: str) -> bool:
+    if not isinstance(provider, ConnectLinker):
+        return False
+    try:
+        return (await provider.get_account(account_id)).status != ACCOUNT_ACTIVE
+    except CalendarProviderError:
+        return False
 
 
 __all__ = ["sync_calendar"]

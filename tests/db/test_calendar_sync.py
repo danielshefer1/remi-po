@@ -19,7 +19,7 @@ from personal_organizer.db.engine import Database
 from personal_organizer.db.repositories import events as event_rows
 from personal_organizer.db.repositories.connections import active_connection, bind_connection
 from personal_organizer.db.repositories.tenants import set_timezone
-from personal_organizer.interfaces.calendar import CalendarEvent
+from personal_organizer.interfaces.calendar import ACCOUNT_ACTIVE, CalendarEvent, ConnectedAccount
 from personal_organizer.messaging.calendar_sync import sync_calendar
 from personal_organizer.providers.calendar.memory import InMemoryCalendar
 from personal_organizer.settings import Settings
@@ -93,7 +93,9 @@ async def test_sync_failure_keeps_rows(db: Database) -> None:
     later = NOW + timedelta(hours=2)
     assert not await sync_calendar(tenant_id, db=db, provider=google, now=later)
     assert [e.title for e in await _stored(db, tenant_id)] == ["Kept"]
-    assert await _due(db, later) == [tenant_id]  # synced_at unchanged: due again
+    # synced_at means "last tried": not retried every minute, but again in an hour.
+    assert await _due(db, later + timedelta(minutes=1)) == []
+    assert await _due(db, later + timedelta(hours=1, minutes=1)) == [tenant_id]
 
 
 async def test_new_account_import_replaces_imported_rows(db: Database) -> None:
@@ -125,13 +127,55 @@ async def test_sync_window_is_in_the_members_zone(db: Database) -> None:
     assert (got.title, got.start) == ("Holiday", day)
 
 
+class _Google(InMemoryCalendar):
+    """A calendar that is also the linker: ``status`` is what Composio says of the account."""
+
+    def __init__(self, status: str) -> None:
+        super().__init__()
+        self.status = status
+        self.fail = CalendarNotConnectedError(401)
+
+    async def link(self, *, user_id: str, auth_config_id: str, callback_url: str) -> str:
+        return callback_url
+
+    async def get_account(self, connected_account_id: str) -> ConnectedAccount:
+        return ConnectedAccount(connected_account_id, "u", "ac", self.status)
+
+
 async def test_sync_revoked_account_disconnects(db: Database) -> None:
     tenant_id = await _tenant(db)
-    google = InMemoryCalendar([_event("Copied", 3, "g1")])
-    await sync_calendar(tenant_id, db=db, provider=google, now=NOW)
-    google.fail = CalendarNotConnectedError(401)
+    await sync_calendar(
+        tenant_id, db=db, provider=InMemoryCalendar([_event("Copied", 3, "g1")]), now=NOW
+    )
+    google = _Google("EXPIRED")
     assert not await sync_calendar(tenant_id, db=db, provider=google, now=NOW + timedelta(hours=2))
     async with db.tenant_session(TenantId(tenant_id)) as session:
         assert await active_connection(session, tenant_id) is None
     assert [e.title for e in await _stored(db, tenant_id)] == ["Copied"]
     assert await _due(db, NOW + timedelta(days=1)) == []  # nothing to sync any more
+
+
+async def test_sync_not_connected_but_account_active_is_not_revoked(db: Database) -> None:
+    tenant_id = await _tenant(db)
+    assert not await sync_calendar(tenant_id, db=db, provider=_Google(ACCOUNT_ACTIVE), now=NOW)
+    async with db.tenant_session(TenantId(tenant_id)) as session:
+        assert await active_connection(session, tenant_id) is not None
+    assert await _due(db, NOW + timedelta(minutes=1)) == []  # tried; not again for an hour
+
+
+async def test_sync_does_not_revoke_a_connection_bound_meanwhile(db: Database) -> None:
+    tenant_id = await _tenant(db)
+
+    class Reconnects(_Google):
+        async def list_events(self, *args: Any, **kwargs: Any) -> Any:
+            async with db.tenant_session(TenantId(tenant_id)) as session:
+                await bind_connection(
+                    session, tenant_id, connected_account_id="ca_2", auth_config_id="ac"
+                )
+            return await super().list_events(*args, **kwargs)
+
+    await sync_calendar(tenant_id, db=db, provider=Reconnects("EXPIRED"), now=NOW)
+    async with db.tenant_session(TenantId(tenant_id)) as session:
+        new = await active_connection(session, tenant_id)
+    assert new is not None
+    assert new.connected_account_id == "ca_2"

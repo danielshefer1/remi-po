@@ -117,12 +117,13 @@ async def active_connection(session: AsyncSession, tenant_id: UUID) -> CalendarC
     return row
 
 
-async def revoke_connection(session: AsyncSession, tenant_id: UUID) -> None:
-    """The tenant's active account stopped working: it counts as not connected until they
-    connect again (:func:`bind_connection` then inserts a fresh row)."""
+async def revoke_connection(session: AsyncSession, tenant_id: UUID, connection_id: UUID) -> None:
+    """Connection ``connection_id`` stopped working: the tenant counts as not connected until
+    they connect again (:func:`bind_connection` then inserts a fresh row). By id, so a
+    connection bound since is left alone."""
     await session.execute(
         scoped(update(CalendarConnection), CalendarConnection, tenant_id)
-        .where(CalendarConnection.status == "active")
+        .where(CalendarConnection.id == connection_id, CalendarConnection.status == "active")
         .values(status="revoked")
     )
 
