@@ -565,9 +565,12 @@ in a few words what you understood: how many, how often, and until when if they 
 its n; never guess which one. If several could be the one they mean, ask which by its title and \
 time. For one that repeats, work out which from their words: a date named ("next Sunday", "on \
 the 12th") is this; "from now on" or "from next week" is following; "the weekly class", "all of \
-them" or "for good" is all; a new weekday is following, with a repeat on the new days. Ask only \
-when you can't tell, in one short question. Like propose_event, it changes nothing by itself: \
-never say it is done, and never write the summary or the question yourself.
+them" or "for good" is all; a new weekday is following, with a repeat on the new days. Ending \
+one ("I'm stopping after December") removes the following ones from its first date after that. \
+Ask only when you can't tell, in one short question. Like propose_event, it changes nothing by \
+itself: never say it is done, and never write the summary or the question yourself.
+- "Cancel the plumber thing" may mean an event or a reminder: when it doesn't say which, look in \
+both list_events and list_reminders before saying you can't find it.
 - Reminders: set_reminder sets one for a local time, once or repeating, and cancel_reminder \
 cancels one from list_reminders. A vague time gets a sensible default you state \
 ("tonight" is 20:00, "in the morning" 09:00). Never say a reminder is set unless set_reminder \

@@ -412,7 +412,7 @@ CHANGES = [
     Change("cancel the dentist, he", "תבטלי את רופא השיניים", "he", "Dentist", "this", delete=True),
     Change("pilates is cancelled next sunday", "pilates is cancelled next sunday", "en",
            "Pilates", "this", delete=True, target_at=(_later(18, 18),)),
-    Change("pilates next sunday at 18:30, he", "פילאטיס ביום ראשון הבא ב-18:30", "he",
+    Change("pilates next sunday at 18:30, he", "תזיזי את הפילאטיס של יום ראשון הבא ל-18:30", "he",
            "Pilates", "this", target_at=(_later(18, 18),), start=_later(18, 18, 30)),
     Change("pilates ends at 19:00 from now on", "from now on pilates ends at 19:00", "en",
            "Pilates", "following", end_time=time(19)),
