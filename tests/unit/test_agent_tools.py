@@ -1095,12 +1095,17 @@ class TestProposeChange:
 
     async def test_invite_following_refused(self) -> None:
         calendar = _calendar(DENTIST_29, INVITE, PILATES, replace(SYNC, invited=True))
-        _, changed, [following] = await self._run(
-            _change(n=4, which="following", delete=True), calendar=calendar
+        _, changed, results = await self._run(
+            _change(n=4, which="following", delete=True),
+            # Not said: one question with the two choices it has, not the three-way one.
+            _change(n=4, delete=True),
+            calendar=calendar,
         )
         assert changed == []
-        assert following.startswith("error: ")
-        assert "just this date or the whole series" in following
+        for result in results:
+            assert result.startswith("error: ")
+            assert "just this date or the whole series" in result
+            assert "from this date on" not in result
         _, [whole], [ok] = await self._run(
             _change(n=4, which="all", delete=True), calendar=calendar
         )
@@ -1144,6 +1149,51 @@ class TestProposeChange:
         # The same weekday, a new hour, needs no new pattern.
         _, [later], _ = await self._run(_change(n=3, which="all", start="2026-11-01T19:00"))
         assert later.change.rule is None
+
+    async def test_monthly_date_move_needs_repeat(self) -> None:
+        """A BYMONTHDAY rule keeps the old day of the month whatever the start says."""
+        review = CalendarEvent(
+            "review-id",
+            "Review",
+            datetime(2026, 11, 2, 10, 0, tzinfo=JERUSALEM),
+            datetime(2026, 11, 2, 11, 0, tzinfo=JERUSALEM),
+            rule="FREQ=MONTHLY;BYMONTHDAY=2",
+        )
+        calendar = _calendar(DENTIST_29, INVITE, review)
+        _, changed, results = await self._run(
+            _change(n=3, which="all", start="2026-11-03T10:00"),
+            _change(n=3, which="following", start="2026-11-03T10:00"),
+            calendar=calendar,
+        )
+        assert changed == []
+        for result in results:
+            assert result.startswith("error: ")
+            assert "repeat" in result
+        _, [later], _ = await self._run(
+            _change(n=3, which="all", start="2026-11-02T12:00"), calendar=calendar
+        )
+        assert later.change.start is not None
+        # Weekly without BYDAY repeats on its start's weekday: it moves with it.
+        weekly = _calendar(DENTIST_29, INVITE, replace(review, rule="FREQ=WEEKLY"))
+        _, [moved], _ = await self._run(
+            _change(n=3, which="all", start="2026-11-03T10:00"), calendar=weekly
+        )
+        assert moved.change.start is not None
+
+    async def test_new_pattern_keeps_the_series_end(self) -> None:
+        ending = replace(PILATES, rule="FREQ=WEEKLY;BYDAY=SU;UNTIL=20261231T180000")
+        calendar = _calendar(DENTIST_29, INVITE, ending, SYNC)
+        _, [moved], _ = await self._run(
+            _change(n=3, which="following", repeat="FREQ=WEEKLY;BYDAY=TU"), calendar=calendar
+        )
+        assert moved.change.rule == "FREQ=WEEKLY;BYDAY=TU;UNTIL=20261231T235959"
+        assert "until 2026-12-31" in moved.summary
+        # An end they said wins.
+        _, [own], _ = await self._run(
+            _change(n=3, which="following", repeat="FREQ=WEEKLY;BYDAY=TU;UNTIL=20261124T180000"),
+            calendar=calendar,
+        )
+        assert own.change.rule == "FREQ=WEEKLY;BYDAY=TU;UNTIL=20261124T180000"
 
     async def test_a_one_time_event_gets_no_repeat(self) -> None:
         """Its which is always this, so "use following" would loop: it's its own error."""
@@ -1273,7 +1323,7 @@ class TestChangeSummary:
 
     @pytest.mark.parametrize(
         ("language", "scope"),
-        [("en", "Only Sunday 2026-11-08"), ("he", "רק ביום ראשון 2026-11-08")],
+        [("en", "Just this date"), ("he", "רק בתאריך הזה")],
     )
     def test_change_summary_remove_this_date(self, language: str, scope: str) -> None:
         change = EventChange(_pilates_on(8), "this", delete=True)
@@ -1290,7 +1340,7 @@ class TestChangeSummary:
                     "Pilates",
                     "Tuesday 2026-11-03, 18:00-19:00",
                     "(was Sunday 2026-11-01, 18:00-19:00)",
-                    "Every Tuesday from Tuesday 2026-11-03",
+                    "From this date on, every Tuesday until 2026-12-31",
                 ],
             ),
             (
@@ -1299,13 +1349,13 @@ class TestChangeSummary:
                     "Pilates",
                     "יום שלישי 2026-11-03, 18:00-19:00",
                     "(במקום יום ראשון 2026-11-01, 18:00-19:00)",
-                    "כל יום שלישי החל מיום שלישי 2026-11-03",
+                    "מהתאריך הזה והלאה, כל יום שלישי עד 2026-12-31",
                 ],
             ),
         ],
     )
     def test_a_new_pattern_from_a_date(self, language: str, expected: list[str]) -> None:
-        rule = "FREQ=WEEKLY;BYDAY=TU"
+        rule = "FREQ=WEEKLY;BYDAY=TU;UNTIL=20261231T235959"
         change = EventChange(_pilates_on(1), "following", rule=rule)
         assert change_summary(change, rule, JERUSALEM, language).splitlines() == expected
 

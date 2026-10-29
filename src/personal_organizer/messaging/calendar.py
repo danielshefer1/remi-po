@@ -32,7 +32,14 @@ from personal_organizer.db.models.tenant import CalendarConnection
 from personal_organizer.db.repositories import events as event_rows
 from personal_organizer.db.repositories.tenants import get_tenant
 from personal_organizer.interfaces.calendar import CalendarEvent, CalendarProvider, EventChange
-from personal_organizer.messaging.recurrence import end_lines, first_at, local_rule, occurrences
+from personal_organizer.messaging.recurrence import (
+    end_lines,
+    first_at,
+    keep_until,
+    local_rule,
+    occurrences,
+    shift_until,
+)
 from personal_organizer.providers.calendar.composio import PAGE_SIZE
 
 log = structlog.get_logger(__name__)
@@ -212,24 +219,33 @@ class TenantCalendar:
     ) -> None:
         """End Google's series just before the target; for a change, start a new one there."""
         target = change.target
-        rule = change.rule or local_rule(lines, zone, target.all_day)
-        if not change.delete and rule is None:
-            # propose_change refuses a pattern we can't copy; never end a series we can't continue.
-            raise CalendarProviderRejectedError(None)
+        new = None
+        if not change.delete:
+            # Built before the old series is ended, so nothing here can fail after that write.
+            old = local_rule(lines, zone, target.all_day)
+            start, end = _moved(target, change)
+            start, end = start.astimezone(zone), end.astimezone(zone)
+            if change.rule:
+                first = first_at(change.rule, start)
+                start, end, rule = first, end + (first - start), keep_until(change.rule, old)
+            elif old is None:
+                # propose_change refuses a pattern we can't copy; never end a series we can't
+                # continue.
+                raise CalendarProviderRejectedError(None)
+            else:
+                # Moved later, it keeps its last date, as Remi's own series does.
+                rule = shift_until(old, start - target.start)
+            location = target.location if change.location is None else change.location or None
+            title = change.title or target.title
+            new = CalendarEvent(
+                "", title, start, end, all_day=target.all_day, location=location, rule=rule
+            )
         ended = end_lines(lines, target.start.astimezone(zone), target.all_day)
         await provider.update_event(*ids, master.external_id, recurrence=ended)
-        if change.delete:
+        if new is None:
             return
-        start, end = _moved(target, change)
-        start, end = start.astimezone(zone), end.astimezone(zone)
-        if change.rule:
-            first = first_at(change.rule, start)
-            start, end = first, end + (first - start)
-        location = target.location if change.location is None else change.location or None
-        title = change.title or target.title
-        new = CalendarEvent("", title, start, end, all_day=target.all_day, location=location)
         try:
-            await provider.create_event(*ids, replace(new, rule=rule))
+            await provider.create_event(*ids, new)
         except CalendarProviderError as exc:
             raise SeriesSplitError from exc
 

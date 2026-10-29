@@ -285,6 +285,22 @@ async def test_google_following_new_pattern_starts_on_its_first_day(db: Database
     assert created.end - created.start == timedelta(hours=1)
 
 
+async def test_google_following_new_pattern_keeps_the_end(db: Database) -> None:
+    cal, google, listed = await _google_series(db, rule="FREQ=WEEKLY;UNTIL=20261231T180000")
+    await cal.change(EventChange(listed[2], which="following", rule="FREQ=WEEKLY;BYDAY=TH"))
+    assert google.events[-1].rule == "FREQ=WEEKLY;BYDAY=TH;UNTIL=20261231T235959"
+
+
+async def test_google_following_later_keeps_the_last_date(db: Database) -> None:
+    """Copied, the pattern's UNTIL moves with the start, as Remi's own series does."""
+    cal, google, listed = await _google_series(db, rule="FREQ=WEEKLY;UNTIL=20261209T180000")
+    target = listed[2]
+    await cal.change(
+        EventChange(target, which="following", start=target.start + timedelta(hours=1))
+    )
+    assert google.events[-1].rule == "FREQ=WEEKLY;UNTIL=20261209T190000"
+
+
 async def test_google_following_from_the_first_is_all(db: Database) -> None:
     cal, google, listed = await _google_series(db)
     await cal.change(EventChange(listed[0], which="following", delete=True))

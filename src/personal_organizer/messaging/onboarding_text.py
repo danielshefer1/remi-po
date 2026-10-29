@@ -88,10 +88,12 @@ _EN: Final = {
         "I couldn't reach your calendar just now, so nothing changed. Try me again in a bit."
     ),
     "event_changed_meanwhile": (
-        "That event changed in the meantime, so I left it alone. Tell me again what you'd like?"
+        "That event changed in the meantime, so I left it alone. What would you like to do with "
+        "it now?"
     ),
     "series_split": (
-        "I ended the old series before {day}, but couldn't add the new one. Ask me again to add it?"
+        "I ended the old series before {day}, but couldn't add the new one. Want me to try adding "
+        "it again?"
     ),
     "calendar_disconnected_change": (
         "I couldn't change it: your Google Calendar connection has stopped working. Just ask me "
@@ -168,8 +170,10 @@ _HE: Final = {
     "change_cancelled": "אין בעיה, השארתי כמו שהיה.",
     "change_closed": "ההצעה הזו כבר לא בתוקף, אז לא שיניתי כלום. מה לשנות?",
     "event_not_changed": "לא הצלחתי להגיע ליומן כרגע, אז לא שיניתי כלום. אפשר לנסות שוב עוד מעט.",
-    "event_changed_meanwhile": "האירוע הזה השתנה בינתיים, אז לא נגעתי בו. מה לשנות?",
-    "series_split": "סיימתי את הסדרה הישנה לפני {day}, אבל לא הצלחתי להוסיף את החדשה. לבקש שוב?",
+    "event_changed_meanwhile": "האירוע הזה השתנה בינתיים, אז לא נגעתי בו. מה לעשות איתו עכשיו?",
+    "series_split": (
+        "סיימתי את הסדרה הישנה לפני {day}, אבל לא הצלחתי להוסיף את החדשה. לנסות להוסיף אותה שוב?"
+    ),
     "calendar_disconnected_change": (
         "לא הצלחתי לשנות את זה, כי החיבור ליומן Google שלך הפסיק לעבוד. אפשר לבקש ממני "
         "ואשלח קישור לחבר אותו מחדש."

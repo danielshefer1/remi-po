@@ -371,6 +371,15 @@ async def test_series_following_new_rule(db: Database) -> None:
     ]  # fmt: skip
 
 
+async def test_series_following_new_rule_keeps_the_end(db: Database) -> None:
+    """A new pattern without an end of its own ends when the series did (its last day)."""
+    tenant_id = await _tenant(db)
+    await _sundays(db, tenant_id, "FREQ=WEEKLY;BYDAY=SU;UNTIL=20261122T180000")
+    target = await _on(db, tenant_id, 15)
+    await _change(db, tenant_id, EventChange(target, "following", rule="FREQ=WEEKLY;BYDAY=TU"))
+    assert [e.start.day for e in await _read(db, tenant_id, *NOVEMBER)] == [1, 8, 17]
+
+
 async def test_series_delete_all_takes_moved_dates(db: Database) -> None:
     tenant_id = await _tenant(db)
     await _sundays(db, tenant_id)

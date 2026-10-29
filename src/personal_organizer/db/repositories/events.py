@@ -26,7 +26,13 @@ from personal_organizer.core.errors import EventChangedError
 from personal_organizer.db.models.tenant import CalendarConnection, Event
 from personal_organizer.db.repositories.scope import scoped
 from personal_organizer.interfaces.calendar import CalendarEvent, EventChange
-from personal_organizer.messaging.recurrence import first_at, occurrences, shift_until, until_before
+from personal_organizer.messaging.recurrence import (
+    first_at,
+    keep_until,
+    occurrences,
+    shift_until,
+    until_before,
+)
 
 #: How far ahead a sync, an import or a live refresh copies Google's events.
 IMPORT_AHEAD: Final = timedelta(days=90)
@@ -320,7 +326,7 @@ async def _change_following(
     start, end = _moved(change, at, _occurrence_end(row, at, zone), zone)
     if change.rule:
         first = first_at(change.rule, start)
-        start, end, rule = first, end + (first - start), change.rule
+        start, end, rule = first, end + (first - start), keep_until(change.rule, rule)
     else:
         rule = shift_until(rule, start - at)
     await add_event(

@@ -1,9 +1,10 @@
-"""Adding an event behind a confirm (PR 3, D5): ``agent_turn`` with a fake model and calendar.
+"""Adding, changing or removing an event behind a confirm (PR 3, D5; #63): ``agent_turn`` with
+a fake model and calendar.
 
 Done-When: a proposal goes out with its question written by code and is stored; a reply the
-confirm call reads as ADD creates the event exactly once, however the job re-runs or the person
-repeats it; CANCEL, anything else or an hour's wait each leave nothing to confirm. Only OTHER
-reaches the agent.
+confirm call reads as ADD (or yes, for a change) writes it exactly once, however the job re-runs
+or the person repeats it, and a failed write is never retried; CANCEL, anything else or an hour's
+wait each leave nothing to confirm. Only OTHER reaches the agent.
 """
 
 from __future__ import annotations

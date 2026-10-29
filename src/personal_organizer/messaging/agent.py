@@ -106,7 +106,7 @@ from personal_organizer.messaging.notes import Notes, TenantNotes
 from personal_organizer.messaging.onboarding import LINK_PLACEHOLDER, Advance
 from personal_organizer.messaging.onboarding_text import t
 from personal_organizer.messaging.outbox import already_sent, send_once, send_parts
-from personal_organizer.messaging.recurrence import check_rule, describe_rule, first_at
+from personal_organizer.messaging.recurrence import check_rule, describe_rule, first_at, keep_until
 from personal_organizer.messaging.schedule import Schedule, TenantSchedule
 from personal_organizer.messaging.tenancy import TenantState, load_history, phone_of
 from personal_organizer.messaging.text import BREAK, WHATSAPP_TEXT_LIMIT, bubbles, split_text
@@ -878,11 +878,6 @@ async def check_change(
     repeating = bool(target.rule or target.series_id)
     asked = arguments.get("which")
     which = next((w for w in _WHICH if w == asked), None) if repeating else "this"
-    if which is None:
-        return (
-            "error: it repeats; if their words don't say, ask them in one short question "
-            "whether they mean just this date, from this date on, or all of them"
-        )
     delete = arguments.get("delete") is True
     title, location, repeat = (arguments.get(k) for k in ("title", "location", "repeat"))
     given = [arguments.get(k) for k in ("title", "start", "end", "location", "repeat")]
@@ -893,10 +888,15 @@ async def check_change(
             "error: it's an invite from someone else, so only they can change it; say so and "
             "offer to remove it from their calendar"
         )
-    if target.invited and which == "following":
+    if target.invited and which in (None, "following"):
         return (
             "error: an invite from someone else can be removed just this date or the whole "
-            "series; ask which"
+            "series; unless their words already say which, ask them in one short question"
+        )
+    if which is None:
+        return (
+            "error: it repeats; if their words don't say, ask them in one short question "
+            "whether they mean just this date, from this date on, or all of them"
         )
     if delete:
         return EventChange(target, which, delete=True)
@@ -929,18 +929,24 @@ async def check_change(
     if end is not None and end - at > MAX_WINDOW:
         return f"error: an event lasts at most {MAX_WINDOW.days} days"
     rule = None
+    series = await calendar.series_rule(target) if which != "this" else None
     if repeat is not None:
         try:
-            rule = check_rule(str(repeat), at)
+            # Without an end of its own, the new pattern ends when the series did.
+            rule = keep_until(check_rule(str(repeat), at), series)
             first_at(rule, at)  # an UNTIL before it never goes off
         except ValueError as error:
             return f"error: repeat: {error}"
     elif which != "this":
-        series = await calendar.series_rule(target)
-        moved = at.weekday() != target.start.astimezone(zone).weekday()
-        if moved and series is not None and "FREQ=WEEKLY" in series:
-            # A BYDAY rule keeps the old weekday whatever the start says.
-            return "error: it moves to another weekday; send repeat with the new days"
+        old = target.start.astimezone(zone)
+        moved = at.weekday() != old.weekday()
+        # A day the rule names stays whatever the start says, so the move would be lost.
+        if series is not None and (
+            ("BYDAY=" in series and moved) or ("BYMONTHDAY=" in series and at.day != old.day)
+        ):
+            return (
+                "error: it moves off the day its pattern repeats on; send repeat with the new day"
+            )
         if moved and series is None:
             # Its pattern may name the old weekday: shifting it all could break it.
             return (
@@ -968,7 +974,6 @@ def change_summary(change: EventChange, rule: str | None, zone: ZoneInfo, langua
     """The event as it will be (as it is, for a removal), its old times when they move, and for
     a series what it applies to; ``rule`` is the pattern it repeats on, if known."""
     target, hebrew = change.target, language == HEBREW
-    day = day_label(target.start.astimezone(zone).date(), language)
     new = target
     if not change.delete:
         start = change.start or target.start
@@ -979,7 +984,6 @@ def change_summary(change: EventChange, rule: str | None, zone: ZoneInfo, langua
         location = target.location if change.location is None else change.location or None
         title = change.title or target.title
         new = replace(target, title=title, start=start, end=end, location=location)
-        day = day_label(start.astimezone(zone).date(), language)
     was = None
     if (new.start, new.end) != (target.start, target.end):
         old, moved = target.start.astimezone(zone), new.start.astimezone(zone)
@@ -993,17 +997,18 @@ def change_summary(change: EventChange, rule: str | None, zone: ZoneInfo, langua
             else _when(target, zone, language)
         )
         was = f"(במקום {times})" if hebrew else f"(was {times})"
+    # The date it applies from is the line above, so the scope never repeats it.
     scope = None
     if target.rule or target.series_id:
-        every = _repeat_line(rule, language) if rule else None
         if change.which == "this":
-            scope = f"רק ב{day}" if hebrew else f"Only {day}"
+            scope = "רק בתאריך הזה" if hebrew else "Just this date"
         elif change.which == "all":
+            every = _repeat_line(rule, language) if rule else None
             scope = every or ("בכל המועדים" if hebrew else "On all its dates")
-        elif hebrew:
-            scope = f"{every} החל מ{day}" if every else f"החל מ{day}"
         else:
-            scope = f"{every} from {day}" if every else f"From {day} on"
+            scope = "מהתאריך הזה והלאה" if hebrew else "From this date on"
+            if rule:
+                scope += f", {describe_rule(rule, language)}"
     lines = (new.title, _when(new, zone, language), was, scope, new.location)
     return "\n".join(line for line in lines if line)
 

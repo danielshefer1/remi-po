@@ -124,6 +124,15 @@ def shift_until(rule: str, by: timedelta) -> str:
     return _with_until(rule, wall + by)
 
 
+def keep_until(rule: str, old: str | None) -> str:
+    """``rule`` ending on ``old``'s last day when it has no end of its own: a new pattern from a
+    date on still ends with the series. Through that whole day, as its time may be new."""
+    until = _parse(old).get("UNTIL") if old else None
+    if until is None or "UNTIL" in _parse(rule):
+        return rule
+    return _with_until(rule, datetime.strptime(until[:8] + "T235959", "%Y%m%dT%H%M%S"))  # noqa: DTZ007 - local wall time
+
+
 def _rrule(lines: Sequence[str]) -> int | None:
     return next((i for i, line in enumerate(lines) if line.upper().startswith("RRULE:")), None)
 

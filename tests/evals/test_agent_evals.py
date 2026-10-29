@@ -401,6 +401,8 @@ class Change:
     start: datetime | None = None
     end_time: time | None = None
     rule_has: str | None = None
+    #: A new title, any wording.
+    renamed: bool = False
     question: str | None = None
 
 
@@ -418,6 +420,12 @@ CHANGES = [
            "Pilates", "following", rule_has="BYDAY=TU"),
     Change("delete the weekly pilates", "delete the weekly pilates", "en", "Pilates", "all",
            delete=True),
+    # Its first date after December is the first Sunday of 2027.
+    Change("stopping pilates after December", "I'm stopping pilates after December", "en",
+           "Pilates", "following", delete=True,
+           target_at=(datetime(2027, 1, 3, 18, tzinfo=ZoneInfo(JERUSALEM)),)),
+    Change("rename pilates, he", "תשני את השם של הפילאטיס ליוגה", "he", "Pilates", "all",
+           renamed=True),
     Change("delete next Monday's team sync, he", "תמחקי את הטים סינק של יום שני הקרוב", "he",
            "Team sync", "this", delete=True, target_at=(_later(12, 10), _later(19, 10)),
            question="confirm_remove_invite"),
@@ -464,6 +472,9 @@ async def test_propose_change(scenario: Change, llm: AnthropicLLM) -> None:
         assert local(end).time() == scenario.end_time, reply
     if scenario.rule_has:
         assert scenario.rule_has in (change.rule or ""), reply
+    if scenario.renamed:
+        assert change.title, reply
+        assert change.title != change.target.title, reply
     expected = scenario.question or ("confirm_remove" if scenario.delete else "confirm_change")
     assert proposed.question == expected, reply
     assert detect_language(reply) == scenario.language, reply
