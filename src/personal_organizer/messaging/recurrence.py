@@ -8,9 +8,9 @@ then made aware, so an 08:00 reminder or event stays 08:00 across DST.
 from __future__ import annotations
 
 import re
-from collections.abc import Collection
+from collections.abc import Collection, Sequence
 from dataclasses import replace
-from datetime import datetime, timedelta, tzinfo
+from datetime import UTC, datetime, timedelta, tzinfo
 
 from dateutil.rrule import rrulestr
 
@@ -122,6 +122,56 @@ def shift_until(rule: str, by: timedelta) -> str:
         return rule
     wall = datetime.strptime(until, "%Y%m%dT%H%M%S")  # noqa: DTZ007 - local wall time
     return _with_until(rule, wall + by)
+
+
+def _rrule(lines: Sequence[str]) -> int | None:
+    return next((i for i, line in enumerate(lines) if line.upper().startswith("RRULE:")), None)
+
+
+def local_rule(lines: Sequence[str], zone: tzinfo, all_day: bool) -> str | None:
+    """Google's ``RRULE:`` line as our rule (``UNTIL`` on the wall clock in ``zone``), or
+    ``None`` when there is none or it is outside what :func:`check_rule` takes."""
+    i = _rrule(lines)
+    if i is None:
+        return None
+    parts = []
+    for part in lines[i].partition(":")[2].split(";"):
+        key, _, value = part.partition("=")
+        if key.upper() == "UNTIL":
+            if all_day or len(value) == 8:  # a date: through the end of that day
+                value = value[:8] + "T235959"
+            elif value.upper().endswith("Z"):
+                moment = datetime.strptime(value.upper(), "%Y%m%dT%H%M%SZ").replace(tzinfo=UTC)
+                value = moment.astimezone(zone).strftime("%Y%m%dT%H%M%S")
+        parts.append(f"{key}={value}")
+    rule = ";".join(parts)
+    try:
+        # COUNT needs the series' first date to become UNTIL; we can't copy it faithfully.
+        if "COUNT" in _parse(rule):
+            return None
+        return check_rule(rule, datetime.now(zone))
+    except ValueError:
+        return None
+
+
+def end_lines(lines: Sequence[str], before: datetime, all_day: bool) -> list[str]:
+    """``lines`` with the ``RRULE:`` ending just before ``before``, in Google's form: ``UNTIL``
+    in UTC with a ``Z``, or the day before as a date for an all-day series. ``COUNT`` is
+    dropped; every other part and line is kept as it was."""
+    if all_day:
+        until = (before.date() - timedelta(days=1)).strftime("%Y%m%d")
+    else:
+        until = (before - timedelta(seconds=1)).astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
+    ended = list(lines)
+    i = _rrule(lines)
+    if i is not None:
+        parts = [
+            p
+            for p in lines[i].partition(":")[2].split(";")
+            if p.partition("=")[0].upper() not in ("COUNT", "UNTIL")
+        ]
+        ended[i] = "RRULE:" + ";".join([*parts, f"UNTIL={until}"])
+    return ended
 
 
 def next_after(rule: str, after: datetime) -> datetime | None:

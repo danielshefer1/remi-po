@@ -120,6 +120,13 @@ class CalendarNotConnectedError(CalendarProviderRejectedError):
     code = "calendar_not_connected"
 
 
+class SeriesSplitError(CalendarProviderError):
+    """A series changed from a date on: the old one was ended there, but the new one from that
+    date wasn't created. Nothing is retried."""
+
+    code = "series_split"
+
+
 class EventChangedError(AppError):
     """The event to change or delete is no longer there as it was listed: removed, moved or
     renamed in the meantime. Nothing was written."""

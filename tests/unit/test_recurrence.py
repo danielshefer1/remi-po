@@ -10,7 +10,9 @@ from personal_organizer.interfaces.calendar import CalendarEvent
 from personal_organizer.messaging.recurrence import (
     check_rule,
     describe_rule,
+    end_lines,
     first_at,
+    local_rule,
     next_after,
     occurrences,
     until_before,
@@ -205,3 +207,44 @@ def test_until_before() -> None:
     at = datetime(2026, 11, 15, 18, tzinfo=J)
     rule = until_before("FREQ=WEEKLY;BYDAY=SU;UNTIL=20270101T000000", at)
     assert rule == "FREQ=WEEKLY;BYDAY=SU;UNTIL=20261115T175959"
+
+
+def test_local_rule_from_google() -> None:
+    lines = [
+        "EXDATE;TZID=Asia/Jerusalem:20261108T180000",
+        "RRULE:FREQ=WEEKLY;BYDAY=SU;UNTIL=20261231T215959Z",
+    ]
+    assert local_rule(lines, J, all_day=False) == "FREQ=WEEKLY;BYDAY=SU;UNTIL=20261231T235959"
+    assert local_rule(["RRULE:FREQ=DAILY;UNTIL=20261231"], J, all_day=True) == (
+        "FREQ=DAILY;UNTIL=20261231T235959"
+    )
+    assert local_rule(["RRULE:FREQ=WEEKLY"], J, all_day=False) == "FREQ=WEEKLY"
+
+
+@pytest.mark.parametrize(
+    "lines",
+    [
+        ["RRULE:FREQ=MONTHLY;BYDAY=1MO"],
+        ["RRULE:FREQ=WEEKLY;WKST=SU"],
+        ["RRULE:FREQ=WEEKLY;COUNT=10"],
+        ["EXDATE:20261108T160000Z"],
+        [],
+    ],
+)
+def test_local_rule_outside_subset_is_none(lines: list[str]) -> None:
+    assert local_rule(lines, J, all_day=False) is None
+
+
+def test_end_lines_timed_utc() -> None:
+    lines = ["EXDATE;TZID=Asia/Jerusalem:20261108T180000", "RRULE:FREQ=WEEKLY;COUNT=10;BYDAY=SU"]
+    before = datetime(2026, 11, 15, 18, tzinfo=J)
+    assert end_lines(lines, before, all_day=False) == [
+        "EXDATE;TZID=Asia/Jerusalem:20261108T180000",
+        "RRULE:FREQ=WEEKLY;BYDAY=SU;UNTIL=20261115T155959Z",
+    ]
+
+
+def test_end_lines_all_day() -> None:
+    lines = ["RRULE:FREQ=DAILY;UNTIL=20261231"]
+    before = datetime(2026, 11, 15, tzinfo=J)
+    assert end_lines(lines, before, all_day=True) == ["RRULE:FREQ=DAILY;UNTIL=20261114"]
