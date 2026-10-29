@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 from collections.abc import Collection
 from dataclasses import replace
-from datetime import datetime, tzinfo
+from datetime import datetime, timedelta, tzinfo
 
 from dateutil.rrule import rrulestr
 
@@ -103,6 +103,25 @@ def first_at(rule: str, at: datetime) -> datetime:
     if first is None:
         raise ValueError("UNTIL is before the first time, so it would never go off")
     return first.replace(tzinfo=at.tzinfo)
+
+
+def _with_until(rule: str, until: datetime) -> str:
+    parts = _parse(rule) | {"UNTIL": until.strftime("%Y%m%dT%H%M%S")}
+    return ";".join(f"{k}={parts[k]}" for k in _KEYS if k in parts)
+
+
+def until_before(rule: str, at: datetime) -> str:
+    """``rule`` ending one second before ``at``'s local wall time (any ``UNTIL`` replaced)."""
+    return _with_until(rule, at.replace(tzinfo=None) - timedelta(seconds=1))
+
+
+def shift_until(rule: str, by: timedelta) -> str:
+    """``rule`` with its ``UNTIL`` moved by ``by``, so a series moved later keeps its last date."""
+    until = _parse(rule).get("UNTIL")
+    if until is None:
+        return rule
+    wall = datetime.strptime(until, "%Y%m%dT%H%M%S")  # noqa: DTZ007 - local wall time
+    return _with_until(rule, wall + by)
 
 
 def next_after(rule: str, after: datetime) -> datetime | None:

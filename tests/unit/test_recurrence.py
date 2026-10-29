@@ -13,6 +13,7 @@ from personal_organizer.messaging.recurrence import (
     first_at,
     next_after,
     occurrences,
+    until_before,
 )
 
 J = ZoneInfo("Asia/Jerusalem")
@@ -198,3 +199,9 @@ def test_occurrences_skip_and_series_id() -> None:
     )
     assert [o.start.day for o in got] == [1, 15]
     assert {o.series_id for o in got} == {"s1"}
+
+
+def test_until_before() -> None:
+    at = datetime(2026, 11, 15, 18, tzinfo=J)
+    rule = until_before("FREQ=WEEKLY;BYDAY=SU;UNTIL=20270101T000000", at)
+    assert rule == "FREQ=WEEKLY;BYDAY=SU;UNTIL=20261115T175959"

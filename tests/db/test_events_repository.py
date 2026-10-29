@@ -3,21 +3,23 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
 import pytest
-from sqlalchemy import update
+from sqlalchemy import select, update
 
+from personal_organizer.core.errors import EventChangedError
 from personal_organizer.core.types import TenantId
 from personal_organizer.db.engine import Database
 from personal_organizer.db.models.tenant import Event
 from personal_organizer.db.repositories import events
 from personal_organizer.db.repositories.connections import bind_connection
 from personal_organizer.db.repositories.tenants import get_tenant, set_live_calendar
-from personal_organizer.interfaces.calendar import CalendarEvent
+from personal_organizer.interfaces.calendar import CalendarEvent, EventChange
 from personal_organizer.settings import Settings
 from tests.fixtures.connect import TRUNCATE_CONNECT_TABLES, make_active, seed_tenant
 
@@ -267,3 +269,171 @@ async def test_skipped_occurrence_not_read(db: Database) -> None:
         db, tenant_id, CLASS_START - timedelta(days=1), CLASS_START + timedelta(days=15)
     )
     assert [e.start.day for e in got] == [19, 2]
+
+
+SUNDAY = datetime(2026, 11, 1, 18, tzinfo=JLM)
+NOVEMBER = (datetime(2026, 10, 31, tzinfo=JLM), datetime(2026, 12, 1, tzinfo=JLM))
+
+
+async def _sundays(db: Database, tenant_id: UUID, rule: str = "FREQ=WEEKLY;BYDAY=SU") -> None:
+    event = CalendarEvent("", "Class", SUNDAY, SUNDAY + timedelta(hours=1), rule=rule)
+    async with db.tenant_session(TenantId(tenant_id)) as session:
+        await events.add_event(session, tenant_id, event, source="remi")
+
+
+async def _on(db: Database, tenant_id: UUID, day: int) -> CalendarEvent:
+    """The November occurrence on ``day``, as list_events would show it."""
+    return next(e for e in await _read(db, tenant_id, *NOVEMBER) if e.start.day == day)
+
+
+async def _change(db: Database, tenant_id: UUID, change: EventChange) -> None:
+    async with db.tenant_session(TenantId(tenant_id)) as session:
+        await events.change_event(session, tenant_id, change, JLM)
+
+
+def _local(e: CalendarEvent) -> tuple[int, str, str]:
+    return e.start.day, f"{e.start.astimezone(JLM):%H:%M}", f"{e.end.astimezone(JLM):%H:%M}"
+
+
+async def test_one_off_move_and_delete(db: Database) -> None:
+    tenant_id = await _tenant(db)
+    at = datetime(2026, 11, 3, 10, tzinfo=JLM)
+    async with db.tenant_session(TenantId(tenant_id)) as session:
+        await events.add_event(session, tenant_id, _event("Dentist", at), source="remi")
+    target = await _on(db, tenant_id, 3)
+    await _change(db, tenant_id, EventChange(target, start=at + timedelta(days=1, hours=-1)))
+    moved = await _read(db, tenant_id, *NOVEMBER)
+    assert [_local(e) for e in moved] == [(4, "09:00", "10:00")]
+    await _change(db, tenant_id, EventChange(moved[0], delete=True))
+    assert await _read(db, tenant_id, *NOVEMBER) == []
+
+
+async def test_series_delete_this_date(db: Database) -> None:
+    tenant_id = await _tenant(db)
+    await _sundays(db, tenant_id)
+    await _change(db, tenant_id, EventChange(await _on(db, tenant_id, 8), delete=True))
+    assert [e.start.day for e in await _read(db, tenant_id, *NOVEMBER)] == [1, 15, 22, 29]
+
+
+async def test_series_move_this_date(db: Database) -> None:
+    tenant_id = await _tenant(db)
+    await _sundays(db, tenant_id)
+    target = await _on(db, tenant_id, 8)
+    await _change(db, tenant_id, EventChange(target, start=target.start + timedelta(hours=2)))
+    got = await _read(db, tenant_id, *NOVEMBER)
+    assert [_local(e)[:2] for e in got] == [
+        (1, "18:00"), (8, "20:00"), (15, "18:00"), (22, "18:00"), (29, "18:00"),
+    ]  # fmt: skip
+    assert got[1].series_id == target.series_id
+    assert got[1].rule is None
+
+
+async def test_series_change_following_splits(db: Database) -> None:
+    tenant_id = await _tenant(db)
+    await _sundays(db, tenant_id)
+    await _change(db, tenant_id, EventChange(await _on(db, tenant_id, 22), delete=True))
+    target = await _on(db, tenant_id, 15)
+    await _change(
+        db,
+        tenant_id,
+        EventChange(target, "following", end=target.start + timedelta(minutes=90)),
+    )
+    assert [_local(e) for e in await _read(db, tenant_id, *NOVEMBER)] == [
+        (1, "18:00", "19:00"), (8, "18:00", "19:00"),
+        (15, "18:00", "19:30"), (22, "18:00", "19:30"), (29, "18:00", "19:30"),
+    ]  # fmt: skip
+
+
+async def test_series_following_on_first_is_all(db: Database) -> None:
+    tenant_id = await _tenant(db)
+    await _sundays(db, tenant_id)
+    target = await _on(db, tenant_id, 1)
+    await _change(
+        db,
+        tenant_id,
+        EventChange(target, "following", end=target.start + timedelta(minutes=90)),
+    )
+    got = await _read(db, tenant_id, *NOVEMBER)
+    assert {_local(e)[1:] for e in got} == {("18:00", "19:30")}
+    assert len(got) == 5
+    async with db.tenant_session(TenantId(tenant_id)) as session:
+        assert len((await session.scalars(select(Event))).all()) == 1
+
+
+async def test_series_following_new_rule(db: Database) -> None:
+    tenant_id = await _tenant(db)
+    await _sundays(db, tenant_id)
+    target = await _on(db, tenant_id, 15)
+    await _change(db, tenant_id, EventChange(target, "following", rule="FREQ=WEEKLY;BYDAY=TU"))
+    got = await _read(db, tenant_id, *NOVEMBER)
+    assert [_local(e)[:2] for e in got] == [
+        (1, "18:00"), (8, "18:00"), (17, "18:00"), (24, "18:00"),
+    ]  # fmt: skip
+
+
+async def test_series_delete_all_takes_moved_dates(db: Database) -> None:
+    tenant_id = await _tenant(db)
+    await _sundays(db, tenant_id)
+    target = await _on(db, tenant_id, 8)
+    await _change(db, tenant_id, EventChange(target, start=target.start + timedelta(hours=2)))
+    moved = await _on(db, tenant_id, 8)
+    await _change(db, tenant_id, EventChange(moved, "all", delete=True))
+    assert await _read(db, tenant_id, *NOVEMBER) == []
+
+
+async def test_series_shift_all_keeps_skips(db: Database) -> None:
+    tenant_id = await _tenant(db)
+    await _sundays(db, tenant_id)
+    await _change(db, tenant_id, EventChange(await _on(db, tenant_id, 8), delete=True))
+    target = await _on(db, tenant_id, 15)
+    await _change(
+        db, tenant_id, EventChange(target, "all", start=target.start + timedelta(hours=1))
+    )
+    assert [_local(e) for e in await _read(db, tenant_id, *NOVEMBER)] == [
+        (1, "19:00", "20:00"), (15, "19:00", "20:00"),
+        (22, "19:00", "20:00"), (29, "19:00", "20:00"),
+    ]  # fmt: skip
+
+
+async def test_series_shift_all_keeps_last_date(db: Database) -> None:
+    tenant_id = await _tenant(db)
+    await _sundays(db, tenant_id, "FREQ=WEEKLY;BYDAY=SU;UNTIL=20261115T180000")
+    target = await _on(db, tenant_id, 1)
+    await _change(
+        db, tenant_id, EventChange(target, "all", start=target.start + timedelta(hours=1))
+    )
+    assert [_local(e)[:2] for e in await _read(db, tenant_id, *NOVEMBER)] == [
+        (1, "19:00"), (8, "19:00"), (15, "19:00"),
+    ]  # fmt: skip
+
+
+async def test_stale_target_raises(db: Database) -> None:
+    tenant_id = await _tenant(db)
+    async with db.tenant_session(TenantId(tenant_id)) as session:
+        await events.add_event(session, tenant_id, _event("Dentist", SUNDAY), source="remi")
+    target = await _on(db, tenant_id, 1)
+    await _change(db, tenant_id, EventChange(target, delete=True))
+    with pytest.raises(EventChangedError):
+        await _change(db, tenant_id, EventChange(target, delete=True))
+
+    await _sundays(db, tenant_id)
+    skipped = await _on(db, tenant_id, 8)
+    await _change(db, tenant_id, EventChange(skipped, delete=True))
+    with pytest.raises(EventChangedError):
+        await _change(db, tenant_id, EventChange(skipped, title="Gone"))
+    with pytest.raises(EventChangedError):
+        await _change(db, tenant_id, EventChange(replace(skipped, title="Other"), delete=True))
+
+
+async def test_split_across_dst(db: Database) -> None:
+    tenant_id = await _tenant(db)
+    first = datetime(2026, 10, 20, 18, tzinfo=JLM)
+    event = CalendarEvent("", "Class", first, first + timedelta(hours=1), rule="FREQ=DAILY")
+    async with db.tenant_session(TenantId(tenant_id)) as session:
+        await events.add_event(session, tenant_id, event, source="remi")
+    window = (first - timedelta(hours=1), datetime(2026, 11, 3, tzinfo=JLM))
+    target = next(e for e in await _read(db, tenant_id, *window) if e.start.day == 28)
+    await _change(db, tenant_id, EventChange(target, "following", title="Late class"))
+    got = await _read(db, tenant_id, *window)
+    assert {f"{e.start.astimezone(JLM):%H:%M}" for e in got} == {"18:00"}
+    assert [e.title for e in got] == ["Class"] * 8 + ["Late class"] * 6

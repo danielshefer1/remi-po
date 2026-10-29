@@ -120,6 +120,13 @@ class CalendarNotConnectedError(CalendarProviderRejectedError):
     code = "calendar_not_connected"
 
 
+class EventChangedError(AppError):
+    """The event to change or delete is no longer there as it was listed: removed, moved or
+    renamed in the meantime. Nothing was written."""
+
+    code = "event_changed"
+
+
 class LLMError(AppError):
     """The LLM provider refused or failed a request.
 
@@ -184,6 +191,7 @@ __all__ = [
     "ChannelError",
     "ChannelNotConfiguredError",
     "ConfigError",
+    "EventChangedError",
     "LLMError",
     "LLMRejectedError",
     "LLMUnavailableError",
