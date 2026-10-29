@@ -42,6 +42,8 @@ def _to_event(row: Event, zone: tzinfo | None = None) -> CalendarEvent:
         all_day=row.all_day,
         location=row.location,
         rule=row.rule,
+        series_id=row.series_id,
+        invited=row.invited,
     )
 
 
@@ -109,7 +111,7 @@ async def events_between(
             )
         )
     )
-    found = [o for row in rows for o in occurrences(_to_event(row), start, end, zone)]
+    found = [o for row in rows for o in occurrences(_to_event(row), start, end, zone, row.skipped)]
     found = [
         replace(e, start=e.start.astimezone(start.tzinfo), end=e.end.astimezone(start.tzinfo))
         for e in found
@@ -156,6 +158,8 @@ async def _upsert_google(
                 "location": e.location,
                 "source": "google",
                 "external_id": e.external_id,
+                "series_id": e.series_id,
+                "invited": e.invited,
             }
             for e in events
         ]
@@ -170,6 +174,8 @@ async def _upsert_google(
                 "all_day": stmt.excluded.all_day,
                 "location": stmt.excluded.location,
                 "source": stmt.excluded.source,
+                "series_id": stmt.excluded.series_id,
+                "invited": stmt.excluded.invited,
             },
         )
     )

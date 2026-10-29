@@ -8,6 +8,7 @@ then made aware, so an 08:00 reminder or event stays 08:00 across DST.
 from __future__ import annotations
 
 import re
+from collections.abc import Collection
 from dataclasses import replace
 from datetime import datetime, tzinfo
 
@@ -117,11 +118,16 @@ def _ordinal(n: int) -> str:
 
 
 def occurrences(
-    event: CalendarEvent, start: datetime, end: datetime, zone: tzinfo
+    event: CalendarEvent,
+    start: datetime,
+    end: datetime,
+    zone: tzinfo,
+    skipped: Collection[datetime] = (),
 ) -> list[CalendarEvent]:
     """The occurrences of ``event`` overlapping ``[start, end)``, in ``zone``; an event with no
     rule comes back as it is. Each is named ``<series id>:<local start>``, keeps the series'
-    wall-clock length, and is computed on naive local time so 18:00 stays 18:00 across DST."""
+    wall-clock length, and is computed on naive local time so 18:00 stays 18:00 across DST.
+    Those starting at a ``skipped`` instant are dropped; each carries ``series_id``."""
     if not event.rule:
         return [event]
     first = event.start.astimezone(zone).replace(tzinfo=None)
@@ -131,13 +137,14 @@ def occurrences(
     found = []
     for at in series.between(lo - length, hi, inc=True):
         begin, finish = at.replace(tzinfo=zone), (at + length).replace(tzinfo=zone)
-        if begin < end and finish > start:
+        if begin < end and finish > start and begin not in skipped:
             found.append(
                 replace(
                     event,
                     external_id=f"{event.external_id}:{at:%Y%m%dT%H%M}",
                     start=begin,
                     end=finish,
+                    series_id=event.external_id,
                 )
             )
     return found

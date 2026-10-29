@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -185,3 +186,15 @@ def test_occurrences_until_respected() -> None:
         series, datetime(2026, 11, 1, tzinfo=JLM), datetime(2026, 12, 1, tzinfo=JLM), JLM
     )
     assert [o.start.day for o in got] == [1, 2]
+
+
+def test_occurrences_skip_and_series_id() -> None:
+    series = replace(
+        _class("FREQ=WEEKLY;BYDAY=SU", datetime(2026, 11, 1, 18, tzinfo=JLM)), external_id="s1"
+    )
+    skipped = [datetime(2026, 11, 8, 18, tzinfo=JLM)]
+    got = occurrences(
+        series, datetime(2026, 11, 1, tzinfo=JLM), datetime(2026, 11, 16, tzinfo=JLM), JLM, skipped
+    )
+    assert [o.start.day for o in got] == [1, 15]
+    assert {o.series_id for o in got} == {"s1"}

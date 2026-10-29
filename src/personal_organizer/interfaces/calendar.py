@@ -17,7 +17,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Final, Protocol, runtime_checkable
+from typing import Final, Literal, Protocol, runtime_checkable
 
 #: The one connected-account status that means "tokens held, calls will work".
 ACCOUNT_ACTIVE: Final = "ACTIVE"
@@ -37,6 +37,25 @@ class CalendarEvent:
     location: str | None = None
     link: str | None = None
     rule: str | None = None
+    series_id: str | None = None
+    invited: bool = False
+
+
+Which = Literal["this", "following", "all"]
+
+
+@dataclass(frozen=True)
+class EventChange:
+    """A change to, or the deletion of, one event or part of a series."""
+
+    target: CalendarEvent  # the occurrence as list_events showed it
+    which: Which = "this"  # "this" for an event that doesn't repeat
+    delete: bool = False
+    title: str | None = None
+    start: datetime | None = None
+    end: datetime | None = None
+    location: str | None = None  # "" clears it
+    rule: str | None = None  # a new pattern; only with which="following"
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,4 +103,6 @@ __all__ = [
     "CalendarProvider",
     "ConnectLinker",
     "ConnectedAccount",
+    "EventChange",
+    "Which",
 ]

@@ -9,9 +9,11 @@ from uuid import UUID
 from zoneinfo import ZoneInfo
 
 import pytest
+from sqlalchemy import update
 
 from personal_organizer.core.types import TenantId
 from personal_organizer.db.engine import Database
+from personal_organizer.db.models.tenant import Event
 from personal_organizer.db.repositories import events
 from personal_organizer.db.repositories.connections import bind_connection
 from personal_organizer.db.repositories.tenants import get_tenant, set_live_calendar
@@ -238,3 +240,30 @@ async def test_series_until_respected(db: Database) -> None:
     await _series(db, tenant_id, "FREQ=DAILY;UNTIL=20261021T180000")
     got = await _read(db, tenant_id, CLASS_START, CLASS_START + timedelta(days=30))
     assert [e.start.day for e in got] == [19, 20, 21]
+
+
+async def test_google_copy_keeps_series_and_invited(db: Database) -> None:
+    tenant_id = await _tenant(db)
+    inst = CalendarEvent(
+        "g1_20261103", "Sync", NOW + timedelta(days=1), NOW + timedelta(days=1, hours=1),
+        series_id="g1", invited=True,
+    )  # fmt: skip
+    async with db.tenant_session(TenantId(tenant_id)) as session:
+        await events.replace_imported(session, tenant_id, *WIDE, [inst])
+        got = await events.events_between(session, tenant_id, *WIDE)
+    assert [(e.series_id, e.invited) for e in got] == [("g1", True)]
+
+
+async def test_skipped_occurrence_not_read(db: Database) -> None:
+    tenant_id = await _tenant(db)
+    series = await _series(db, tenant_id, "FREQ=WEEKLY;BYDAY=MO")
+    async with db.tenant_session(TenantId(tenant_id)) as session:
+        await session.execute(
+            update(Event)
+            .where(Event.external_id == series.external_id)
+            .values(skipped=[CLASS_START + timedelta(days=7)])
+        )
+    got = await _read(
+        db, tenant_id, CLASS_START - timedelta(days=1), CLASS_START + timedelta(days=15)
+    )
+    assert [e.start.day for e in got] == [19, 2]
