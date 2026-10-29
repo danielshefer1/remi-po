@@ -420,10 +420,6 @@ CHANGES = [
            "Pilates", "following", rule_has="BYDAY=TU"),
     Change("delete the weekly pilates", "delete the weekly pilates", "en", "Pilates", "all",
            delete=True),
-    # Its first date after December is the first Sunday of 2027.
-    Change("stopping pilates after December", "I'm stopping pilates after December", "en",
-           "Pilates", "following", delete=True,
-           target_at=(datetime(2027, 1, 3, 18, tzinfo=ZoneInfo(JERUSALEM)),)),
     Change("rename pilates, he", "תשני את השם של הפילאטיס ליוגה", "he", "Pilates", "all",
            renamed=True),
     Change("delete next Monday's team sync, he", "תמחקי את הטים סינק של יום שני הקרוב", "he",
@@ -478,6 +474,23 @@ async def test_propose_change(scenario: Change, llm: AnthropicLLM) -> None:
     expected = scenario.question or ("confirm_remove" if scenario.delete else "confirm_change")
     assert proposed.question == expected, reply
     assert detect_language(reply) == scenario.language, reply
+
+
+async def test_stopping_a_series_after_december(llm: AnthropicLLM) -> None:
+    """Removing the dates from the first Sunday of 2027, or the same Sundays ending in December:
+    either way the last Pilates is in December."""
+    changed, _, reply = await _change_turn("I'm stopping pilates after December", "en", llm)
+    [proposed] = changed
+    change = proposed.change
+    assert (change.target.title, change.which) == ("Pilates", "following"), reply
+    if change.delete:
+        assert change.target.start == datetime(2027, 1, 3, 18, tzinfo=ZoneInfo(JERUSALEM)), reply
+    else:
+        assert change.rule is not None, reply
+        assert "BYDAY=SU" in change.rule, reply
+        assert "UNTIL=202612" in change.rule, reply
+        assert (change.start, change.end, change.title) == (None, None, None), reply
+    assert detect_language(reply) == "en", reply
 
 
 NO_CHANGE = [
