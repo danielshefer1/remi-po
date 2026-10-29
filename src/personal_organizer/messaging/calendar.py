@@ -188,7 +188,7 @@ class TenantCalendar:
         )
         if target.series_id and which != "this":
             master, lines = await provider.get_series(*ids, target.series_id, zone)
-            if which == "following" and target.start > master.start:
+            if which == "following" and (target.start > master.start or change.rule):
                 await self._split_google(provider, ids, change, master, lines, zone)
                 return
             event_id = master.external_id
@@ -217,7 +217,8 @@ class TenantCalendar:
         lines: list[str],
         zone: ZoneInfo,
     ) -> None:
-        """End Google's series just before the target; for a change, start a new one there."""
+        """End Google's series just before the target; for a change, start a new one there.
+        From its first date, with a new pattern, the new one replaces it."""
         target = change.target
         new = None
         if not change.delete:
@@ -240,8 +241,11 @@ class TenantCalendar:
             new = CalendarEvent(
                 "", title, start, end, all_day=target.all_day, location=location, rule=rule
             )
-        ended = end_lines(lines, target.start.astimezone(zone), target.all_day)
-        await provider.update_event(*ids, master.external_id, recurrence=ended)
+        if target.start > master.start:
+            ended = end_lines(lines, target.start.astimezone(zone), target.all_day)
+            await provider.update_event(*ids, master.external_id, recurrence=ended)
+        else:
+            await provider.delete_event(*ids, master.external_id)
         if new is None:
             return
         try:

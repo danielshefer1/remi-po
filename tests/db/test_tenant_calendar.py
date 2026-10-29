@@ -307,6 +307,15 @@ async def test_google_following_from_the_first_is_all(db: Database) -> None:
     assert [(op, event_id) for op, event_id, _ in google.writes] == [("delete", "ser")]
 
 
+async def test_google_following_new_pattern_from_the_first_replaces(db: Database) -> None:
+    """From the first date, the new pattern replaces the whole series."""
+    cal, google, listed = await _google_series(db)
+    await cal.change(EventChange(listed[0], which="following", rule="FREQ=WEEKLY;BYDAY=TH"))
+    assert [op for op, _, _ in google.writes] == ["delete"]
+    [created] = google.events
+    assert (created.start, created.rule) == (CLASS_AT + timedelta(days=1), "FREQ=WEEKLY;BYDAY=TH")
+
+
 async def test_google_following_delete_only_ends(db: Database) -> None:
     cal, google, listed = await _google_series(db)
     await cal.change(EventChange(listed[2], which="following", delete=True))

@@ -371,6 +371,20 @@ async def test_series_following_new_rule(db: Database) -> None:
     ]  # fmt: skip
 
 
+async def test_series_following_new_rule_from_the_first(db: Database) -> None:
+    """From the first date, the new pattern replaces the whole series."""
+    tenant_id = await _tenant(db)
+    await _sundays(db, tenant_id)
+    target = await _on(db, tenant_id, 1)
+    await _change(db, tenant_id, EventChange(target, "following", rule="FREQ=WEEKLY;BYDAY=TU"))
+    got = await _read(db, tenant_id, *NOVEMBER)
+    assert [_local(e)[:2] for e in got] == [
+        (3, "18:00"), (10, "18:00"), (17, "18:00"), (24, "18:00"),
+    ]  # fmt: skip
+    async with db.tenant_session(TenantId(tenant_id)) as session:
+        assert len((await session.scalars(select(Event))).all()) == 1
+
+
 async def test_series_following_new_rule_keeps_the_end(db: Database) -> None:
     """A new pattern without an end of its own ends when the series did (its last day)."""
     tenant_id = await _tenant(db)

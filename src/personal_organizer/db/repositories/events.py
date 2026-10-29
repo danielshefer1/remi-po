@@ -243,7 +243,7 @@ async def change_event(
     at = at.astimezone(zone)
     if change.which == "this":
         await _change_date(session, tenant_id, row, change, at, zone)
-    elif change.which == "following" and at > row.starts_at:
+    elif change.which == "following" and (at > row.starts_at or change.rule):
         await _change_following(session, tenant_id, row, change, at, zone)
     else:
         await _change_all(session, tenant_id, row, change, at, zone)
@@ -310,10 +310,15 @@ async def _change_following(
     zone: tzinfo,
 ) -> None:
     """End the series just before ``at``; the dates after it are replaced, skips and changed
-    single dates included, by the new series (none for a delete)."""
+    single dates included, by the new series (none for a delete). From its first date, with a
+    new pattern, the new series replaces it."""
     assert row.rule is not None
-    rule, row.rule = row.rule, until_before(row.rule, at)
-    row.skipped = [s for s in row.skipped if s < at]
+    rule = row.rule
+    if at > row.starts_at:
+        row.rule = until_before(rule, at)
+        row.skipped = [s for s in row.skipped if s < at]
+    else:
+        await session.delete(row)
     await session.execute(
         scoped(delete(Event), Event, tenant_id).where(
             Event.series_id == row.external_id,
