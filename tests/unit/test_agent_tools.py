@@ -1142,6 +1142,25 @@ class TestProposeChange:
         _, [later], _ = await self._run(_change(n=3, which="all", start="2026-11-01T19:00"))
         assert later.change.rule is None
 
+    async def test_a_one_time_event_gets_no_repeat(self) -> None:
+        """Its which is always this, so "use following" would loop: it's its own error."""
+        _, changed, results = await self._run(
+            _change(n=1, repeat="FREQ=WEEKLY;BYDAY=TH"),
+            _change(n=1, which="following", repeat="FREQ=WEEKLY;BYDAY=TH"),
+        )
+        assert changed == []
+        for result in results:
+            assert result.startswith("error: it's a one-time event")
+            assert "following" not in result
+
+    async def test_unknown_pattern_keeps_its_weekday(self) -> None:
+        _, changed, [result] = await self._run(_change(n=4, which="all", start="2026-11-03T10:00"))
+        assert changed == []
+        assert result.startswith("error: its pattern can't be read")
+        # The same weekday, a new hour, is fine.
+        _, [later], _ = await self._run(_change(n=4, which="all", start="2026-11-02T11:00"))
+        assert later.change.start is not None
+
     async def test_google_following_needs_its_pattern(self) -> None:
         _, changed, [result] = await self._run(_change(n=4, which="following", title="Standup"))
         assert changed == []

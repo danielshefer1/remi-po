@@ -900,6 +900,11 @@ async def check_change(
         return f"error: title is text, at most {MAX_FIELD} characters"
     if not isinstance(location, str | None) or len(location or "") > MAX_FIELD:
         return f"error: location is text, at most {MAX_FIELD} characters"
+    if repeat is not None and not repeating:
+        return (
+            "error: it's a one-time event; a repeat can't be added to it here, so offer to add a "
+            "new repeating one instead"
+        )
     if repeat is not None and which != "following":
         return "error: a new repeat goes with which following: a new pattern starts from a date"
     times = {key: _local(arguments.get(key), zone) for key in ("start", "end")}
@@ -930,6 +935,12 @@ async def check_change(
         if moved and series is not None and "FREQ=WEEKLY" in series:
             # A BYDAY rule keeps the old weekday whatever the start says.
             return "error: it moves to another weekday; send repeat with the new days"
+        if moved and series is None:
+            # Its pattern may name the old weekday: shifting it all could break it.
+            return (
+                "error: its pattern can't be read, so it can't move to another weekday; offer to "
+                "move just this date, or from this date on with a repeat on the new days"
+            )
         if which == "following" and series is None:
             return (
                 "error: its pattern can't be copied from a date on; offer just this date or "
