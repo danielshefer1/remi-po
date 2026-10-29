@@ -24,16 +24,18 @@ from personal_organizer.core.errors import (
     CalendarProviderUnavailableError,
     LLMUnavailableError,
 )
-from personal_organizer.interfaces.calendar import CalendarEvent
+from personal_organizer.interfaces.calendar import CalendarEvent, EventChange
 from personal_organizer.interfaces.llm import ToolCall
 from personal_organizer.messaging.agent import (
     MAX_FIELD,
     MAX_PROPOSALS,
     MAX_WINDOW,
     TOOLS,
+    ProposedChange,
     add_event,
     add_events,
     agent_prompt,
+    change_summary,
     check_event,
     event_summary,
     read_calendar,
@@ -67,7 +69,9 @@ def _calendar(*events: CalendarEvent, connected: bool = True) -> InMemoryTenantC
 async def _read(
     calendar: InMemoryTenantCalendar, start: object, end: object, zone: ZoneInfo = JERUSALEM
 ) -> str:
-    return await read_calendar({"start": start, "end": end}, calendar=calendar, zone=zone)
+    return await read_calendar(
+        {"start": start, "end": end}, calendar=calendar, zone=zone, listed=[]
+    )
 
 
 def _event(start: datetime, end: datetime, **kw: Any) -> CalendarEvent:
@@ -146,6 +150,7 @@ class TestZone:
         assert result == {
             "events": [
                 {
+                    "n": 1,
                     "title": "Dentist",
                     "start": "2026-10-13T09:00",
                     "end": "2026-10-13T09:30",
@@ -171,7 +176,7 @@ class TestEventFields:
         start = datetime(2026, 10, 13, 20, 0, tzinfo=JERUSALEM)
         calendar = _calendar(_event(start, start + timedelta(hours=2), location="Tel Aviv"))
         [shown] = json.loads(await _read(calendar, "2026-10-13", "2026-10-14"))["events"]
-        assert set(shown) == {"title", "start", "end", "all_day", "location"}
+        assert set(shown) == {"n", "title", "start", "end", "all_day", "location"}
         assert shown["location"] == "Tel Aviv"
 
     async def test_an_all_day_event_shows_its_last_day(self) -> None:
@@ -958,3 +963,336 @@ class TestHandOff:
         await self._respond(ScriptedLLM(said("", TIMETABLE)), ScriptedLLM(said("done")))
         # The worker's scope outlives the turn: a tag left there would mark every later event.
         assert "agent.handoff" not in sentry_sdk.get_isolation_scope()._tags
+
+
+# #63: changes and removals, all in Jerusalem's winter time (+02:00).
+NOW_63 = datetime(2026, 10, 26, 9, 0, tzinfo=UTC)
+DENTIST_29 = CalendarEvent(
+    "dentist-id",
+    "Dentist",
+    datetime(2026, 10, 29, 9, 0, tzinfo=JERUSALEM),
+    datetime(2026, 10, 29, 10, 0, tzinfo=JERUSALEM),
+)
+INVITE = CalendarEvent(
+    "invite-id",
+    "Board meeting",
+    datetime(2026, 10, 30, 12, 0, tzinfo=JERUSALEM),
+    datetime(2026, 10, 30, 13, 0, tzinfo=JERUSALEM),
+    invited=True,
+)
+PILATES = CalendarEvent(
+    "pilates-id",
+    "Pilates",
+    datetime(2026, 11, 1, 18, 0, tzinfo=JERUSALEM),
+    datetime(2026, 11, 1, 19, 0, tzinfo=JERUSALEM),
+    rule="FREQ=WEEKLY;BYDAY=SU",
+)
+# A Google instance: its series' pattern isn't on it, and the in-memory calendar can't read it.
+SYNC = CalendarEvent(
+    "sync-instance-id",
+    "Team sync",
+    datetime(2026, 11, 2, 10, 0, tzinfo=JERUSALEM),
+    datetime(2026, 11, 2, 11, 0, tzinfo=JERUSALEM),
+    series_id="sync-series-id",
+)
+# Listed in this order, n 1 to 4.
+WEEK = (DENTIST_29, INVITE, PILATES, SYNC)
+LIST_WEEK = call("list_events", start="2026-10-29T00:00", end="2026-11-03T00:00")
+
+
+def _change(**arguments: Any) -> ToolCall:
+    return call("propose_change", **arguments)
+
+
+def _pilates_on(day: int) -> CalendarEvent:
+    """The Pilates occurrence on November ``day``, as list_events gives it."""
+    start = datetime(2026, 11, day, 18, 0, tzinfo=JERUSALEM)
+    return replace(
+        PILATES,
+        external_id=f"pilates-id:202611{day:02}T1800",
+        start=start,
+        end=start + timedelta(hours=1),
+        series_id="pilates-id",
+    )
+
+
+class TestListNumbers:
+    async def test_list_events_numbers_and_flags(self) -> None:
+        calendar, listed = _calendar(*WEEK), []
+        first = await read_calendar(
+            {"start": "2026-10-29T00:00", "end": "2026-11-01T00:00"},
+            calendar=calendar,
+            zone=JERUSALEM,
+            listed=listed,
+        )
+        second = await read_calendar(
+            {"start": "2026-11-01T00:00", "end": "2026-11-03T00:00"},
+            calendar=calendar,
+            zone=JERUSALEM,
+            listed=listed,
+        )
+        dentist, invite = json.loads(first)["events"]
+        pilates, sync = json.loads(second)["events"]
+        # Numbered across the turn's calls, in the order shown.
+        assert [e["n"] for e in (dentist, invite, pilates, sync)] == [1, 2, 3, 4]
+        assert [e.title for e in listed] == ["Dentist", "Board meeting", "Pilates", "Team sync"]
+        assert "repeats" not in dentist
+        assert "invite_from_someone_else" not in dentist
+        assert invite["invite_from_someone_else"] is True
+        assert pilates["repeats"] == "every Sunday"
+        assert sync["repeats"] is True
+
+
+class TestProposeChange:
+    @staticmethod
+    async def _run(
+        *calls: ToolCall,
+        calendar: InMemoryTenantCalendar | None = None,
+        listing: bool = True,
+    ) -> tuple[str, list[ProposedChange], list[str]]:
+        changed: list[ProposedChange] = []
+        first = [said("", LIST_WEEK)] if listing else []
+        llm = ScriptedLLM(*first, said("", *calls), said("Sure."))
+        reply = await respond(
+            [],
+            "Change it",
+            replace(TENANT, language="en"),
+            llm=llm,
+            calendar=calendar or _calendar(*WEEK),
+            now=NOW_63,
+            changed=changed,
+        )
+        return reply, changed, [m.content for m in llm.calls[-1][-len(calls) :]]
+
+    async def test_propose_change_needs_listed_n(self) -> None:
+        _, changed, [unlisted] = await self._run(_change(n=1, delete=True), listing=False)
+        _, _, [past] = await self._run(_change(n=9, delete=True))
+        _, _, [no_n] = await self._run(_change(delete=True))
+        assert changed == []
+        for result in (unlisted, past, no_n):
+            assert result.startswith("error: call list_events first")
+
+    async def test_propose_change_asks_which_for_series(self) -> None:
+        _, changed, results = await self._run(
+            _change(n=3, start="2026-11-01T19:00"),
+            _change(n=4, delete=True),
+            _change(n=3, which="sometimes", delete=True),
+        )
+        assert changed == []
+        for result in results:
+            assert result.startswith("error: ")
+            assert "just this date, from this date on, or all of them" in result
+
+    async def test_invite_cannot_be_moved(self) -> None:
+        _, changed, [result] = await self._run(_change(n=2, start="2026-10-30T14:00"))
+        assert changed == []
+        assert result.startswith("error: ")
+        assert "only they can change it" in result
+        assert "remove" in result
+
+    async def test_invite_following_refused(self) -> None:
+        calendar = _calendar(DENTIST_29, INVITE, PILATES, replace(SYNC, invited=True))
+        _, changed, [following] = await self._run(
+            _change(n=4, which="following", delete=True), calendar=calendar
+        )
+        assert changed == []
+        assert following.startswith("error: ")
+        assert "just this date or the whole series" in following
+        _, [whole], [ok] = await self._run(
+            _change(n=4, which="all", delete=True), calendar=calendar
+        )
+        assert ok.startswith("ok: proposed")
+        assert (whole.change.which, whole.change.delete) == ("all", True)
+
+    async def test_repeat_only_with_following(self) -> None:
+        _, changed, results = await self._run(
+            _change(n=3, which="all", repeat="FREQ=WEEKLY;BYDAY=TU"),
+            _change(n=3, which="this", repeat="FREQ=WEEKLY;BYDAY=TU"),
+        )
+        assert changed == []
+        for result in results:
+            assert result.startswith("error: ")
+            assert "following" in result
+
+    async def test_repeat_is_checked_against_the_start(self) -> None:
+        """An UNTIL before the start is an error the model reads, never one when it's applied."""
+        _, changed, results = await self._run(
+            _change(n=3, which="following", repeat="FREQ=WEEKLY;BYDAY=TU;UNTIL=20261031T000000"),
+            _change(n=3, which="following", repeat="FREQ=HOURLY"),
+        )
+        assert changed == []
+        assert all(result.startswith("error: repeat: ") for result in results)
+
+    async def test_weekday_move_needs_repeat(self) -> None:
+        monday = "2026-11-02T18:00"
+        _, changed, results = await self._run(
+            _change(n=3, which="following", start=monday),
+            _change(n=3, which="all", start=monday),
+        )
+        assert changed == []
+        for result in results:
+            assert result.startswith("error: ")
+            assert "repeat" in result
+        _, [moved], [ok] = await self._run(
+            _change(n=3, which="following", start=monday, repeat="FREQ=WEEKLY;BYDAY=MO")
+        )
+        assert ok.startswith("ok: proposed")
+        assert moved.change.rule == "FREQ=WEEKLY;BYDAY=MO"
+        # The same weekday, a new hour, needs no new pattern.
+        _, [later], _ = await self._run(_change(n=3, which="all", start="2026-11-01T19:00"))
+        assert later.change.rule is None
+
+    async def test_google_following_needs_its_pattern(self) -> None:
+        _, changed, [result] = await self._run(_change(n=4, which="following", title="Standup"))
+        assert changed == []
+        assert result.startswith("error: ")
+        assert "just this date or all of them" in result
+        # Ending it there needs no pattern to copy.
+        _, [ended], _ = await self._run(_change(n=4, which="following", delete=True))
+        assert ended.change.delete
+
+    async def test_say_what_to_change(self) -> None:
+        _, changed, [result] = await self._run(_change(n=1))
+        assert changed == []
+        assert result.startswith("error: say what to change")
+
+    async def test_one_change_per_message(self) -> None:
+        add = call("propose_event", title="Gym", start="2026-10-30T18:00", end="2026-10-30T19:00")
+        _, changed, results = await self._run(
+            _change(n=1, start="2026-10-29T10:00"), _change(n=3, which="this", delete=True), add
+        )
+        assert [p.change.target.title for p in changed] == ["Dentist"]
+        assert results[0].startswith("ok: proposed")
+        for result in results[1:]:
+            assert result.startswith("error: one thing at a time")
+        proposed: list[CalendarEvent] = []
+        llm = ScriptedLLM(said("", LIST_WEEK), said("", add, _change(n=1, delete=True)), said("ok"))
+        await respond(
+            [],
+            "Change it",
+            replace(TENANT, language="en"),
+            llm=llm,
+            calendar=_calendar(*WEEK),
+            now=NOW_63,
+            proposed=proposed,
+        )
+        assert [event.title for event in proposed] == ["Gym"]
+        assert llm.calls[-1][-1].content.startswith("error: one thing at a time")
+
+    async def test_start_only_keeps_length(self) -> None:
+        _, [moved], _ = await self._run(_change(n=1, start="2026-10-29T10:30"))
+        change = moved.change
+        assert (change.target, change.which, change.delete) == (DENTIST_29, "this", False)
+        assert (change.start.isoformat(), change.end.isoformat()) == (  # type: ignore[union-attr]
+            "2026-10-29T10:30:00+02:00",
+            "2026-10-29T11:30:00+02:00",
+        )
+
+    async def test_end_must_be_after_start(self) -> None:
+        _, changed, [result] = await self._run(_change(n=1, end="2026-10-29T08:00"))
+        assert changed == []
+        assert result == "error: end must be after start"
+
+    async def test_respond_puts_change_confirm_below(self) -> None:
+        calendar = _calendar(*WEEK)
+        reply, [proposed], [result] = await self._run(
+            _change(n=1, start="2026-10-29T10:00"), calendar=calendar
+        )
+        summary = change_summary(proposed.change, None, JERUSALEM, "en")
+        assert (proposed.summary, proposed.question) == (summary, "confirm_change")
+        assert bubbles(reply) == ["Sure.", confirm_prompt(summary, "en", question="confirm_change")]
+        assert reply.endswith("Make this change?")
+        assert result == "ok: proposed; the summary and the confirm question go below your reply"
+        assert calendar.changed == []  # nothing is written before the confirm
+
+    async def test_invite_remove_uses_invite_question(self) -> None:
+        reply, [proposed], _ = await self._run(_change(n=2, delete=True))
+        assert proposed.question == "confirm_remove_invite"
+        assert reply.endswith(
+            "This is an invite from someone else. Remove it from your calendar anyway?"
+        )
+        _, [plain], _ = await self._run(_change(n=1, delete=True))
+        assert plain.question == "confirm_remove"
+
+    def test_the_prompt_lets_them_change_events(self) -> None:
+        prompt = agent_prompt("en", NOW_63.astimezone(JERUSALEM))
+        assert "propose_change" in prompt
+        assert "can't change or delete" not in prompt
+        assert "propose_change" in [tool["name"] for tool in TOOLS]
+
+
+class TestChangeSummary:
+    MOVE = EventChange(
+        DENTIST_29,
+        start=datetime(2026, 10, 29, 10, 0, tzinfo=JERUSALEM),
+        end=datetime(2026, 10, 29, 11, 0, tzinfo=JERUSALEM),
+    )
+
+    def test_change_summary_move_en(self) -> None:
+        assert change_summary(self.MOVE, None, JERUSALEM, "en") == (
+            "Dentist\nThursday 2026-10-29, 10:00-11:00\n(was 09:00-10:00)"
+        )
+
+    def test_change_summary_move_he(self) -> None:
+        move = replace(self.MOVE, target=replace(DENTIST_29, title="רופא שיניים"))
+        assert change_summary(move, None, JERUSALEM, "he") == (
+            "\n".join(["רופא שיניים", "יום חמישי 2026-10-29, 10:00-11:00", "(במקום 09:00-10:00)"])
+        )
+
+    def test_another_day_says_the_old_day(self) -> None:
+        change = replace(
+            self.MOVE,
+            start=datetime(2026, 10, 30, 9, 0, tzinfo=JERUSALEM),
+            end=datetime(2026, 10, 30, 10, 0, tzinfo=JERUSALEM),
+        )
+        assert change_summary(change, None, JERUSALEM, "en").splitlines()[2] == (
+            "(was Thursday 2026-10-29, 09:00-10:00)"
+        )
+
+    @pytest.mark.parametrize(
+        ("language", "scope"),
+        [("en", "Only Sunday 2026-11-08"), ("he", "רק ביום ראשון 2026-11-08")],
+    )
+    def test_change_summary_remove_this_date(self, language: str, scope: str) -> None:
+        change = EventChange(_pilates_on(8), "this", delete=True)
+        lines = change_summary(change, None, JERUSALEM, language).splitlines()
+        assert lines[0] == "Pilates"
+        assert lines[2] == scope
+
+    @pytest.mark.parametrize(
+        ("language", "expected"),
+        [
+            (
+                "en",
+                [
+                    "Pilates",
+                    "Tuesday 2026-11-03, 18:00-19:00",
+                    "(was Sunday 2026-11-01, 18:00-19:00)",
+                    "Every Tuesday from Tuesday 2026-11-03",
+                ],
+            ),
+            (
+                "he",
+                [
+                    "Pilates",
+                    "יום שלישי 2026-11-03, 18:00-19:00",
+                    "(במקום יום ראשון 2026-11-01, 18:00-19:00)",
+                    "כל יום שלישי החל מיום שלישי 2026-11-03",
+                ],
+            ),
+        ],
+    )
+    def test_a_new_pattern_from_a_date(self, language: str, expected: list[str]) -> None:
+        rule = "FREQ=WEEKLY;BYDAY=TU"
+        change = EventChange(_pilates_on(1), "following", rule=rule)
+        assert change_summary(change, rule, JERUSALEM, language).splitlines() == expected
+
+    def test_all_of_them_renamed(self) -> None:
+        change = EventChange(_pilates_on(1), "all", title="Yoga", location="Studio 2")
+        assert change_summary(change, "FREQ=WEEKLY;BYDAY=SU", JERUSALEM, "en") == (
+            "Yoga\nSunday 2026-11-01, 18:00-19:00\nEvery Sunday\nStudio 2"
+        )
+
+    def test_a_pattern_not_known(self) -> None:
+        change = EventChange(SYNC, "all", delete=True)
+        assert change_summary(change, None, JERUSALEM, "he").splitlines()[-1] == "בכל המועדים"

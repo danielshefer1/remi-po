@@ -62,3 +62,19 @@ def test_rendered_in_english() -> None:
 
 def test_rendered_in_hebrew() -> None:
     assert confirm_prompt(SUMMARY, "he") == "\n".join([SUMMARY, "", "להוסיף ליומן?"])
+
+
+@pytest.mark.parametrize(
+    ("question", "language", "text"),
+    [
+        ("confirm_change", "en", "Make this change?"),
+        ("confirm_remove", "he", "להסיר מהיומן?"),
+        (
+            "confirm_remove_invite",
+            "en",
+            "This is an invite from someone else. Remove it from your calendar anyway?",
+        ),
+    ],
+)
+def test_a_change_question(question: str, language: str, text: str) -> None:
+    assert confirm_prompt(SUMMARY, language, question=question) == f"{SUMMARY}\n\n{text}"
