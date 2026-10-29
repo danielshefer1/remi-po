@@ -22,11 +22,13 @@ changed here:
 The SDK's account record carries the OAuth tokens (``data``, ``params``, ``state``).
 :meth:`ComposioConnector.get_account` copies four fields out and lets the record go.
 
-Calendar calls go through ``tools.execute`` with two slugs and nothing else: no tool router, no
-``tools.get()`` schemas. Each call names the caller's ``connected_account_id`` and ``user_id``
-and the pinned toolkit version, and its arguments are built here from typed parameters. So
-nothing a model writes can choose the account, the user, the calendar or the toolkit (plan
-D2). Events are cut down to title, times and location as they are parsed (D6).
+Calendar calls go through ``tools.execute`` with the five slugs below and nothing else: no tool
+router, no ``tools.get()`` schemas. Each call names the caller's ``connected_account_id`` and
+``user_id`` and the pinned toolkit version, and its arguments are built here from typed
+parameters. So nothing a model writes can choose the account, the user, the calendar or the
+toolkit (plan D2). Every write sends ``send_updates: "none"``: guests hear nothing from us.
+Events are cut down to title, times, location, series id and whether it is someone else's
+invite as they are parsed (D6).
 """
 
 from __future__ import annotations
@@ -76,6 +78,11 @@ TOOLKIT_VERSION: Final = "20261010_00"
 PAGE_SIZE: Final = 250
 LIST_EVENTS: Final = "GOOGLECALENDAR_EVENTS_LIST"
 CREATE_EVENT: Final = "GOOGLECALENDAR_CREATE_EVENT"
+PATCH_EVENT: Final = "GOOGLECALENDAR_PATCH_EVENT"
+DELETE_EVENT: Final = "GOOGLECALENDAR_DELETE_EVENT"
+GET_EVENT: Final = "GOOGLECALENDAR_EVENTS_GET"
+#: Google's answer to deleting what is already deleted: the delete is done.
+_GONE: Final = frozenset({404, 410})
 
 
 def _untracked[T](fn: Callable[[], T]) -> T:
@@ -140,11 +147,15 @@ def _when(field: Any, zone: tzinfo | None) -> tuple[datetime, bool]:
 
 
 def _event(item: Any, zone: tzinfo | None) -> CalendarEvent:
-    """Title, times and location only: descriptions and attendees are anyone's to write."""
+    """Title, times and location only: descriptions and attendees are anyone's to write. Of the
+    organizer, only whether it is us."""
     start, all_day = _when(item["start"], zone)
     end, _ = _when(item["end"], zone)
     title, location = item.get("summary", ""), item.get("location")
+    series_id, organizer = item.get("recurringEventId"), item.get("organizer")
     if not isinstance(title, str) or not isinstance(location, str | None):
+        raise TypeError
+    if not isinstance(series_id, str | None) or not isinstance(organizer, dict | None):
         raise TypeError
     link = item.get("htmlLink")
     return CalendarEvent(
@@ -156,7 +167,14 @@ def _event(item: Any, zone: tzinfo | None) -> CalendarEvent:
         location=location or None,
         # It goes into a reply, so only a page, never a scheme of someone's choosing.
         link=link if isinstance(link, str) and link.startswith("https://") else None,
+        series_id=series_id,
+        invited=organizer is not None and organizer.get("self") is not True,
     )
+
+
+def _moment(moment: datetime, all_day: bool) -> str:
+    """RFC 3339, or for an all-day event its date (an end date is exclusive, as Google's is)."""
+    return moment.date().isoformat() if all_day else _rfc3339(moment)
 
 
 class ComposioConnector:
@@ -226,9 +244,16 @@ class ComposioConnector:
             raise CalendarProviderRejectedError(None) from None
 
     async def _execute(
-        self, slug: str, arguments: dict[str, object], account_id: str, user_id: str
+        self,
+        slug: str,
+        arguments: dict[str, object],
+        account_id: str,
+        user_id: str,
+        *,
+        gone_is_done: bool = False,
     ) -> Any:
-        """Run one tool on the caller's account; return its payload or raise ours."""
+        """Run one tool on the caller's account; return its payload or raise ours. With
+        ``gone_is_done``, Google's own 404/410 counts as success (Composio's own 404 doesn't)."""
         result = await self._call(
             lambda: self._sdk.tools.execute(
                 slug,
@@ -244,6 +269,8 @@ class ComposioConnector:
         if result.get("successful") is not True:
             # Google's own error comes back as a 200 with its status in the data.
             status = data.get("status_code")
+            if gone_is_done and status in _GONE:
+                return data
             if status == 401:
                 raise CalendarNotConnectedError(status)
             raise _from_status(status if isinstance(status, int) else None)
@@ -276,6 +303,7 @@ class ComposioConnector:
             "calendar_id": "primary",
             "summary": event.title,
             "create_meeting_room": False,  # its default adds a Google Meet link to every event
+            "send_updates": "none",
         }
         if event.all_day:
             arguments["start_date"] = event.start.date().isoformat()
@@ -295,6 +323,60 @@ class ComposioConnector:
             # Keep the rule we sent: Google's reply is the master, but the stored copy is rule-less.
             return replace(_event(payload, event.start.tzinfo), rule=event.rule)
         except KeyError, TypeError, ValueError:
+            raise CalendarProviderRejectedError(None) from None
+
+    async def update_event(
+        self,
+        account_id: str,
+        user_id: str,
+        event_id: str,
+        *,
+        title: str | None = None,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        all_day: bool = False,
+        location: str | None = None,
+        recurrence: Sequence[str] | None = None,
+    ) -> None:
+        arguments: dict[str, object] = {
+            "calendar_id": "primary",
+            "event_id": event_id,
+            "send_updates": "none",
+        }
+        if title is not None:
+            arguments["summary"] = title
+        if start is not None:
+            arguments["start_time"] = _moment(start, all_day)
+        if end is not None:
+            arguments["end_time"] = _moment(end, all_day)
+        moment = start or end
+        if moment is not None and isinstance(moment.tzinfo, ZoneInfo):
+            arguments["timezone"] = moment.tzinfo.key  # as in create_event
+        if location is not None:
+            arguments["location"] = location
+        if recurrence is not None:
+            arguments["recurrence"] = list(recurrence)
+        await self._execute(PATCH_EVENT, arguments, account_id, user_id)
+
+    async def delete_event(self, account_id: str, user_id: str, event_id: str) -> None:
+        arguments: dict[str, object] = {
+            "calendar_id": "primary",
+            "event_id": event_id,
+            "send_updates": "none",
+        }
+        await self._execute(DELETE_EVENT, arguments, account_id, user_id, gone_is_done=True)
+
+    async def get_series(
+        self, account_id: str, user_id: str, event_id: str, zone: tzinfo
+    ) -> tuple[CalendarEvent, list[str]]:
+        arguments: dict[str, object] = {"calendar_id": "primary", "event_id": event_id}
+        payload = await self._execute(GET_EVENT, arguments, account_id, user_id)
+        try:
+            lines = payload.get("recurrence") or []
+            if not isinstance(lines, list) or not all(isinstance(x, str) for x in lines):
+                raise TypeError
+            return _event(payload, zone), lines
+        except AttributeError, KeyError, TypeError, ValueError:
             raise CalendarProviderRejectedError(None) from None
 
 

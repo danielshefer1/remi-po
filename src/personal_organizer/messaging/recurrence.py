@@ -8,8 +8,9 @@ then made aware, so an 08:00 reminder or event stays 08:00 across DST.
 from __future__ import annotations
 
 import re
+from collections.abc import Collection, Sequence
 from dataclasses import replace
-from datetime import datetime, tzinfo
+from datetime import UTC, datetime, timedelta, tzinfo
 
 from dateutil.rrule import rrulestr
 
@@ -104,6 +105,84 @@ def first_at(rule: str, at: datetime) -> datetime:
     return first.replace(tzinfo=at.tzinfo)
 
 
+def _with_until(rule: str, until: datetime) -> str:
+    parts = _parse(rule) | {"UNTIL": until.strftime("%Y%m%dT%H%M%S")}
+    return ";".join(f"{k}={parts[k]}" for k in _KEYS if k in parts)
+
+
+def until_before(rule: str, at: datetime) -> str:
+    """``rule`` ending one second before ``at``'s local wall time (any ``UNTIL`` replaced)."""
+    return _with_until(rule, at.replace(tzinfo=None) - timedelta(seconds=1))
+
+
+def shift_until(rule: str, by: timedelta) -> str:
+    """``rule`` with its ``UNTIL`` moved by ``by``, so a series moved later keeps its last date."""
+    until = _parse(rule).get("UNTIL")
+    if until is None:
+        return rule
+    wall = datetime.strptime(until, "%Y%m%dT%H%M%S")  # noqa: DTZ007 - local wall time
+    return _with_until(rule, wall + by)
+
+
+def keep_until(rule: str, old: str | None) -> str:
+    """``rule`` ending on ``old``'s last day when it has no end of its own: a new pattern from a
+    date on still ends with the series. Through that whole day, as its time may be new."""
+    until = _parse(old).get("UNTIL") if old else None
+    if until is None or "UNTIL" in _parse(rule):
+        return rule
+    return _with_until(rule, datetime.strptime(until[:8] + "T235959", "%Y%m%dT%H%M%S"))  # noqa: DTZ007 - local wall time
+
+
+def _rrule(lines: Sequence[str]) -> int | None:
+    return next((i for i, line in enumerate(lines) if line.upper().startswith("RRULE:")), None)
+
+
+def local_rule(lines: Sequence[str], zone: tzinfo, all_day: bool) -> str | None:
+    """Google's ``RRULE:`` line as our rule (``UNTIL`` on the wall clock in ``zone``), or
+    ``None`` when there is none or it is outside what :func:`check_rule` takes."""
+    i = _rrule(lines)
+    if i is None:
+        return None
+    parts = []
+    for part in lines[i].partition(":")[2].split(";"):
+        key, _, value = part.partition("=")
+        if key.upper() == "UNTIL":
+            if all_day or len(value) == 8:  # a date: through the end of that day
+                value = value[:8] + "T235959"
+            elif value.upper().endswith("Z"):
+                moment = datetime.strptime(value.upper(), "%Y%m%dT%H%M%SZ").replace(tzinfo=UTC)
+                value = moment.astimezone(zone).strftime("%Y%m%dT%H%M%S")
+        parts.append(f"{key}={value}")
+    rule = ";".join(parts)
+    try:
+        # COUNT needs the series' first date to become UNTIL; we can't copy it faithfully.
+        if "COUNT" in _parse(rule):
+            return None
+        return check_rule(rule, datetime.now(zone))
+    except ValueError:
+        return None
+
+
+def end_lines(lines: Sequence[str], before: datetime, all_day: bool) -> list[str]:
+    """``lines`` with the ``RRULE:`` ending just before ``before``, in Google's form: ``UNTIL``
+    in UTC with a ``Z``, or the day before as a date for an all-day series. ``COUNT`` is
+    dropped; every other part and line is kept as it was."""
+    if all_day:
+        until = (before.date() - timedelta(days=1)).strftime("%Y%m%d")
+    else:
+        until = (before - timedelta(seconds=1)).astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
+    ended = list(lines)
+    i = _rrule(lines)
+    if i is not None:
+        parts = [
+            p
+            for p in lines[i].partition(":")[2].split(";")
+            if p.partition("=")[0].upper() not in ("COUNT", "UNTIL")
+        ]
+        ended[i] = "RRULE:" + ";".join([*parts, f"UNTIL={until}"])
+    return ended
+
+
 def next_after(rule: str, after: datetime) -> datetime | None:
     """First occurrence strictly after ``after`` (which is also DTSTART), or None past UNTIL."""
     naive = after.replace(tzinfo=None)
@@ -117,11 +196,16 @@ def _ordinal(n: int) -> str:
 
 
 def occurrences(
-    event: CalendarEvent, start: datetime, end: datetime, zone: tzinfo
+    event: CalendarEvent,
+    start: datetime,
+    end: datetime,
+    zone: tzinfo,
+    skipped: Collection[datetime] = (),
 ) -> list[CalendarEvent]:
     """The occurrences of ``event`` overlapping ``[start, end)``, in ``zone``; an event with no
     rule comes back as it is. Each is named ``<series id>:<local start>``, keeps the series'
-    wall-clock length, and is computed on naive local time so 18:00 stays 18:00 across DST."""
+    wall-clock length, and is computed on naive local time so 18:00 stays 18:00 across DST.
+    Those starting at a ``skipped`` instant are dropped; each carries ``series_id``."""
     if not event.rule:
         return [event]
     first = event.start.astimezone(zone).replace(tzinfo=None)
@@ -131,13 +215,14 @@ def occurrences(
     found = []
     for at in series.between(lo - length, hi, inc=True):
         begin, finish = at.replace(tzinfo=zone), (at + length).replace(tzinfo=zone)
-        if begin < end and finish > start:
+        if begin < end and finish > start and begin not in skipped:
             found.append(
                 replace(
                     event,
                     external_id=f"{event.external_id}:{at:%Y%m%dT%H%M}",
                     start=begin,
                     end=finish,
+                    series_id=event.external_id,
                 )
             )
     return found

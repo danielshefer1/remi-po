@@ -1,14 +1,16 @@
-"""Adding an event behind a confirm (PR 3, D5): ``agent_turn`` with a fake model and calendar.
+"""Adding, changing or removing an event behind a confirm (PR 3, D5; #63): ``agent_turn`` with
+a fake model and calendar.
 
 Done-When: a proposal goes out with its question written by code and is stored; a reply the
-confirm call reads as ADD creates the event exactly once, however the job re-runs or the person
-repeats it; CANCEL, anything else or an hour's wait each leave nothing to confirm. Only OTHER
-reaches the agent.
+confirm call reads as ADD (or yes, for a change) writes it exactly once, however the job re-runs
+or the person repeats it, and a failed write is never retried; CANCEL, anything else or an hour's
+wait each leave nothing to confirm. Only OTHER reaches the agent.
 """
 
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
@@ -30,7 +32,12 @@ from personal_organizer.db.repositories.connections import bind_connection
 from personal_organizer.db.repositories.tenants import set_timezone
 from personal_organizer.interfaces.calendar import CalendarEvent
 from personal_organizer.interfaces.channel import OutboundMessage
-from personal_organizer.messaging.agent import CREATE_EVENT, agent_turn, event_summary
+from personal_organizer.messaging.agent import (
+    CHANGE_EVENT,
+    CREATE_EVENT,
+    agent_turn,
+    event_summary,
+)
 from personal_organizer.messaging.confirm import confirm_prompt
 from personal_organizer.messaging.inbox import load_row
 from personal_organizer.messaging.onboarding import Advance
@@ -48,6 +55,7 @@ pytestmark = [
 ]
 
 NOW = datetime(2026, 10, 12, 9, 0, tzinfo=UTC)
+JERUSALEM = ZoneInfo("Asia/Jerusalem")
 DENTIST = call(
     "propose_event", title="רופא שיניים", start="2026-10-13T09:00", end="2026-10-13T10:00"
 )
@@ -502,3 +510,181 @@ class TestNoConfirm:
         llm = ScriptedLLM(said("במה אפשר לעזור?"))
         _, channel, _ = await _turn(db, owner_conn, tenant, llm, InMemoryCalendar())
         assert [m.body for m in channel.sent] == ["במה אפשר לעזור?"]
+
+
+# A Google event already copied into Remi's store, and the turn that proposes moving it.
+G_DENTIST = CalendarEvent(
+    "g-dentist",
+    "רופא שיניים",
+    datetime(2026, 10, 13, 9, 0, tzinfo=JERUSALEM),
+    datetime(2026, 10, 13, 10, 0, tzinfo=JERUSALEM),
+)
+LIST_TUESDAY = call("list_events", start="2026-10-13T00:00", end="2026-10-14T00:00")
+MOVE = call("propose_change", n=1, start="2026-10-13T10:00")
+MOVED = "\n".join(["רופא שיניים", "יום שלישי 2026-10-13, 10:00-11:00", "(במקום 09:00-10:00)"])
+
+
+class Counted(InMemoryCalendar):
+    """Counts every write tried, failed ones too."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.tried = 0
+
+    async def update_event(self, *args: Any, **kwargs: Any) -> None:
+        self.tried += 1
+        await super().update_event(*args, **kwargs)
+
+    async def delete_event(self, *args: Any, **kwargs: Any) -> None:
+        self.tried += 1
+        await super().delete_event(*args, **kwargs)
+
+
+class SecondPartFails(Outbound):
+    async def send_text(self, message: OutboundMessage) -> str:
+        if self.attempts:
+            self.attempts.append(message)
+            raise TransientChannelError("down")
+        return await super().send_text(message)
+
+
+async def _stored_google(
+    db: Database, tenant: TenantState, calendar: InMemoryCalendar, event: CalendarEvent
+) -> None:
+    calendar.events.append(event)
+    async with db.tenant_session(TenantId(tenant.id)) as session:
+        await event_rows.upsert_google(session, tenant.id, event)
+
+
+async def _propose_change(
+    db: Database,
+    conn: Any,
+    tenant: TenantState,
+    calendar: InMemoryCalendar,
+    proposal: Any = MOVE,
+    *,
+    channel: FakeOutbound | None = None,
+) -> FakeOutbound:
+    llm = ScriptedLLM(said("", LIST_TUESDAY), said("", proposal), said("בטח."))
+    _, channel, _ = await _turn(
+        db, conn, tenant, llm, calendar, "תזיז את רופא השיניים", channel=channel
+    )
+    return channel
+
+
+class TestChange:
+    async def test_change_proposed_then_yes_moves_once(self, db: Database, owner_conn: Any) -> None:
+        tenant = await _active(db)
+        calendar = Counted()
+        await _stored_google(db, tenant, calendar, G_DENTIST)
+        proposing = await _propose_change(db, owner_conn, tenant, calendar)
+        asked = confirm_prompt(MOVED, "he", question="confirm_change")
+        assert [m.body for m in proposing.sent] == ["בטח.", asked]
+        action = await _current(db, tenant)
+        assert action is not None
+        assert action.kind == CHANGE_EVENT
+        assert (action.payload["summary"], action.payload["question"]) == (
+            MOVED,
+            "confirm_change",
+        )
+        assert action.payload["target"]["start"] == "2026-10-13T09:00:00"
+        assert action.payload["start"] == "2026-10-13T10:00:00"
+        assert calendar.tried == 0
+
+        llm = _yes()
+        advance, channel, inbox_id = await _turn(db, owner_conn, tenant, llm, calendar)
+        # The confirm call read the question too, not the summary alone.
+        [[system, _]] = llm.calls
+        assert asked in system.content
+        done = t("event_changed", "he", summary=MOVED)
+        assert [m.body for m in channel.sent] == [done]
+        assert advance == Advance(reply=done)
+        assert [(op, event_id) for op, event_id, _ in calendar.writes] == [("update", "g-dentist")]
+        [moved] = calendar.events
+        assert moved.start.isoformat() == "2026-10-13T10:00:00+03:00"
+        assert await _current(db, tenant) is None
+
+        again, rerun, _ = await _turn(db, owner_conn, tenant, NoLLM(), calendar, inbox_id=inbox_id)
+        assert (again, rerun.attempts) == (Advance(), [])
+        llm = ScriptedLLM(said("במה עוד אפשר לעזור?"))
+        _, channel, _ = await _turn(db, owner_conn, tenant, llm, calendar)
+        assert [m.body for m in channel.sent] == ["במה עוד אפשר לעזור?"]
+        assert calendar.tried == 1
+
+    async def test_change_cancel_leaves_it(self, db: Database, owner_conn: Any) -> None:
+        tenant = await _active(db)
+        calendar = Counted()
+        await _stored_google(db, tenant, calendar, G_DENTIST)
+        await _propose_change(db, owner_conn, tenant, calendar)
+        llm = ScriptedLLM(said("CANCEL"))
+        _, channel, _ = await _turn(db, owner_conn, tenant, llm, calendar, "לא, תשאיר")
+        assert [m.body for m in channel.sent] == [t("change_cancelled", "he")]
+        assert await _current(db, tenant) is None
+        assert calendar.tried == 0
+
+    async def test_change_other_goes_to_agent(self, db: Database, owner_conn: Any) -> None:
+        tenant = await _active(db)
+        calendar = Counted()
+        await _stored_google(db, tenant, calendar, G_DENTIST)
+        await _propose_change(db, owner_conn, tenant, calendar)
+        llm = ScriptedLLM(said("OTHER"), said("בסדר, לאיזו שעה?"))
+        _, channel, _ = await _turn(db, owner_conn, tenant, llm, calendar, "רגע, בעצם לא בעשר")
+        assert [m.body for m in channel.sent] == ["בסדר, לאיזו שעה?"]
+        assert await _current(db, tenant) is None
+        assert calendar.tried == 0
+
+    async def test_change_after_sync_moved_it(self, db: Database, owner_conn: Any) -> None:
+        tenant = await _active(db)
+        calendar = Counted()
+        await _stored_google(db, tenant, calendar, G_DENTIST)
+        await _propose_change(db, owner_conn, tenant, calendar)
+        # The hourly sync brings it in at 11:00 before they answer.
+        later = G_DENTIST.start + timedelta(hours=2)
+        async with db.tenant_session(TenantId(tenant.id)) as session:
+            await event_rows.upsert_google(
+                session, tenant.id, replace(G_DENTIST, start=later, end=later + timedelta(hours=1))
+            )
+        _, channel, _ = await _turn(db, owner_conn, tenant, _yes(), calendar)
+        assert [m.body for m in channel.sent] == [t("event_changed_meanwhile", "he")]
+        assert calendar.writes == []
+        assert calendar.tried == 0
+
+    async def test_change_provider_down_not_retried(self, db: Database, owner_conn: Any) -> None:
+        tenant = await _active(db)
+        calendar = Counted()
+        await _stored_google(db, tenant, calendar, G_DENTIST)
+        await _propose_change(db, owner_conn, tenant, calendar)
+        calendar.fail = CalendarProviderUnavailableError("timeout")
+        advance, channel, inbox_id = await _turn(db, owner_conn, tenant, _yes(), calendar)
+        assert [m.body for m in channel.sent] == [t("event_not_changed", "he")]
+        assert advance == Advance(reply=t("event_not_changed", "he"))
+        again, _, _ = await _turn(db, owner_conn, tenant, NoLLM(), calendar, inbox_id=inbox_id)
+        assert again == Advance()
+        assert calendar.tried == 1
+
+    async def test_remove_invite_flow(self, db: Database, owner_conn: Any) -> None:
+        tenant = await _active(db)
+        calendar = Counted()
+        await _stored_google(db, tenant, calendar, replace(G_DENTIST, invited=True))
+        remove = call("propose_change", n=1, delete=True)
+        proposing = await _propose_change(db, owner_conn, tenant, calendar, remove)
+        summary = "\n".join(["רופא שיניים", "יום שלישי 2026-10-13, 09:00-10:00"])
+        assert proposing.sent[-1].body == confirm_prompt(
+            summary, "he", question="confirm_remove_invite"
+        )
+        llm = _yes()
+        _, channel, _ = await _turn(db, owner_conn, tenant, llm, calendar, "כן, תוריד")
+        [[system, _]] = llm.calls
+        assert "להסיר אותה מהיומן בכל זאת?" in system.content
+        assert [m.body for m in channel.sent] == [t("event_removed", "he")]
+        assert calendar.writes == [("delete", "g-dentist", {})]
+        assert calendar.events == []
+
+    async def test_change_question_never_sent_drops_it(self, db: Database, owner_conn: Any) -> None:
+        tenant = await _active(db)
+        calendar = Counted()
+        await _stored_google(db, tenant, calendar, G_DENTIST)
+        failing = SecondPartFails(name="gowa")
+        await _propose_change(db, owner_conn, tenant, calendar, channel=failing)
+        assert [m.body for m in failing.sent] == ["בטח."]
+        assert await _current(db, tenant) is None

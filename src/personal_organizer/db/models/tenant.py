@@ -21,8 +21,17 @@ from datetime import date, datetime, time
 from typing import Any, Final
 from uuid import UUID
 
-from sqlalchemy import CheckConstraint, ForeignKey, Index, Text, UniqueConstraint, func, text
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy import (
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    Text,
+    UniqueConstraint,
+    func,
+    text,
+)
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from personal_organizer.db.base import Base, TenantMixin, TenantRoot, check_in
@@ -188,7 +197,10 @@ class Event(Base, TenantMixin):
     """One calendar event: Remi's own, or an imported copy of Google's (issue #50).
 
     Title, times and location only, as ``CalendarEvent`` carries. ``external_id`` is Google's id
-    for an import, the row id for ``remi``. ``rule`` is unused until #53.
+    for an import, the row id for ``remi``. ``rule`` is #53's. ``series_id`` is
+    the series a single-date row or a Google instance belongs to, ``original_start`` where that
+    date fell before it moved, ``skipped`` the occurrence starts a series leaves out, and
+    ``invited`` whether the owner was invited rather than the organizer (#63).
     """
 
     __tablename__ = "events"
@@ -206,6 +218,12 @@ class Event(Base, TenantMixin):
     rule: Mapped[str | None] = mapped_column(Text)
     source: Mapped[str] = mapped_column(Text)
     external_id: Mapped[str | None] = mapped_column(Text)
+    series_id: Mapped[str | None] = mapped_column(Text)
+    original_start: Mapped[datetime | None]
+    skipped: Mapped[list[datetime]] = mapped_column(
+        ARRAY(DateTime(timezone=True)), server_default=text("'{}'")
+    )
+    invited: Mapped[bool] = mapped_column(server_default=text("false"))
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
 

@@ -14,6 +14,7 @@ import pytest
 from personal_organizer.admin.chat import (
     NO_ANSWER,
     NOT_ADDED,
+    NOT_CHANGED,
     OK,
     _parser,
     agent_chat,
@@ -21,6 +22,7 @@ from personal_organizer.admin.chat import (
     sample_events,
 )
 from personal_organizer.db.engine import Database
+from personal_organizer.interfaces.calendar import CalendarEvent
 from personal_organizer.interfaces.llm import Message
 from personal_organizer.messaging.agent import AGENT_REPLY
 from personal_organizer.messaging.calendar import InMemoryTenantCalendar
@@ -178,3 +180,49 @@ class TestActiveTenants:
         assert len(memory.added) == (1 if fake else 0)
         # "yes" with nothing waiting is the agent's, like any other line.
         assert len(llm.calls) == 7
+
+    @pytest.mark.parametrize("fake", [True, False])
+    async def test_chat_applies_confirmed_change(self, fake: bool) -> None:
+        tenant = TenantState(
+            id=UUID(int=1),
+            status="active",
+            step=None,
+            language="en",
+            first_message=False,
+            timezone="Asia/Jerusalem",
+        )
+        zone = ZoneInfo("Asia/Jerusalem")
+        dentist = CalendarEvent(
+            "fake-2",
+            "Dentist",
+            datetime(2026, 10, 13, 9, 0, tzinfo=zone),
+            datetime(2026, 10, 13, 10, 0, tzinfo=zone),
+        )
+        memory = InMemoryTenantCalendar([dentist])
+        calendar = memory
+        if not fake:
+            # A real calendar is read like the fake one, but po-chat never writes to it.
+            calendar = cast(Any, SimpleNamespace(connected=False, live=False))
+            calendar.events = memory.events
+            calendar.series_rule = memory.series_rule
+        llm = ScriptedLLM(
+            said("", call("list_events", start="2026-10-13T00:00", end="2026-10-14T00:00")),
+            said("", call("propose_change", n=1, start="2026-10-13T10:00")),
+            said("Sure."),
+            said("ADD"),
+        )
+        printed: list[str] = []
+        await agent_chat(
+            tenant,
+            llm=llm,
+            calendar=calendar,
+            read=lines("move the dentist to 10", "yes"),
+            write=printed.append,
+        )
+        summary = "Dentist\nTuesday 2026-10-13, 10:00-11:00\n(was 09:00-10:00)"
+        assert printed[0].endswith(f"{summary}\n\nMake this change?")
+        # The confirm call read the question with the summary.
+        assert "Make this change?" in llm.calls[3][0].content
+        done = t("event_changed", "en", summary=summary) if fake else NOT_CHANGED
+        assert printed[1] == f"bot [{AGENT_REPLY}]> {done}"
+        assert len(memory.changed) == (1 if fake else 0)
