@@ -36,11 +36,13 @@ import anthropic
 import pytest
 
 from personal_organizer.db.models.tenant import Reminder
-from personal_organizer.interfaces.calendar import CalendarEvent
+from personal_organizer.interfaces.calendar import CalendarEvent, EventChange, Which
 from personal_organizer.interfaces.llm import Completion, LLMProvider, Message
 from personal_organizer.messaging.agent import (
+    ProposedChange,
     add_event,
     add_events,
+    change_summary,
     event_summary,
     events_summary,
     respond,
@@ -353,6 +355,160 @@ async def test_decide(text: str, expected: str | None, llm: AnthropicLLM) -> Non
     assert await decide(summary, text, llm=llm) == expected
 
 
+def _later(day: int, hour: int, minute: int = 0) -> datetime:
+    return datetime(2026, 10, day, hour, minute, tzinfo=ZoneInfo(JERUSALEM))
+
+
+def _changeable() -> InMemoryTenantCalendar:
+    """A one-off, a weekly class of our own, and a weekly invite from someone else."""
+    sunday, monday = _later(4, 18), _later(5, 10)
+    return InMemoryTenantCalendar(
+        [
+            CalendarEvent("dentist-id", "Dentist", _later(15, 9), _later(15, 10)),
+            CalendarEvent(
+                "pilates-id",
+                "Pilates",
+                sunday,
+                sunday + timedelta(minutes=90),
+                rule="FREQ=WEEKLY;BYDAY=SU",
+            ),
+            CalendarEvent(
+                "sync-id",
+                "Team sync",
+                monday,
+                monday + timedelta(hours=1),
+                rule="FREQ=WEEKLY;BYDAY=MO",
+                series_id="sync-id",
+                invited=True,
+            ),
+        ],
+        connected=True,
+    )
+
+
+@dataclass(frozen=True)
+class Change:
+    name: str
+    text: str
+    language: str
+    title: str
+    which: Which
+    delete: bool = False
+    #: The occurrence the person means, when it matters: today's Monday 10:00 sync may be read
+    #: as this Monday or the next.
+    target_at: tuple[datetime, ...] = ()
+    #: The local start / end the change must give (the end as the apply derives it).
+    start: datetime | None = None
+    end_time: time | None = None
+    rule_has: str | None = None
+    question: str | None = None
+
+
+CHANGES = [
+    Change("move the dentist to 10", "move the dentist to 10", "en", "Dentist", "this",
+           start=_later(15, 10), end_time=time(11)),
+    Change("cancel the dentist, he", "תבטלי את רופא השיניים", "he", "Dentist", "this", delete=True),
+    Change("pilates is cancelled next sunday", "pilates is cancelled next sunday", "en",
+           "Pilates", "this", delete=True, target_at=(_later(18, 18),)),
+    Change("pilates next sunday at 18:30, he", "פילאטיס ביום ראשון הבא ב-18:30", "he",
+           "Pilates", "this", target_at=(_later(18, 18),), start=_later(18, 18, 30)),
+    Change("pilates ends at 19:00 from now on", "from now on pilates ends at 19:00", "en",
+           "Pilates", "following", end_time=time(19)),
+    Change("pilates moves to Tuesdays, he", "פילאטיס עובר לימי שלישי מעכשיו", "he",
+           "Pilates", "following", rule_has="BYDAY=TU"),
+    Change("delete the weekly pilates", "delete the weekly pilates", "en", "Pilates", "all",
+           delete=True),
+    Change("delete next Monday's team sync, he", "תמחקי את הטים סינק של יום שני הקרוב", "he",
+           "Team sync", "this", delete=True, target_at=(_later(12, 10), _later(19, 10)),
+           question="confirm_remove_invite"),
+]  # fmt: skip
+
+#: A menu or numbered list, or a bare event id, would break the voice.
+MENU = re.compile(r"(?m)^\s*\d+[.)]|reply\s+\d|\b(?:dentist|pilates|sync)-id", re.I)
+
+
+async def _change_turn(
+    text: str, language: str, llm: AnthropicLLM
+) -> tuple[list[ProposedChange], InMemoryTenantCalendar, str]:
+    calendar, changed = _changeable(), list[ProposedChange]()
+    reply = await _turn(
+        text, language, InMemorySchedule(NOW), llm, calendar=calendar, changed=changed
+    )
+    assert calendar.changed == [], "propose_change must write nothing"
+    assert not MENU.search(reply), reply
+    return changed, calendar, reply
+
+
+@pytest.mark.parametrize("scenario", CHANGES, ids=lambda s: s.name)
+async def test_propose_change(scenario: Change, llm: AnthropicLLM) -> None:
+    """The model proposes the right change to the right event; nothing is written."""
+    changed, _, reply = await _change_turn(scenario.text, scenario.language, llm)
+    [proposed] = changed
+    change, zone = proposed.change, ZoneInfo(JERUSALEM)
+
+    def local(value: datetime) -> datetime:
+        return value.astimezone(zone).replace(tzinfo=None)
+
+    assert change.target.title == scenario.title, reply
+    assert change.which == scenario.which, reply
+    assert change.delete is scenario.delete, reply
+    if scenario.target_at:
+        assert local(change.target.start) in [local(t) for t in scenario.target_at], reply
+    if scenario.start:
+        assert change.start is not None, reply
+        assert local(change.start) == local(scenario.start), reply
+    if scenario.end_time:
+        end = change.end or change.target.end + (
+            (change.start or change.target.start) - change.target.start
+        )
+        assert local(end).time() == scenario.end_time, reply
+    if scenario.rule_has:
+        assert scenario.rule_has in (change.rule or ""), reply
+    expected = scenario.question or ("confirm_remove" if scenario.delete else "confirm_change")
+    assert proposed.question == expected, reply
+    assert detect_language(reply) == scenario.language, reply
+
+
+NO_CHANGE = [
+    ("cancel pilates", "en"),
+    ("move the team sync to 11", "en"),
+]
+
+
+@pytest.mark.parametrize(("text", "language"), NO_CHANGE, ids=[t for t, _ in NO_CHANGE])
+async def test_no_change_proposed(text: str, language: str, llm: AnthropicLLM) -> None:
+    """Pilates has no date to cancel, and the sync is someone else's: nothing is proposed, and
+    the one question (or the plain refusal) is the reply."""
+    changed, _, reply = await _change_turn(text, language, llm)
+    assert changed == [], reply
+    if text == "cancel pilates":
+        assert reply.count("?") == 1, reply
+
+
+def _change_confirm(language: str) -> str:
+    zone = ZoneInfo(JERUSALEM)
+    dentist = CalendarEvent("dentist-id", "Dentist", _later(15, 9), _later(15, 10))
+    change = EventChange(dentist, "this", start=_later(15, 10))
+    summary = change_summary(change, None, zone, language)
+    return confirm_prompt(summary, language, question="confirm_change")
+
+
+CHANGE_DECISIONS = [
+    ("yes, change it", "en", CONFIRM_ADD),
+    ("כן תעדכני", "he", CONFIRM_ADD),
+    ("leave it", "en", CONFIRM_CANCEL),
+    ("לא, תשאירי", "he", CONFIRM_CANCEL),
+]
+
+
+@pytest.mark.parametrize(
+    ("text", "language", "expected"), CHANGE_DECISIONS, ids=[t for t, _, _ in CHANGE_DECISIONS]
+)
+async def test_decide_change(text: str, language: str, expected: str, llm: AnthropicLLM) -> None:
+    """The confirm call reads a reply to a change's full confirm text like one to an add."""
+    assert await decide(_change_confirm(language), text, llm=llm) == expected
+
+
 class Watched(InMemorySchedule):
     """Counts ``list_reminders`` reads."""
 
@@ -384,6 +540,7 @@ async def _turn(
     strong: LLMProvider | None = None,
     calendar: InMemoryTenantCalendar | None = None,
     proposed: list[CalendarEvent] | None = None,
+    changed: list[ProposedChange] | None = None,
 ) -> str:
     tenant = TenantState(
         id=UUID(int=1),
@@ -404,6 +561,7 @@ async def _turn(
         else calendar,
         now=NOW,
         proposed=proposed,
+        changed=changed,
         schedule=schedule,
         notes=notes,
         strong=strong,
