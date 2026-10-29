@@ -23,10 +23,11 @@ question that one answer settles. ``propose_change`` (#63) is the same for chang
 removing one event that this turn's ``list_events`` showed, taken by its number, never an id:
 one per message, never with additions, handed back in ``changed`` under its own question.
 :func:`agent_turn` stores them as the tenant's pending action before sending. The next message
-goes to ``confirm.decide``, a separate model call that sees only the summary and that message. On
-CANCEL code drops the action; on ADD it claims it in its own committed transaction, then
-creates the event, so a re-run or a second "yes" never creates it twice (ADR 0003). Anything
-else drops the proposal and goes to the agent, which sees the proposal in the history.
+goes to ``confirm.decide``, a separate model call that sees only the summary (a change's with
+its question) and that message. On CANCEL code drops the action; on ADD it claims it in its own
+committed transaction, then creates the events or makes the change once, so a re-run or a second
+"yes" never writes it twice (ADR 0003). A change finds its event as it was listed or writes
+nothing. Anything else drops the proposal and goes to the agent, which sees it in the history.
 
 **Errors (D3, D9).** Google is optional, so not connected is ordinary: reading and proposing
 work without it. A ``connect_calendar`` call gets the fixed ``calendar_not_connected`` line
@@ -72,10 +73,13 @@ import structlog
 
 from personal_organizer.core.errors import (
     CalendarNotConnectedError,
+    CalendarProviderError,
     CalendarProviderRejectedError,
     CalendarProviderUnavailableError,
+    EventChangedError,
     LLMRejectedError,
     LLMUnavailableError,
+    SeriesSplitError,
 )
 from personal_organizer.core.types import TenantId
 from personal_organizer.db.engine import Database
@@ -132,6 +136,8 @@ BRIEFING_LATEST: Final = time(22, 0)
 
 #: The pending action's kind for a proposed event.
 CREATE_EVENT: Final = "create_event"
+#: The pending action's kind for a proposed change or removal (#63).
+CHANGE_EVENT: Final = "change_event"
 
 NO_GOOGLE: Final = "error: they haven't connected Google; offer connect_calendar"
 _PROPOSED: Final = "ok: proposed; the summary and the confirm question go below your reply"
@@ -1052,6 +1058,93 @@ def _stored(payload: Mapping[str, Any], zone: ZoneInfo) -> list[CalendarEvent]:
     ]
 
 
+def _wall(at: datetime, zone: ZoneInfo) -> str:
+    return at.astimezone(zone).replace(tzinfo=None).isoformat()
+
+
+def _change_payload(proposed: ProposedChange, inbox_id: UUID, zone: ZoneInfo) -> dict[str, Any]:
+    """A ``change_event``'s payload: the target as listed, which the apply checks it against,
+    and the new values, in local wall time (D6); the summary and question they were asked."""
+    change, target = proposed.change, proposed.change.target
+    return {
+        "target": {
+            "external_id": target.external_id,
+            "title": target.title,
+            "start": _wall(target.start, zone),
+            "end": _wall(target.end, zone),
+            "all_day": target.all_day,
+            "location": target.location,
+            "rule": target.rule,
+            "series_id": target.series_id,
+            "invited": target.invited,
+        },
+        "which": change.which,
+        "delete": change.delete,
+        "title": change.title,
+        "start": None if change.start is None else _wall(change.start, zone),
+        "end": None if change.end is None else _wall(change.end, zone),
+        "location": change.location,
+        "rule": change.rule,
+        "summary": proposed.summary,
+        "question": proposed.question,
+        "proposed_by": str(inbox_id),
+    }
+
+
+def _stored_change(payload: Mapping[str, Any], zone: ZoneInfo) -> EventChange:
+    def local(value: str | None) -> datetime | None:
+        return None if value is None else datetime.fromisoformat(value).replace(tzinfo=zone)
+
+    item = payload["target"]
+    target = CalendarEvent(
+        item["external_id"],
+        item["title"],
+        datetime.fromisoformat(item["start"]).replace(tzinfo=zone),
+        datetime.fromisoformat(item["end"]).replace(tzinfo=zone),
+        item["all_day"],
+        item["location"],
+        rule=item["rule"],
+        series_id=item["series_id"],
+        invited=item["invited"],
+    )
+    return EventChange(
+        target,
+        payload["which"],
+        delete=payload["delete"],
+        title=payload["title"],
+        start=local(payload["start"]),
+        end=local(payload["end"]),
+        location=payload["location"],
+        rule=payload["rule"],
+    )
+
+
+async def apply_change(
+    proposed: ProposedChange, *, calendar: Calendar, zone: ZoneInfo, language: str
+) -> str:
+    """Make the change the person confirmed; return the fixed line saying how it went.
+
+    As :func:`add_event`, it never raises a provider error for a retry: the claim is spent, and a
+    failed write may have gone through, so it is never tried again (ADR 0003).
+    """
+    change = proposed.change
+    try:
+        await calendar.change(change)
+    except EventChangedError:
+        return t("event_changed_meanwhile", language)
+    except CalendarNotConnectedError:
+        return t("calendar_disconnected_change", language)
+    except SeriesSplitError:
+        day = day_label(change.target.start.astimezone(zone).date(), language)
+        return t("series_split", language, day=day)
+    except CalendarProviderError:
+        log.warning("agent.change_failed")
+        return t("event_not_changed", language)
+    if change.delete:
+        return t("event_removed", language)
+    return t("event_changed", language, summary=proposed.summary)
+
+
 async def add_event(
     event: CalendarEvent,
     *,
@@ -1549,17 +1642,23 @@ async def _confirmed(
 ) -> str:
     """The fixed reply to ``picked`` on the open ``action``. Calls no model."""
     language = tenant.language
+    changing = action.kind == CHANGE_EVENT
     if picked != CONFIRM_ADD:
         async with db.tenant_session(TenantId(tenant.id)) as session:
             await pending.drop(session, tenant.id)
-        return t("event_cancelled", language)
-    # Committed before the create: a crash or retry after this line never creates it again.
+        return t("change_cancelled" if changing else "event_cancelled", language)
+    # Committed before the write: a crash or retry after this line never writes it again.
     async with db.tenant_session(TenantId(tenant.id)) as session:
         claimed = await pending.claim(session, tenant.id, action.id, now=now, by=row.id)
     if claimed is None:
-        return t("proposal_closed", language)
+        return t("change_closed" if changing else "proposal_closed", language)
     zone = ZoneInfo(tenant.timezone or "UTC")
-    events = _stored(claimed.payload, zone)
+    payload = claimed.payload
+    if changing:
+        change = _stored_change(payload, zone)
+        proposed = ProposedChange(change, payload["summary"], payload["question"])
+        return await apply_change(proposed, calendar=calendar, zone=zone, language=language)
+    events = _stored(payload, zone)
     return await add_events(events, calendar=calendar, zone=zone, language=language)
 
 
@@ -1596,6 +1695,7 @@ async def agent_turn(
     theirs = TenantCalendar(
         db, tenant.id, provider=calendar, account=account, live=tenant.live_calendar
     )
+    zone = ZoneInfo(tenant.timezone or "UTC")
     if claimed_here:
         # A re-run after this message's claim: the event may exist, and asking the model about
         # a bare "yes" could propose it again. Nothing is sent, as when delivery is in doubt.
@@ -1609,10 +1709,16 @@ async def agent_turn(
         own = action.payload.get("proposed_by") == str(row.id)
         picked = None
         if row.body and not own:
-            zone = ZoneInfo(tenant.timezone or "UTC")
-            summary = events_summary(_stored(action.payload, zone), zone, tenant.language)
+            payload = action.payload
+            if action.kind == CHANGE_EVENT:
+                # With its question: a removal's summary has no verb to read "no, keep it" by.
+                asked = confirm_prompt(
+                    payload["summary"], tenant.language, question=payload["question"]
+                )
+            else:
+                asked = events_summary(_stored(payload, zone), zone, tenant.language)
             try:
-                picked = await decide(summary, row.body, llm=llm)
+                picked = await decide(asked, row.body, llm=llm)
             except LLMUnavailableError:
                 if not last_attempt:
                     raise
@@ -1637,6 +1743,7 @@ async def agent_turn(
             await pending.drop(session, tenant.id)
     history = await load_history(db, tenant.id)
     proposed: list[CalendarEvent] = []
+    changed: list[ProposedChange] = []
     links: list[str] = []
 
     async def connect_link() -> str:
@@ -1656,6 +1763,7 @@ async def agent_turn(
                 calendar=theirs,
                 now=now,
                 proposed=proposed,
+                changed=changed,
                 schedule=TenantSchedule(db, tenant.id, now),
                 notes=TenantNotes(db, tenant.id),
                 grants=TenantGrants(db, tenant.id),
@@ -1673,15 +1781,15 @@ async def agent_turn(
             reply = ""
     if bubbles(reply) == [""]:  # nothing but break lines says nothing
         reply = ""
-    if reply and proposed:
+    asking = bool(reply and (proposed or changed))
+    if asking:
+        kind, payload = (
+            (CHANGE_EVENT, _change_payload(changed[0], row.id, zone))
+            if changed
+            else (CREATE_EVENT, _payload(proposed, row.id))
+        )
         async with db.tenant_session(TenantId(tenant.id)) as session:
-            await pending.propose(
-                session,
-                tenant.id,
-                kind=CREATE_EVENT,
-                payload=_payload(proposed, row.id),
-                now=now,
-            )
+            await pending.propose(session, tenant.id, kind=kind, payload=payload, now=now)
     parts = [
         fit_message(part) for part in bubbles(reply or t("agent_unavailable", tenant.language))
     ]
@@ -1694,7 +1802,7 @@ async def agent_turn(
         to=address,
         parts=parts,
     )
-    if proposed and reply and not every:  # the question never reached them: nothing to confirm
+    if asking and not every:  # the question never reached them: nothing to confirm
         async with db.tenant_session(TenantId(tenant.id)) as session:
             await pending.drop(session, tenant.id)
     # The history holds the texts as one reply, so the model never sees a break line echoed.
@@ -1708,6 +1816,7 @@ __all__ = [
     "AGENT_REPLY",
     "BRIEFING_EARLIEST",
     "BRIEFING_LATEST",
+    "CHANGE_EVENT",
     "CREATE_EVENT",
     "HAND_OFF_REASONS",
     "HAND_OFF_TOOL",
@@ -1728,6 +1837,7 @@ __all__ = [
     "add_events",
     "agent_prompt",
     "agent_turn",
+    "apply_change",
     "change_summary",
     "check_change",
     "check_event",

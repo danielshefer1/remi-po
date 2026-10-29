@@ -15,7 +15,8 @@ read live instead, on request (#50). ``agent_unavailable``,
 ``calendar_not_connected`` (the link to connect Google, or reconnect it),
 ``calendar_disconnected`` (a failed add, with no link) and the confirm outcomes (``event_*``,
 ``proposal_closed``, and ``events_*`` for several at once, ``{titles}`` naming the ones not
-added) are the agent's (``messaging.agent``). ``reminder`` is sent by the
+added; ``change_*``, ``series_split`` and ``calendar_disconnected_change`` for a change or a
+removal, #63) are the agent's (``messaging.agent``). ``reminder`` is sent by the
 reminder job, and the ``briefing_*`` lines by the morning briefing (Iteration 05).
 ``voice_unheard`` answers a voice note that couldn't be heard (Iteration 06). The ``group_*``
 and ``outing_*`` lines are the family groups' (Iteration 07). ``{zone}`` is a
@@ -75,6 +76,26 @@ _EN: Final = {
     ),
     "event_not_added": (
         "I couldn't add it just now. Check your calendar, and ask me again if it isn't there."
+    ),
+    "event_changed": "Done, I've updated it:\n{summary}",
+    "event_removed": "Done, it's off your calendar.",
+    "change_cancelled": "No problem, I left it as it was.",
+    "change_closed": (
+        "That suggestion is no longer open, so I didn't change anything. Tell me again what to "
+        "change."
+    ),
+    "event_not_changed": (
+        "I couldn't reach your calendar just now, so nothing changed. Try me again in a bit."
+    ),
+    "event_changed_meanwhile": (
+        "That event changed in the meantime, so I left it alone. Tell me again what you'd like?"
+    ),
+    "series_split": (
+        "I ended the old series before {day}, but couldn't add the new one. Ask me again to add it?"
+    ),
+    "calendar_disconnected_change": (
+        "I couldn't change it: your Google Calendar connection has stopped working. Just ask me "
+        "and I'll send you a link to reconnect it."
     ),
     "events_added": "Done, they're all in your calendar:\n{summary}",
     "events_some_added": "Here's what I added to your calendar:\n{summary}",
@@ -141,6 +162,17 @@ _HE: Final = {
     "proposal_closed": "ההצעה הזו כבר לא בתוקף, אז לא הוספתי כלום. אפשר לבקש שוב מה להוסיף.",
     "event_not_added": (
         "לא הצלחתי להוסיף את זה כרגע. כדאי לבדוק ביומן, ולבקש שוב אם האירוע לא שם."
+    ),
+    "event_changed": "בוצע, עדכנתי ביומן:\n{summary}",
+    "event_removed": "בוצע, הסרתי את זה מהיומן.",
+    "change_cancelled": "אין בעיה, השארתי כמו שהיה.",
+    "change_closed": "ההצעה הזו כבר לא בתוקף, אז לא שיניתי כלום. מה לשנות?",
+    "event_not_changed": "לא הצלחתי להגיע ליומן כרגע, אז לא שיניתי כלום. אפשר לנסות שוב עוד מעט.",
+    "event_changed_meanwhile": "האירוע הזה השתנה בינתיים, אז לא נגעתי בו. מה לשנות?",
+    "series_split": "סיימתי את הסדרה הישנה לפני {day}, אבל לא הצלחתי להוסיף את החדשה. לבקש שוב?",
+    "calendar_disconnected_change": (
+        "לא הצלחתי לשנות את זה, כי החיבור ליומן Google שלך הפסיק לעבוד. אפשר לבקש ממני "
+        "ואשלח קישור לחבר אותו מחדש."
     ),
     "events_added": "בוצע, הכול ביומן:\n{summary}",
     "events_some_added": "הנה מה שהוספתי ליומן:\n{summary}",

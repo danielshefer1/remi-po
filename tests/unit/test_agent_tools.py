@@ -22,7 +22,9 @@ from personal_organizer.core.errors import (
     CalendarNotConnectedError,
     CalendarProviderRejectedError,
     CalendarProviderUnavailableError,
+    EventChangedError,
     LLMUnavailableError,
+    SeriesSplitError,
 )
 from personal_organizer.interfaces.calendar import CalendarEvent, EventChange
 from personal_organizer.interfaces.llm import ToolCall
@@ -35,6 +37,7 @@ from personal_organizer.messaging.agent import (
     add_event,
     add_events,
     agent_prompt,
+    apply_change,
     change_summary,
     check_event,
     event_summary,
@@ -1315,3 +1318,40 @@ class TestChangeSummary:
     def test_a_pattern_not_known(self) -> None:
         change = EventChange(SYNC, "all", delete=True)
         assert change_summary(change, None, JERUSALEM, "he").splitlines()[-1] == "בכל המועדים"
+
+
+class TestApplyChange:
+    """One fixed line per outcome, and never a provider error for the job to retry."""
+
+    @staticmethod
+    async def _apply(
+        change: EventChange, fail: Exception | None = None, language: str = "en"
+    ) -> str:
+        calendar = _calendar(DENTIST_29, PILATES)
+        calendar.fail = fail
+        proposed = ProposedChange(change, "the summary", "confirm_change")
+        return await apply_change(proposed, calendar=calendar, zone=JERUSALEM, language=language)
+
+    async def test_done(self) -> None:
+        moved = EventChange(DENTIST_29, start=DENTIST_29.start + timedelta(hours=1))
+        assert await self._apply(moved) == t("event_changed", "en", summary="the summary")
+        removed = EventChange(DENTIST_29, delete=True)
+        assert await self._apply(removed, language="he") == t("event_removed", "he")
+
+    @pytest.mark.parametrize(
+        ("fail", "key"),
+        [
+            (EventChangedError(), "event_changed_meanwhile"),
+            (CalendarNotConnectedError(None), "calendar_disconnected_change"),
+            (CalendarProviderUnavailableError("timeout"), "event_not_changed"),
+            (CalendarProviderRejectedError(400), "event_not_changed"),
+        ],
+    )
+    async def test_failures(self, fail: Exception, key: str) -> None:
+        moved = EventChange(DENTIST_29, start=DENTIST_29.start + timedelta(hours=1))
+        assert await self._apply(moved, fail) == t(key, "en")
+
+    async def test_series_split_names_the_date(self) -> None:
+        change = EventChange(_pilates_on(8), "following", title="Yoga")
+        line = await self._apply(change, SeriesSplitError(), "he")
+        assert line == t("series_split", "he", day="יום ראשון 2026-11-08")

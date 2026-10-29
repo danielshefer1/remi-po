@@ -11,8 +11,9 @@ stored copy of their Google events, refreshed as the worker would.
 An active tenant's calendar is the worker's: Remi's stored events, with Google read through
 Composio when it is on and they are connected. ``--fake-calendar`` reads a few made-up events
 held in memory instead, so the agent can be tried without a database calendar or a Composio
-key. A proposed event waits in memory for the next line, and a "yes" (as the model reads it,
-like the worker) adds it to that fake calendar only: po-chat never adds to a real one.
+key. A proposed event or change waits in memory for the next line, and a "yes" (as the model
+reads it, like the worker) applies it to that fake calendar only: po-chat never writes to a real
+one.
 
 For the model check of docs/plan-iteration-04.md: on Railway, ``railway ssh --service worker
 --environment staging``, then ``po-chat --tenant <uuid>``. It needs ``AGENT__API_KEY``.
@@ -36,9 +37,16 @@ from personal_organizer.db.engine import Database
 from personal_organizer.db.repositories.connections import active_connection
 from personal_organizer.interfaces.calendar import CalendarEvent
 from personal_organizer.interfaces.llm import LLMProvider, Message
-from personal_organizer.messaging.agent import AGENT_REPLY, add_events, events_summary, respond
+from personal_organizer.messaging.agent import (
+    AGENT_REPLY,
+    ProposedChange,
+    add_events,
+    apply_change,
+    events_summary,
+    respond,
+)
 from personal_organizer.messaging.calendar import Calendar, InMemoryTenantCalendar, TenantCalendar
-from personal_organizer.messaging.confirm import CONFIRM_ADD, decide
+from personal_organizer.messaging.confirm import CONFIRM_ADD, confirm_prompt, decide
 from personal_organizer.messaging.inbox import InboxRow
 from personal_organizer.messaging.notes import InMemoryNotes
 from personal_organizer.messaging.onboarding import next_reply
@@ -60,6 +68,9 @@ NO_ANSWER: Final = "(no usable answer: the worker sends its fallback)"
 
 #: Printed for a confirmed event when the calendar is a real one.
 NOT_ADDED: Final = "(not added: po-chat adds events to --fake-calendar only)"
+
+#: Printed for a confirmed change when the calendar is a real one.
+NOT_CHANGED: Final = "(not changed: po-chat changes --fake-calendar only)"
 
 #: The channel name the in-memory rows carry. No channel by that name exists to send on.
 CHAT_CHANNEL: Final = "po-chat"
@@ -143,6 +154,7 @@ async def agent_chat(
     history: list[Message] = []
     zone, language = ZoneInfo(tenant.timezone or "UTC"), tenant.language
     waiting: list[CalendarEvent] = []
+    changing: list[ProposedChange] = []
     # Reminders and the morning time live in memory for the session, like the history.
     schedule = InMemorySchedule(datetime.now(UTC))
     notes = InMemoryNotes()
@@ -156,17 +168,31 @@ async def agent_chat(
         picked = None
         if waiting:
             picked = await decide(events_summary(waiting, zone, language), line, llm=llm)
+        elif changing:
+            asked = confirm_prompt(changing[0].summary, language, question=changing[0].question)
+            picked = await decide(asked, line, llm=llm)
         if picked is not None:
-            events = waiting[:]
+            events, changes = waiting[:], changing[:]
             waiting.clear()
-            if picked != CONFIRM_ADD:
+            changing.clear()
+            fake = isinstance(calendar, InMemoryTenantCalendar)
+            if changes and picked != CONFIRM_ADD:
+                text = t("change_cancelled", language)
+            elif changes:
+                text = (
+                    await apply_change(changes[0], calendar=calendar, zone=zone, language=language)
+                    if fake
+                    else NOT_CHANGED
+                )
+            elif picked != CONFIRM_ADD:
                 text = t("event_cancelled", language)
-            elif isinstance(calendar, InMemoryTenantCalendar):
+            elif fake:
                 text = await add_events(events, calendar=calendar, zone=zone, language=language)
             else:
                 text = NOT_ADDED
         else:
             waiting.clear()
+            changing.clear()
             text = await respond(
                 history,
                 line,
@@ -175,6 +201,7 @@ async def agent_chat(
                 calendar=calendar,
                 now=datetime.now(UTC),
                 proposed=waiting,
+                changed=changing,
                 schedule=schedule,
                 notes=notes,
                 connect_link=connect_link,
