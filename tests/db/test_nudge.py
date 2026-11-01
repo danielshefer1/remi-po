@@ -20,7 +20,7 @@ from personal_organizer.core.errors import LLMUnavailableError
 from personal_organizer.core.types import TenantId
 from personal_organizer.db.engine import Database
 from personal_organizer.db.repositories import groups
-from personal_organizer.db.repositories.outings import create_poll, set_answer
+from personal_organizer.db.repositories.outings import create_poll, set_answer, set_poll_message
 from personal_organizer.interfaces.calendar import CalendarEvent
 from personal_organizer.messaging.agent import respond
 from personal_organizer.messaging.calendar import InMemoryTenantCalendar
@@ -73,6 +73,7 @@ async def _outing(db: Database, owner_conn: Any) -> tuple[UUID, UUID]:
             in_option="I'm in",
             out_option="Can't make it",
         )
+        await set_poll_message(session, poll.id, "gowa.POLL1")
     await owner_conn.execute("UPDATE group_polls SET created_at = $1", NOW - timedelta(hours=3))
     noa = await _member(db, group.id, NOA, "Noa", "ca_noa")
     await seed_inbound(db, noa, channel="gowa", sent_at=NOW - timedelta(days=1), phone=NOA)

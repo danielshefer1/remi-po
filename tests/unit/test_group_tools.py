@@ -59,3 +59,10 @@ def test_group_prompt(language: str) -> None:
     assert "Rami" in prompt  # "רמי" may be a person, not Remi
     assert "{" not in prompt
     assert "Wednesday 2026-10-21, 13:00" in prompt
+
+
+def test_group_prompt_lists_open_outings() -> None:
+    now = datetime(2026, 10, 21, 13, 0, tzinfo=ZONE)
+    line = "Family dinner, Friday 2026-10-23, 19:00-21:00"
+    assert line in group_prompt("en", now, "Dana", True, outings=(line,))
+    assert "still open for votes" not in group_prompt("en", now, "Dana", True)

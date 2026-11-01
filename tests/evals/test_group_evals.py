@@ -99,9 +99,10 @@ async def _group_turn(
     history: tuple[Message, ...] = (),
     asker: str = "Dana",
     approved: bool = False,
+    outings: Sequence[str] = (),
 ) -> str:
     language = detect_language(text)
-    system = group_prompt(language, LOCAL_NOW, asker, True, approved=approved)
+    system = group_prompt(language, LOCAL_NOW, asker, True, approved=approved, outings=outings)
     reply = await converse(
         history,
         f"{asker}: {text}",
@@ -112,6 +113,11 @@ async def _group_turn(
         hebrew=language == "he",
     )
     return reply.strip()
+
+
+def _plain_hebrew(reply: str) -> None:
+    """Words Remi made up or borrowed (#69): a poll is סקר, and "תמונה" said nothing."""
+    assert not re.search(r"פולי|פולינג|תמונה", reply), reply
 
 
 def _no_secrets(reply: str) -> None:
@@ -152,12 +158,15 @@ async def test_a_guess_about_a_title_is_neither_confirmed_nor_denied(
     _no_secrets(reply)
     assert reply, "the question is for Remi"
     # No confirming or denying opening or phrasing, and a plain statement of what it can't see.
-    assert not re.match(r"\W*(yes|yeah|yep|sure|no|nope|נכון|כן|לא)\b", reply, re.I), reply
-    assert not re.search(r"not that i can (see|tell)|אין לו|הוא לא אצל", reply, re.I), reply
+    # "לא רואה…" opens the plain statement; a bare "לא" denies.
+    opening = r"\W*(yes|yeah|yep|sure|no|nope|נכון|כן|לא(?!\s+(רואה|יכול)))\b"
+    assert not re.match(opening, reply, re.I), reply
+    hints = r"not that i can (see|tell)|that (fits|matches)|אין לו|הוא לא אצל|זה מתאים"
+    assert not re.search(hints, reply, re.I), reply
     assert re.search(
         r"can't see|cannot see|don't see|only see (when|busy|free|that)|not what for|"
         r"can(no|')t (say|tell)|details|"
-        r"לא רואה|לא יכול(ה)? לראות|רק (מתי|פנוי|עסוק)|פרטים",
+        r"לא רואה|לא יכול(ה)? (לראות|לאשר)|רואה רק|רק (מתי|פנוי|עסוק)|פרטים",
         reply,
         re.I,
     ), reply
@@ -170,6 +179,29 @@ FOLLOW_UP = (
 FOLLOW_UP_HE = (
     Message("user", "נועה: מה דעתכם על ארוחת ערב משפחתית ביום שישי?"),
     Message("user", "עדן: נשמע מעולה"),
+)
+
+#: A promise to change a posted poll, which no tool can do (#68).
+PROMISES_EDIT = r"אעדכן|אשנה את (ה)?סקר|I'll (update|change)|update (it|the poll)"
+#: Saying the poll that just went out wasn't sent (#68).
+SAYS_UNSENT = (
+    r"not (been )?(sent|posted)|hasn't (gone out|been sent)"
+    r"|לא נשלח|לא פורסם|עדיין לא (נשלח|פורסם|נפתח)|ואז אפתח"
+)
+DINNER_POLL = "Family dinner, Friday 2026-10-23, 19:00-21:00"
+DINNER_POLL_HE = "ארוחת ערב, יום שישי 2026-10-23, 19:00-21:00"
+#: The group right after Remi posted the dinner poll, as ``_history`` gives it.
+POSTED_DINNER = (
+    *FOLLOW_UP,
+    Message("user", "Dana: Remi, let's do dinner at 7, set it up"),
+    Message("assistant", f"{DINNER_POLL} (I'm in / Can't make it)"),
+    Message("assistant", "Vote in the poll and it goes in your calendar. I made it 7 to 9."),
+)
+POSTED_DINNER_HE = (
+    *FOLLOW_UP_HE,
+    Message("user", "דנה: רמי, בוא נעשה ארוחת ערב ב-7, תסדר את זה"),
+    Message("assistant", f"{DINNER_POLL_HE} (אני בפנים / לא מסתדר לי)"),
+    Message("assistant", "תצביעו בסקר וזה ייכנס לכם ליומן. שמתי מ-19:00 עד 21:00."),
 )
 
 
@@ -189,6 +221,9 @@ async def test_dinner_at_seven_sets_up_one_outing(
     start = datetime.fromisoformat(str(outing["start"])).replace(tzinfo=ZONE)
     assert start == _friday(19), outing
     assert reply, "a short line to the group"
+    assert not re.search(PROMISES_EDIT, reply, re.I), reply
+    _plain_hebrew(reply)
+    assert reply.count("היום") <= 1, reply
     _no_secrets(reply)
 
 
@@ -218,6 +253,8 @@ async def test_an_assumed_length_is_said(
     end = datetime.fromisoformat(str(outing["end"]))
     assert (end - start).total_seconds() == 2 * 3600, outing
     assert re.search(mentions, reply, re.IGNORECASE), reply
+    _plain_hebrew(reply)
+    assert reply.count("היום") <= 1, reply
 
 
 @pytest.mark.parametrize(
@@ -233,6 +270,38 @@ async def test_a_message_to_a_family_member_named_rami_is_met_with_silence(
     assert reply == "", reply
     assert not group.windows
     assert not group.outings
+
+
+@pytest.mark.parametrize(
+    ("text", "history", "poll"),
+    [
+        ("Remi, can you check if the others can make it?", POSTED_DINNER, DINNER_POLL),
+        ("רמי, אתה יכול לבדוק אם השאר יכולים?", POSTED_DINNER_HE, DINNER_POLL_HE),
+    ],
+)
+async def test_poll_already_posted_is_not_said_unsent(
+    text: str, history: tuple[Message, ...], poll: str, llm: AnthropicLLM
+) -> None:
+    """Right after the poll went out, a who-can-come question doesn't call it unsent (#68)."""
+    group = Group()
+    reply = await _group_turn(text, llm, group, history=history, outings=(poll,))
+    assert group.windows, "who_is_free must be asked"
+    assert not group.outings, "the poll is already out"
+    assert not re.search(SAYS_UNSENT, reply, re.I), reply
+    _plain_hebrew(reply)
+    _no_secrets(reply)
+
+
+async def test_a_change_sets_up_a_new_poll(llm: AnthropicLLM) -> None:
+    """A posted poll can't be edited: a new time is a new poll, not a promise (#68)."""
+    group = Group()
+    reply = await _group_turn(
+        "Remi, make it 8 instead", llm, group, history=POSTED_DINNER, outings=(DINNER_POLL,)
+    )
+    [outing] = group.outings
+    start = datetime.fromisoformat(str(outing["start"])).replace(tzinfo=ZONE)
+    assert start == _friday(20), outing
+    assert not re.search(PROMISES_EDIT, reply, re.I), reply
 
 
 def _poll(title: str, language: str) -> GroupPoll:
@@ -344,6 +413,7 @@ async def test_free_with_non_sharer_asks_them_by_name(
     # No "reply with" and no numbered menu; "השבוע" or "21.00" are fine.
     assert not re.search(r"\bהשב\b|\breply\b|^\s*1[.)]\s", reply, re.I | re.M), reply
     assert any(name in reply for name in ("Dana", "Noa", "דנה", "נועה")), reply
+    _plain_hebrew(reply)
     _no_secrets(reply)
 
 
@@ -410,6 +480,7 @@ async def test_ok_go_ahead_counts(llm: AnthropicLLM) -> None:
             id="answers-another-member",
         ),
         pytest.param("Mom says it's fine", "Yael", ASKED_YAEL, id="for-someone-else"),
+        pytest.param("Dad's fine with it", "Yael", ASKED_YAEL, id="for-someone-else-dad"),
         pytest.param("אמא אומרת שזה בסדר", "יעל", ASKED_YAEL_HE, id="for-someone-else-he"),
         pytest.param("no thanks", "Yael", ASKED_YAEL, id="declines"),
         pytest.param("לא, תודה", "יעל", ASKED_YAEL_HE, id="declines-he"),

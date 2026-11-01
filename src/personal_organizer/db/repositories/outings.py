@@ -77,10 +77,12 @@ async def get_poll(session: AsyncSession, poll_id: UUID) -> GroupPoll | None:
 
 
 async def open_polls(session: AsyncSession, group_id: UUID, now: datetime) -> list[GroupPoll]:
-    """The group's open polls whose event hasn't started, soonest first."""
+    """The group's open polls that went out and whose event hasn't started, soonest first. A
+    poll is stored before it is sent, so one with no message id was never seen."""
     stmt = (
         select(GroupPoll)
         .where(GroupPoll.group_id == group_id, GroupPoll.status == "open")
+        .where(GroupPoll.provider_message_id.is_not(None))
         .where(GroupPoll.starts_at > now)
         .order_by(GroupPoll.starts_at, GroupPoll.id)
     )
