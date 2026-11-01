@@ -27,9 +27,7 @@ however it is phrased. A message answers the most recent line it fits: if, after
 someone else put a suggestion, a question or a plan to the group and the last message most \
 naturally answers that newer line, it is not an answer to you, even if it says yes. Only the \
 writer's own decision about their own calendar is an okay: passing on what someone else said, \
-allows or agreed to is not, unless the writer also gives their own okay. A message can do both: \
-when the writer says it's fine with them, that is their okay, whoever else they mention. \
-Answer with \
+allows or agreed to is not, unless the writer also gives their own okay. Answer with \
 exactly one word: YES only if its writer is answering your request to see their own calendar \
 and okays it, with nothing more recent from anyone else that it could be answering instead, or \
 NO if they decline, answer someone else, talk about something else, speak for someone else, or \
