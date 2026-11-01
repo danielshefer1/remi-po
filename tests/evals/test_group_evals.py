@@ -115,6 +115,11 @@ async def _group_turn(
     return reply.strip()
 
 
+def _plain_hebrew(reply: str) -> None:
+    """Words Remi made up or borrowed (#69): a poll is סקר, and "תמונה" said nothing."""
+    assert not re.search(r"פולי|פולינג|תמונה", reply), reply
+
+
 def _no_secrets(reply: str) -> None:
     assert not any(secret.casefold() in reply.casefold() for secret in SECRETS), reply
     assert "http" not in reply.lower(), reply
@@ -214,6 +219,8 @@ async def test_dinner_at_seven_sets_up_one_outing(
     assert start == _friday(19), outing
     assert reply, "a short line to the group"
     assert not re.search(PROMISES_EDIT, reply, re.I), reply
+    _plain_hebrew(reply)
+    assert reply.count("היום") <= 1, reply
     _no_secrets(reply)
 
 
@@ -243,6 +250,8 @@ async def test_an_assumed_length_is_said(
     end = datetime.fromisoformat(str(outing["end"]))
     assert (end - start).total_seconds() == 2 * 3600, outing
     assert re.search(mentions, reply, re.IGNORECASE), reply
+    _plain_hebrew(reply)
+    assert reply.count("היום") <= 1, reply
 
 
 @pytest.mark.parametrize(
@@ -276,6 +285,7 @@ async def test_poll_already_posted_is_not_said_unsent(
     assert group.windows, "who_is_free must be asked"
     assert not group.outings, "the poll is already out"
     assert not re.search(SAYS_UNSENT, reply, re.I), reply
+    _plain_hebrew(reply)
     _no_secrets(reply)
 
 
@@ -400,6 +410,7 @@ async def test_free_with_non_sharer_asks_them_by_name(
     # No "reply with" and no numbered menu; "השבוע" or "21.00" are fine.
     assert not re.search(r"\bהשב\b|\breply\b|^\s*1[.)]\s", reply, re.I | re.M), reply
     assert any(name in reply for name in ("Dana", "Noa", "דנה", "נועה")), reply
+    _plain_hebrew(reply)
     _no_secrets(reply)
 
 
