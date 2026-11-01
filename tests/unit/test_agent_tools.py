@@ -1021,7 +1021,7 @@ def _pilates_on(day: int) -> CalendarEvent:
 
 class TestListNumbers:
     async def test_list_events_numbers_and_flags(self) -> None:
-        calendar, listed = _calendar(*WEEK), []
+        calendar, listed = _calendar(*WEEK), list[CalendarEvent]()
         first = await read_calendar(
             {"start": "2026-10-29T00:00", "end": "2026-11-01T00:00"},
             calendar=calendar,

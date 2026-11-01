@@ -249,6 +249,7 @@ async def test_google_all_patches_master(db: Database) -> None:
         CLASS_AT + timedelta(hours=1),
         CLASS_AT + timedelta(hours=2),
     )
+    assert isinstance(args["start"], datetime)
     assert args["start"].tzinfo is JLM  # so Google keeps the series in the member's zone
     # The copy is refreshed from the day before the changed date; the sync gets the rest.
     later = await cal.events(listed[2].start - timedelta(days=1), WIDE[1])
@@ -327,7 +328,7 @@ async def test_google_following_delete_only_ends(db: Database) -> None:
 async def test_google_following_create_fails_is_split(db: Database) -> None:
     cal, google, listed = await _google_series(db)
 
-    async def down(*args: Any) -> CalendarEvent:
+    async def down(account_id: str, user_id: str, event: CalendarEvent) -> CalendarEvent:
         raise CalendarProviderUnavailableError("down")
 
     google.create_event = down  # type: ignore[method-assign]
@@ -412,4 +413,5 @@ async def test_google_all_day_dates_are_the_members(db: Database) -> None:
     await cal.change(EventChange(listed[0], which="this", start=listed[0].start, end=listed[0].end))
     [(_, _, ended), (_, _, moved)] = google.writes
     assert ended["recurrence"] == ["RRULE:FREQ=WEEKLY;UNTIL=20261104"]
+    assert isinstance(moved["start"], datetime)
     assert (moved["start"].date().isoformat(), moved["all_day"]) == ("2026-10-29", True)
