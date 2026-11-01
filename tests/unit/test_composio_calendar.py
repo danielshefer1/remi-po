@@ -27,7 +27,10 @@ from personal_organizer.core.errors import (
 from personal_organizer.interfaces.calendar import CalendarEvent, CalendarProvider
 from personal_organizer.providers.calendar.composio import (
     CREATE_EVENT,
+    DELETE_EVENT,
+    GET_EVENT,
     LIST_EVENTS,
+    PATCH_EVENT,
     TOOLKIT_VERSION,
 )
 from tests.unit.test_composio_connector import NO_RETRY, TENANT, Api, Route, connector
@@ -196,6 +199,7 @@ class TestBinding:
                 "end_datetime": "2026-10-15T22:00:00+03:00",
                 "timezone": "Asia/Jerusalem",
                 "location": "Port Said",
+                "send_updates": "none",
             },
         }
 
@@ -294,6 +298,139 @@ class TestRecurrence:
             await connector(api).create_event(
                 ACCOUNT, TENANT, replace(DINNER, rule="FREQ=WEEKLY;BYDAY=TH")
             )
+
+
+def one_api(slug: str, data: dict[str, Any], *, successful: bool = True) -> Api:
+    return Api(
+        {
+            schema_route(slug): schema(slug),
+            execute_route(slug): executed(data, successful=successful),
+        }
+    )
+
+
+# Argument names from the pinned toolkit's schemas (20261010_00, fetched 2026-10-29).
+class TestChanges:
+    async def test_create_sends_no_updates(self) -> None:
+        api = create_api()
+        await connector(api).create_event(ACCOUNT, TENANT, DINNER)
+        assert sent(api, CREATE_EVENT)["arguments"]["send_updates"] == "none"
+
+    async def test_patch_builds_typed_arguments(self) -> None:
+        api = one_api(PATCH_EVENT, {"response_data": {}})
+        await connector(api).update_event(
+            ACCOUNT,
+            TENANT,
+            "ev_1",
+            title="Supper",
+            start=datetime(2026, 10, 15, 21, tzinfo=ZONE),
+            end=datetime(2026, 10, 15, 23, tzinfo=ZONE),
+            location="",
+            recurrence=["RRULE:FREQ=WEEKLY;UNTIL=20261231T215959Z"],
+        )
+        assert sent(api, PATCH_EVENT) == {
+            "connected_account_id": ACCOUNT,
+            "user_id": TENANT,
+            "version": TOOLKIT_VERSION,
+            "arguments": {
+                "calendar_id": "primary",
+                "event_id": "ev_1",
+                "send_updates": "none",
+                "summary": "Supper",
+                "start_time": "2026-10-15T21:00:00+03:00",
+                "end_time": "2026-10-15T23:00:00+03:00",
+                "timezone": "Asia/Jerusalem",
+                "location": "",
+                "recurrence": ["RRULE:FREQ=WEEKLY;UNTIL=20261231T215959Z"],
+            },
+        }
+
+    async def test_patch_sends_only_what_is_given(self) -> None:
+        api = one_api(PATCH_EVENT, {})
+        await connector(api).update_event(ACCOUNT, TENANT, "ev_1", title="Supper")
+        assert sent(api, PATCH_EVENT)["arguments"] == {
+            "calendar_id": "primary",
+            "event_id": "ev_1",
+            "send_updates": "none",
+            "summary": "Supper",
+        }
+
+    async def test_patch_all_day_dates(self) -> None:
+        api = one_api(PATCH_EVENT, {})
+        await connector(api).update_event(
+            ACCOUNT, TENANT, "ev_1", start=START, end=END, all_day=True
+        )
+        arguments = sent(api, PATCH_EVENT)["arguments"]
+        assert (arguments["start_time"], arguments["end_time"]) == ("2026-10-13", "2026-10-14")
+
+    async def test_delete_sends_no_updates(self) -> None:
+        api = one_api(DELETE_EVENT, {})
+        await connector(api).delete_event(ACCOUNT, TENANT, "ev_1")
+        assert sent(api, DELETE_EVENT) == {
+            "connected_account_id": ACCOUNT,
+            "user_id": TENANT,
+            "version": TOOLKIT_VERSION,
+            "arguments": {"calendar_id": "primary", "event_id": "ev_1", "send_updates": "none"},
+        }
+
+    @pytest.mark.parametrize("status", [404, 410])
+    async def test_delete_gone_is_done(self, status: int) -> None:
+        api = one_api(DELETE_EVENT, {"status_code": status}, successful=False)
+        await connector(api).delete_event(ACCOUNT, TENANT, "ev_1")
+
+    async def test_delete_other_failures_still_raise(self) -> None:
+        api = one_api(DELETE_EVENT, {"status_code": 403}, successful=False)
+        with pytest.raises(CalendarProviderRejectedError):
+            await connector(api).delete_event(ACCOUNT, TENANT, "ev_1")
+
+    async def test_patch_gone_is_an_error(self) -> None:
+        api = one_api(PATCH_EVENT, {"status_code": 410}, successful=False)
+        with pytest.raises(CalendarProviderRejectedError):
+            await connector(api).update_event(ACCOUNT, TENANT, "ev_1", title="x")
+
+    async def test_get_series_reads_recurrence(self) -> None:
+        master = {
+            "id": "ser_1",
+            "summary": "Class",
+            "description": "SECRET",
+            "start": {"dateTime": "2026-10-04T18:00:00+03:00", "timeZone": "Asia/Jerusalem"},
+            "end": {"dateTime": "2026-10-04T19:00:00+03:00", "timeZone": "Asia/Jerusalem"},
+            "recurrence": ["RRULE:FREQ=WEEKLY;BYDAY=SU", "EXDATE:20261011T150000Z"],
+        }
+        api = one_api(GET_EVENT, master)
+        event, lines = await connector(api).get_series(ACCOUNT, TENANT, "ser_1", ZONE)
+        assert sent(api, GET_EVENT)["arguments"] == {"calendar_id": "primary", "event_id": "ser_1"}
+        assert event.external_id == "ser_1"
+        assert event.start == datetime(2026, 10, 4, 18, tzinfo=ZONE)
+        assert lines == ["RRULE:FREQ=WEEKLY;BYDAY=SU", "EXDATE:20261011T150000Z"]
+        assert "SECRET" not in repr(event)
+
+    @pytest.mark.parametrize("recurrence", ["RRULE:FREQ=DAILY", [1], {"a": 1}])
+    async def test_get_series_unreadable_recurrence_is_rejected(self, recurrence: Any) -> None:
+        master = {**CREATED["response_data"], "recurrence": recurrence}
+        with pytest.raises(CalendarProviderRejectedError):
+            await connector(one_api(GET_EVENT, master)).get_series(ACCOUNT, TENANT, "x", ZONE)
+
+    async def test_list_keeps_series_and_invited(self) -> None:
+        times = {
+            "start": {"dateTime": "2026-10-13T20:00:00+03:00"},
+            "end": {"dateTime": "2026-10-13T21:00:00+03:00"},
+        }
+        items = [
+            {
+                "id": "ser_1_20261013T170000Z",
+                "recurringEventId": "ser_1",
+                "organizer": {"email": "boss@example.com", "self": False},
+                **times,
+            },
+            {"id": "mine", "organizer": {"email": "me@example.com", "self": True}, **times},
+            {"id": "bare", **times},
+        ]
+        invite, mine, bare = await list_events(list_api({"items": items}))
+        assert (invite.series_id, invite.invited) == ("ser_1", True)
+        assert (mine.series_id, mine.invited) == (None, False)
+        assert (bare.series_id, bare.invited) == (None, False)
+        assert "boss@example.com" not in repr(invite)
 
 
 class TestParsing:

@@ -16,8 +16,8 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime
-from typing import Final, Protocol, runtime_checkable
+from datetime import datetime, tzinfo
+from typing import Final, Literal, Protocol, runtime_checkable
 
 #: The one connected-account status that means "tokens held, calls will work".
 ACCOUNT_ACTIVE: Final = "ACTIVE"
@@ -37,6 +37,25 @@ class CalendarEvent:
     location: str | None = None
     link: str | None = None
     rule: str | None = None
+    series_id: str | None = None
+    invited: bool = False
+
+
+Which = Literal["this", "following", "all"]
+
+
+@dataclass(frozen=True)
+class EventChange:
+    """A change to, or the deletion of, one event or part of a series."""
+
+    target: CalendarEvent  # the occurrence as list_events showed it
+    which: Which = "this"  # "this" for an event that doesn't repeat
+    delete: bool = False
+    title: str | None = None
+    start: datetime | None = None
+    end: datetime | None = None
+    location: str | None = None  # "" clears it
+    rule: str | None = None  # a new pattern; only with which="following"
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,6 +95,34 @@ class CalendarProvider(Protocol):
         """Add ``event`` (its ``external_id`` is ignored); return it as the provider stored it."""
         ...
 
+    async def update_event(
+        self,
+        account_id: str,
+        user_id: str,
+        event_id: str,
+        *,
+        title: str | None = None,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        all_day: bool = False,
+        location: str | None = None,
+        recurrence: Sequence[str] | None = None,
+    ) -> None:
+        """Change only the fields given (``location=""`` clears it; ``recurrence`` replaces the
+        series' lines). ``all_day`` says how ``start``/``end`` are sent: as dates."""
+        ...
+
+    async def delete_event(self, account_id: str, user_id: str, event_id: str) -> None:
+        """Delete one event, instance or (by its master id) series. Already gone is done."""
+        ...
+
+    async def get_series(
+        self, account_id: str, user_id: str, event_id: str, zone: tzinfo
+    ) -> tuple[CalendarEvent, list[str]]:
+        """A series' master and its ``recurrence`` lines (RRULE, EXDATE...) as the provider has
+        them; an all-day master's dates are read in ``zone``."""
+        ...
+
 
 __all__ = [
     "ACCOUNT_ACTIVE",
@@ -84,4 +131,6 @@ __all__ = [
     "CalendarProvider",
     "ConnectLinker",
     "ConnectedAccount",
+    "EventChange",
+    "Which",
 ]

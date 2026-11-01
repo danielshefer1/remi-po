@@ -22,10 +22,17 @@ from sqlalchemy.dialects.postgresql import INTERVAL
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from personal_organizer.core.errors import EventChangedError
 from personal_organizer.db.models.tenant import CalendarConnection, Event
 from personal_organizer.db.repositories.scope import scoped
-from personal_organizer.interfaces.calendar import CalendarEvent
-from personal_organizer.messaging.recurrence import occurrences
+from personal_organizer.interfaces.calendar import CalendarEvent, EventChange
+from personal_organizer.messaging.recurrence import (
+    first_at,
+    keep_until,
+    occurrences,
+    shift_until,
+    until_before,
+)
 
 #: How far ahead a sync, an import or a live refresh copies Google's events.
 IMPORT_AHEAD: Final = timedelta(days=90)
@@ -42,6 +49,8 @@ def _to_event(row: Event, zone: tzinfo | None = None) -> CalendarEvent:
         all_day=row.all_day,
         location=row.location,
         rule=row.rule,
+        series_id=row.series_id,
+        invited=row.invited,
     )
 
 
@@ -52,8 +61,10 @@ async def add_event(
     *,
     source: str,
     external_id: str | None = None,
+    original_start: datetime | None = None,
 ) -> CalendarEvent:
     """Store ``event``; its ``external_id`` is the given one, or the new row's id.
+    ``original_start`` is the series date a changed single date replaces.
 
     ``None`` and ``""`` both mean "no id" (the codebase's ``CalendarEvent("", ...)``).
     """
@@ -70,6 +81,8 @@ async def add_event(
             source=source,
             external_id=external_id,
             rule=event.rule,
+            series_id=event.series_id,
+            original_start=original_start,
         )
         .returning(Event.id)
     )
@@ -86,6 +99,7 @@ async def add_event(
         all_day=event.all_day,
         location=event.location,
         rule=event.rule,
+        series_id=event.series_id,
     )
 
 
@@ -109,7 +123,7 @@ async def events_between(
             )
         )
     )
-    found = [o for row in rows for o in occurrences(_to_event(row), start, end, zone)]
+    found = [o for row in rows for o in occurrences(_to_event(row), start, end, zone, row.skipped)]
     found = [
         replace(e, start=e.start.astimezone(start.tzinfo), end=e.end.astimezone(start.tzinfo))
         for e in found
@@ -156,6 +170,8 @@ async def _upsert_google(
                 "location": e.location,
                 "source": "google",
                 "external_id": e.external_id,
+                "series_id": e.series_id,
+                "invited": e.invited,
             }
             for e in events
         ]
@@ -170,9 +186,192 @@ async def _upsert_google(
                 "all_day": stmt.excluded.all_day,
                 "location": stmt.excluded.location,
                 "source": stmt.excluded.source,
+                "series_id": stmt.excluded.series_id,
+                "invited": stmt.excluded.invited,
             },
         )
     )
+
+
+async def find_row(session: AsyncSession, tenant_id: UUID, external_id: str) -> Event | None:
+    """The row with ``external_id``; failing that, the ``remi`` series row a native occurrence id
+    ``<row id>:<YYYYMMDDTHHMM>`` names. Exact first: Google's own ids may hold ':' too."""
+    row: Event | None = await session.scalar(
+        scoped(select(Event), Event, tenant_id).where(Event.external_id == external_id)
+    )
+    if row is None and ":" in external_id:
+        row = await session.scalar(
+            scoped(select(Event), Event, tenant_id).where(
+                Event.external_id == external_id.rpartition(":")[0],
+                Event.source == "remi",
+                Event.rule.is_not(None),
+            )
+        )
+    return row
+
+
+async def change_event(
+    session: AsyncSession, tenant_id: UUID, change: EventChange, zone: tzinfo
+) -> None:
+    """Apply ``change`` to Remi's own rows. Raises :class:`EventChangedError`, writing nothing,
+    when the target is no longer there as it was listed (gone, renamed, moved or skipped).
+
+    A series is changed on the wall clock in ``zone``, as :func:`occurrences` reads it: one date
+    is skipped (and, if changed, stored as its own row), "following" ends the series just before
+    the date and starts a new one there, "all" shifts the whole series and its skips.
+    """
+    target = change.target
+    row = await find_row(session, tenant_id, target.external_id)
+    if row is None or row.source != "remi" or row.title != target.title:
+        raise EventChangedError
+    if row.rule is None:
+        if row.starts_at != target.start:
+            raise EventChangedError
+        if row.series_id is None or change.which == "this":
+            await _change_row(session, row, change, zone)
+            return
+        # One changed date of a series: "following" and "all" act on the series from its date.
+        series, at = await find_row(session, tenant_id, row.series_id), row.original_start
+        if series is None or series.source != "remi" or series.rule is None or at is None:
+            raise EventChangedError
+        row = series
+    else:
+        at = target.start
+        near = occurrences(_to_event(row), at - _MINUTE, at + _MINUTE, zone, row.skipped)
+        if not any(o.start == at for o in near):
+            raise EventChangedError
+    at = at.astimezone(zone)
+    if change.which == "this":
+        await _change_date(session, tenant_id, row, change, at, zone)
+    elif change.which == "following" and (at > row.starts_at or change.rule):
+        await _change_following(session, tenant_id, row, change, at, zone)
+    else:
+        await _change_all(session, tenant_id, row, change, at, zone)
+
+
+_MINUTE: Final = timedelta(minutes=1)
+
+
+def _moved(
+    change: EventChange, start: datetime, end: datetime, zone: tzinfo
+) -> tuple[datetime, datetime]:
+    """The new start and end of a ``start``-``end`` occurrence; an end not given moves with the
+    start (on the wall clock, so an hour stays an hour across DST)."""
+    start, end = start.astimezone(zone), end.astimezone(zone)
+    new_start = change.start.astimezone(zone) if change.start else start
+    return new_start, change.end or end + (new_start - start)
+
+
+def _occurrence_end(row: Event, at: datetime, zone: tzinfo) -> datetime:
+    return at + (row.ends_at.astimezone(zone) - row.starts_at.astimezone(zone))
+
+
+def _changed(row: Event, change: EventChange, start: datetime, end: datetime) -> CalendarEvent:
+    """``row``'s title, location and all-day flag, changed where ``change`` gives them."""
+    location = row.location if change.location is None else change.location or None
+    title = change.title or row.title
+    return CalendarEvent("", title, start, end, all_day=row.all_day, location=location)
+
+
+def _set(row: Event, new: CalendarEvent) -> None:
+    row.title, row.location = new.title, new.location
+    row.starts_at, row.ends_at = new.start, new.end
+
+
+async def _change_row(session: AsyncSession, row: Event, change: EventChange, zone: tzinfo) -> None:
+    """An event that doesn't repeat, or one changed date of a series."""
+    if change.delete:
+        await session.delete(row)
+        return
+    _set(row, _changed(row, change, *_moved(change, row.starts_at, row.ends_at, zone)))
+
+
+async def _change_date(
+    session: AsyncSession,
+    tenant_id: UUID,
+    row: Event,
+    change: EventChange,
+    at: datetime,
+    zone: tzinfo,
+) -> None:
+    row.skipped = [*row.skipped, at]
+    if not change.delete:
+        times = _moved(change, at, _occurrence_end(row, at, zone), zone)
+        date = replace(_changed(row, change, *times), series_id=row.external_id)
+        await add_event(session, tenant_id, date, source="remi", original_start=at)
+
+
+async def _change_following(
+    session: AsyncSession,
+    tenant_id: UUID,
+    row: Event,
+    change: EventChange,
+    at: datetime,
+    zone: tzinfo,
+) -> None:
+    """End the series just before ``at``; the dates after it are replaced, skips and changed
+    single dates included, by the new series (none for a delete). From its first date, with a
+    new pattern, the new series replaces it."""
+    assert row.rule is not None
+    rule = row.rule
+    if at > row.starts_at:
+        row.rule = until_before(rule, at)
+        row.skipped = [s for s in row.skipped if s < at]
+    else:
+        await session.delete(row)
+    await session.execute(
+        scoped(delete(Event), Event, tenant_id).where(
+            Event.series_id == row.external_id,
+            Event.source == "remi",
+            Event.original_start >= at,
+        )
+    )
+    if change.delete:
+        return
+    start, end = _moved(change, at, _occurrence_end(row, at, zone), zone)
+    if change.rule:
+        first = first_at(change.rule, start)
+        start, end, rule = first, end + (first - start), keep_until(change.rule, rule)
+    else:
+        rule = shift_until(rule, start - at)
+    await add_event(
+        session, tenant_id, replace(_changed(row, change, start, end), rule=rule), source="remi"
+    )
+
+
+async def _change_all(
+    session: AsyncSession,
+    tenant_id: UUID,
+    row: Event,
+    change: EventChange,
+    at: datetime,
+    zone: tzinfo,
+) -> None:
+    """Delete the series and its changed dates, or change it: a new time for ``at`` shifts every
+    date, skip and ``UNTIL`` by as much; changed single dates keep their own times."""
+    of_series = scoped(select(Event), Event, tenant_id).where(
+        Event.series_id == row.external_id, Event.source == "remi"
+    )
+    if change.delete:
+        await session.execute(
+            scoped(delete(Event), Event, tenant_id).where(
+                or_(Event.id == row.id, Event.id.in_(of_series.with_only_columns(Event.id)))
+            )
+        )
+        return
+    assert row.rule is not None
+    end = _occurrence_end(row, at, zone)
+    start, new_end = _moved(change, at, end, zone)
+    by = start - at
+    new_ends_at = row.ends_at.astimezone(zone) + (new_end - end)
+    _set(row, _changed(row, change, row.starts_at.astimezone(zone) + by, new_ends_at))
+    row.rule = shift_until(row.rule, by)
+    row.skipped = [s.astimezone(zone) + by for s in row.skipped]
+    if by:
+        # Keep each changed date pointing at the (still skipped) date it replaces.
+        for date in await session.scalars(of_series):
+            if date.original_start is not None:
+                date.original_start = date.original_start.astimezone(zone) + by
 
 
 async def mark_synced(session: AsyncSession, tenant_id: UUID, now: datetime) -> None:
@@ -197,8 +396,10 @@ __all__ = [
     "IMPORT_AHEAD",
     "SYNC_EVERY",
     "add_event",
+    "change_event",
     "due_syncs",
     "events_between",
+    "find_row",
     "mark_synced",
     "replace_imported",
     "upsert_google",
