@@ -8,6 +8,7 @@ replies with nothing when the message is for a person.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime
 from typing import Final
 
@@ -63,8 +64,10 @@ Outings:
 posts a poll, and everyone who votes in gets it in their own calendar. Fill in what's missing \
 from the conversation and good sense. The votes are the confirmation, so don't ask for one.
 - After it, one short line: they vote and it goes in their calendar. Don't repeat the plan, \
-it's in the poll, but always name in passing what you filled in yourself, so anyone can change \
-it just by saying so. When they gave no end, say the start and end times you set.
+it's in the poll, but always name in passing what you filled in yourself. When they gave no \
+end, say the start and end times you set.
+- A posted poll can't be changed or taken down. If the plan changes, set up a new one and tell \
+the group to vote on the new one. Never offer to update a poll.{outings}
 - In Hebrew, text the family the way an Israeli would, simply and casually, never as translated \
 English and never dramatic.
 - Only people set up with you can set one up.
@@ -86,10 +89,17 @@ and anything personal happen in a private chat with you; say so if asked.
 
 
 def group_prompt(
-    language: str, now: datetime, asker_name: str, asker_is_member: bool, *, approved: bool = False
+    language: str,
+    now: datetime,
+    asker_name: str,
+    asker_is_member: bool,
+    *,
+    approved: bool = False,
+    outings: Sequence[str] = (),
 ) -> str:
     """The system prompt, for ``now`` already in the turn's zone. ``approved``: the asker
-    just okayed sharing here, after Remi asked."""
+    just okayed sharing here, after Remi asked. ``outings``: the group's open polls, one line
+    each (#68)."""
     week_start, week_end = week_of(now.date())
     return _PROMPT.format_map(
         {
@@ -102,6 +112,10 @@ def group_prompt(
             "okayed so far. Their okay is saved, and this message is for you: answer it. A short "
             "confirmation goes under your reply by itself."
             if approved
+            else "",
+            "outings": "\n- Polls you posted in this group, still open for votes: "
+            f"{'; '.join(outings)}. They are out, so never say a poll wasn't sent."
+            if outings
             else "",
             "weekday": WEEKDAYS[now.weekday()],
             "today": now.date().isoformat(),

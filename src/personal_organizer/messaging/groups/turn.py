@@ -59,11 +59,18 @@ from personal_organizer.db.repositories.groups import (
     set_display_name,
     set_sharing,
 )
+from personal_organizer.db.repositories.outings import open_polls
 from personal_organizer.db.repositories.tenants import get_tenant
 from personal_organizer.interfaces.calendar import CalendarEvent, CalendarProvider
 from personal_organizer.interfaces.channel import OutboundChannel
 from personal_organizer.interfaces.llm import LLMProvider, Message
-from personal_organizer.messaging.agent import day_label, fit_message, read_window, shown_event
+from personal_organizer.messaging.agent import (
+    day_label,
+    fit_message,
+    outing_line,
+    read_window,
+    shown_event,
+)
 from personal_organizer.messaging.calendar import TenantCalendar
 from personal_organizer.messaging.conversation import converse
 from personal_organizer.messaging.groups.addressing import group_key
@@ -409,6 +416,8 @@ async def _answer(
     language = detect_language(row.body)
     zone = await _zone(db, turn.group_id, asker)
     history = await _history(db, row, turn)
+    async with db.system_session() as session:
+        polls = await open_polls(session, turn.group_id, turn.now)
     windows: list[tuple[datetime, datetime]] = []
     shared: list[bool] = [True] if approved else []
     posted: list[bool] = []
@@ -455,7 +464,12 @@ async def _answer(
 
     text = f"{asker_name}: {row.body or f'[{row.message_type}]'}"
     system = group_prompt(
-        language, turn.now.astimezone(zone), asker_name, asker is not None, approved=approved
+        language,
+        turn.now.astimezone(zone),
+        asker_name,
+        asker is not None,
+        approved=approved,
+        outings=tuple(outing_line(poll, zone) for poll in polls),
     )
     with structlog.contextvars.bound_contextvars(inbox_id=str(row.id)):
         try:

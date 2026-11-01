@@ -99,9 +99,10 @@ async def _group_turn(
     history: tuple[Message, ...] = (),
     asker: str = "Dana",
     approved: bool = False,
+    outings: Sequence[str] = (),
 ) -> str:
     language = detect_language(text)
-    system = group_prompt(language, LOCAL_NOW, asker, True, approved=approved)
+    system = group_prompt(language, LOCAL_NOW, asker, True, approved=approved, outings=outings)
     reply = await converse(
         history,
         f"{asker}: {text}",
@@ -172,6 +173,29 @@ FOLLOW_UP_HE = (
     Message("user", "עדן: נשמע מעולה"),
 )
 
+#: A promise to change a posted poll, which no tool can do (#68).
+PROMISES_EDIT = r"אעדכן|אשנה את (ה)?סקר|I'll (update|change)|update (it|the poll)"
+#: Saying the poll that just went out wasn't sent (#68).
+SAYS_UNSENT = (
+    r"not (been )?(sent|posted)|hasn't (gone out|been sent)"
+    r"|לא נשלח|לא פורסם|עדיין לא (נשלח|פורסם|נפתח)|אפתח"
+)
+DINNER_POLL = "Family dinner, Friday 2026-10-23, 19:00-21:00"
+DINNER_POLL_HE = "ארוחת ערב, יום שישי 2026-10-23, 19:00-21:00"
+#: The group right after Remi posted the dinner poll, as ``_history`` gives it.
+POSTED_DINNER = (
+    *FOLLOW_UP,
+    Message("user", "Dana: Remi, let's do dinner at 7, set it up"),
+    Message("assistant", f"{DINNER_POLL} (I'm in / Can't make it)"),
+    Message("assistant", "Vote in the poll and it goes in your calendar. I made it 7 to 9."),
+)
+POSTED_DINNER_HE = (
+    *FOLLOW_UP_HE,
+    Message("user", "דנה: רמי, בוא נעשה ארוחת ערב ב-7, תסדר את זה"),
+    Message("assistant", f"{DINNER_POLL_HE} (אני בפנים / לא מסתדר לי)"),
+    Message("assistant", "תצביעו בסקר וזה ייכנס לכם ליומן. שמתי מ-19:00 עד 21:00."),
+)
+
 
 @pytest.mark.parametrize(
     ("text", "history"),
@@ -189,6 +213,7 @@ async def test_dinner_at_seven_sets_up_one_outing(
     start = datetime.fromisoformat(str(outing["start"])).replace(tzinfo=ZONE)
     assert start == _friday(19), outing
     assert reply, "a short line to the group"
+    assert not re.search(PROMISES_EDIT, reply, re.I), reply
     _no_secrets(reply)
 
 
@@ -233,6 +258,37 @@ async def test_a_message_to_a_family_member_named_rami_is_met_with_silence(
     assert reply == "", reply
     assert not group.windows
     assert not group.outings
+
+
+@pytest.mark.parametrize(
+    ("text", "history", "poll"),
+    [
+        ("Remi, can you check if the others can make it?", POSTED_DINNER, DINNER_POLL),
+        ("רמי, אתה יכול לבדוק אם השאר יכולים?", POSTED_DINNER_HE, DINNER_POLL_HE),
+    ],
+)
+async def test_poll_already_posted_is_not_said_unsent(
+    text: str, history: tuple[Message, ...], poll: str, llm: AnthropicLLM
+) -> None:
+    """Right after the poll went out, a who-can-come question doesn't call it unsent (#68)."""
+    group = Group()
+    reply = await _group_turn(text, llm, group, history=history, outings=(poll,))
+    assert group.windows, "who_is_free must be asked"
+    assert not group.outings, "the poll is already out"
+    assert not re.search(SAYS_UNSENT, reply, re.I), reply
+    _no_secrets(reply)
+
+
+async def test_a_change_sets_up_a_new_poll(llm: AnthropicLLM) -> None:
+    """A posted poll can't be edited: a new time is a new poll, not a promise (#68)."""
+    group = Group()
+    reply = await _group_turn(
+        "Remi, make it 8 instead", llm, group, history=POSTED_DINNER, outings=(DINNER_POLL,)
+    )
+    [outing] = group.outings
+    start = datetime.fromisoformat(str(outing["start"])).replace(tzinfo=ZONE)
+    assert start == _friday(20), outing
+    assert not re.search(PROMISES_EDIT, reply, re.I), reply
 
 
 def _poll(title: str, language: str) -> GroupPoll:

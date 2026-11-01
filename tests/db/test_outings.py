@@ -172,6 +172,19 @@ async def test_set_up_outing_posts_one_poll(
     assert any(row["sender_name"] == "Remi" and "Family dinner" in row["body"] for row in context)
 
 
+async def test_open_outing_is_in_the_next_prompt(db: Database, family: Group, group: UUID) -> None:
+    """The next turn's prompt lists the poll as open, so Remi can't say it wasn't sent (#68)."""
+    await _member(db, group, DANA, "Dana", "ca_dana")
+    await family.set_up()
+
+    llm = ScriptedLLM(said("Noa's free."))
+    await family.say(llm, body="Remi, can you check if the others can make it?")
+
+    system = llm.calls[0][0]
+    assert system.role == "system"
+    assert "still open for votes: Family dinner" in system.content
+
+
 async def test_stranger_cannot_set_up_outing(
     db: Database, owner_conn: Any, family: Group, group: UUID
 ) -> None:
