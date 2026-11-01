@@ -16,6 +16,7 @@ from uuid import UUID
 import pytest
 from sqlalchemy import select, update
 
+from personal_organizer.core.errors import RejectedChannelError
 from personal_organizer.core.types import TenantId
 from personal_organizer.db.engine import Database
 from personal_organizer.db.models.tenant import GroupMember, PollAnswer
@@ -183,6 +184,20 @@ async def test_open_outing_is_in_the_next_prompt(db: Database, family: Group, gr
     system = llm.calls[0][0]
     assert system.role == "system"
     assert "still open for votes: Family dinner" in system.content
+
+
+async def test_poll_that_never_went_out_is_not_open(
+    db: Database, family: Group, group: UUID
+) -> None:
+    """A rejected poll stays unsent: no prompt may call it out, and no one is asked about it."""
+    await _member(db, group, DANA, "Dana", "ca_dana")
+    family.channel = FakeOutbound(RejectedChannelError(131026), name="gowa")
+    await family.say(ScriptedLLM(said("", DINNER), said("I couldn't post it just now.")))
+
+    llm = ScriptedLLM(said("Noa's free."))
+    await family.say(llm, body="Remi, can you check if the others can make it?")
+
+    assert "still open for votes" not in llm.calls[0][0].content
 
 
 async def test_stranger_cannot_set_up_outing(

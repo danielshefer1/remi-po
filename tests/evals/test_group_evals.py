@@ -183,7 +183,7 @@ PROMISES_EDIT = r"אעדכן|אשנה את (ה)?סקר|I'll (update|change)|upda
 #: Saying the poll that just went out wasn't sent (#68).
 SAYS_UNSENT = (
     r"not (been )?(sent|posted)|hasn't (gone out|been sent)"
-    r"|לא נשלח|לא פורסם|עדיין לא (נשלח|פורסם|נפתח)|אפתח"
+    r"|לא נשלח|לא פורסם|עדיין לא (נשלח|פורסם|נפתח)|ואז אפתח"
 )
 DINNER_POLL = "Family dinner, Friday 2026-10-23, 19:00-21:00"
 DINNER_POLL_HE = "ארוחת ערב, יום שישי 2026-10-23, 19:00-21:00"
