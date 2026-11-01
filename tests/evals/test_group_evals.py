@@ -410,6 +410,7 @@ async def test_ok_go_ahead_counts(llm: AnthropicLLM) -> None:
             id="answers-another-member",
         ),
         pytest.param("Mom says it's fine", "Yael", ASKED_YAEL, id="for-someone-else"),
+        pytest.param("Dad's fine with it", "Yael", ASKED_YAEL, id="for-someone-else-dad"),
         pytest.param("אמא אומרת שזה בסדר", "יעל", ASKED_YAEL_HE, id="for-someone-else-he"),
         pytest.param("no thanks", "Yael", ASKED_YAEL, id="declines"),
         pytest.param("לא, תודה", "יעל", ASKED_YAEL_HE, id="declines-he"),
@@ -450,3 +451,21 @@ async def test_not_an_okay(
 ) -> None:
     """Read as ``_okayed`` reads it, none of these okays the writer's own calendar."""
     assert not await approves(f"{asker}: {text}", context=history, llm=llm), text
+
+
+@pytest.mark.parametrize(
+    ("text", "asker", "history"),
+    [
+        pytest.param(
+            "fine by me, Mom already said yes", "Yael", ASKED_YAEL, id="own-okay-mentions-mom"
+        ),
+        pytest.param(
+            "מבחינתי בסדר, גם אמא אישרה", "יעל", ASKED_YAEL_HE, id="own-okay-mentions-mom-he"
+        ),
+    ],
+)
+async def test_still_an_okay(
+    text: str, asker: str, history: tuple[Message, ...], llm: AnthropicLLM
+) -> None:
+    """The writer's own okay counts, even when they also pass on someone else's (#67)."""
+    assert await approves(f"{asker}: {text}", context=history, llm=llm), text
