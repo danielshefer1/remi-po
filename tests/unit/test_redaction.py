@@ -42,6 +42,13 @@ class TestAllowlistHygiene:
     def test_content_keys_are_not_safe(self) -> None:
         assert SAFE_KEYS.isdisjoint(CONTENT_KEYS)
 
+    def test_embedding_counts_survive_but_text_does_not(self) -> None:
+        out = redact_event(
+            {"text_count": 3, "tokens_in": 40, "text": "hello world"}, pepper="pepper"
+        )
+        assert (out["text_count"], out["tokens_in"]) == (3, 40)
+        assert out["text"] != "hello world"
+
 
 class TestScrubText:
     @pytest.mark.parametrize("value", PATTERN_PII)

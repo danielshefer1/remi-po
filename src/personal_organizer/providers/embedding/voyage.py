@@ -89,7 +89,7 @@ class VoyageEmbedder:
             raise EmbeddingRejectedError("embedding response unusable") from None
         if len(vectors) != len(texts) or any(len(v) != self._dimensions for v in vectors):
             raise EmbeddingRejectedError("embedding response unusable")
-        log.info("embedding.completed", model=self._model, texts=len(texts), tokens=tokens)
+        log.info("embedding.completed", model=self._model, text_count=len(texts), tokens_in=tokens)
         return vectors
 
 

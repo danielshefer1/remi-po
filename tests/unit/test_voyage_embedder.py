@@ -130,7 +130,7 @@ async def test_a_success_logs_counts_only(settings_factory: Any) -> None:
     with capture_logs() as logs:
         await _embedder(settings_factory, _ok([VECTOR], [])).embed([TEXT], kind="document")
     assert logs[0]["event"] == "embedding.completed"
-    assert (logs[0]["texts"], logs[0]["tokens"]) == (1, 3)
+    assert (logs[0]["text_count"], logs[0]["tokens_in"]) == (1, 3)
     assert TEXT not in repr(logs)
     assert "embed-test-key" not in repr(logs)
 
