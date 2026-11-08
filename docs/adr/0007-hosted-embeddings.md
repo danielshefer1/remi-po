@@ -5,11 +5,11 @@ Decision).
 
 ## Context
 
-Memory recall needs embeddings. Running Qwen3-Embedding-0.6B ourselves measured weak Hebrew
-recall and costs about $24 a month for the memory it needs (qwen-embeddings-measured,
-2026-10-17). A hosted model costs cents at the circle's size. This bake-off reruns the
+Matching a request to a saved skill needs embeddings (#78). Notes stay all-in-prompt and are
+out of scope. Running Qwen3-Embedding-0.6B ourselves measured weak Hebrew recall and costs
+about $24 a month for the RAM it needs (#78, 2026-10-17). A hosted model costs cents at the circle's size. This bake-off reruns the
 original 20-note, 20-question set (the one Qwen was tested on, recovered from its transcript
-and kept as `scripts/embedding_bakeoff.py`), so Qwen's numbers are directly comparable
+and kept as `scripts/embedding_bakeoff_set.json`, which `scripts/embedding_bakeoff.py` runs), so Qwen's numbers are directly comparable
 without a control run. The set is invented, so sending it to both vendors exposed no one's
 words.
 
@@ -66,27 +66,28 @@ voyage-4-large 26, voyage-4 26, embed-multilingual-v3.0 25.
    and the rule bars those. Not resolvable.
 6. Still tied: STOP, with a recommendation.
 
-Outcome: the rule stopped at step 6 and the owner chose `voyage-4` on 2026-11-08, on privacy and
-published price, since the quality differences were within the rule's noise.
+Outcome: the rule stopped at step 6. The recommendation put to the owner was `voyage-4`, and
+the owner accepted it on 2026-11-08.
 
-Reasons given for `voyage-4`: it has the best hit@1 of the tied group, passes every gate, is
-half the price of voyage-4-large on Voyage's own page, and ties or beats the others on
-quality within the noise the rule itself names. Two caveats: `embed-multilingual-v3.0` has the best raw hit@1 for
+The recommendation's grounds: quality was a tie within the rule's noise (`voyage-4` has the
+best hit@1 of the tied group and passes every gate); zero-day retention after opting out,
+against Cohere's 30-day logs; and a price published on the vendor's own page, half that of
+`voyage-4-large`. Two caveats: `embed-multilingual-v3.0` has the best raw hit@1 for
 Hebrew (19) but is weakest on Hebrew-English (5/7) and was out by the rule at step 4; and a Voyage opt-out needs a payment method (see Data use).
 
-Dimension, for whichever model is chosen: 1024. It is common to all four candidates and under
+Dimension: 1024. It is common to all four candidates and under
 the pgvector HNSW limit; storage at this scale is immaterial, so smaller sizes were not tested.
 
 ## Cost
 
 Assumptions: 50 people x 25 texts each x 200 tokens = 250,000 tokens, embedded once. At
-$0.12/M that is about $0.03; at $0.06/M (voyage-4) about $0.015. Queries add little. Against
+$0.12/M that is about $0.03; at $0.06/M (voyage-4) about $0.015. Query volume is unmeasured, but even at the same volume every month the cost stays a few cents a month. Against
 Qwen's about $24 a month for hosting. Voyage's first 200M tokens are free, which this
 volume would not exhaust.
 
 Prices, from the vendors' own pages: Voyage, `voyage-4-large` $0.12/M, `voyage-4` $0.06/M,
 200M free tokens (https://docs.voyageai.com/docs/pricing). Cohere: no Embed price on
-https://cohere.com/pricing. A third-party figure of $0.12/M for `embed-v5.0-pro` exists
+https://cohere.com/pricing (one tab of that page did not load). A third-party figure of $0.12/M for `embed-v5.0-pro` exists
 (aggregators such as cloudprice.net, getmaxim.ai); it is third-party and was not used by the
 rule.
 
@@ -109,7 +110,7 @@ generations are deleted after 30 days, with exceptions; the commitments cover ac
 card on file, and trial users fall under the general Terms and Privacy Policy
 (https://cohere.com/enterprise-data-commitments). Trial keys are capped at 1,000 API calls a
 month (https://docs.cohere.com/docs/rate-limits) and may not be used for production or
-commercial purposes (https://cohere.com/pricing). No page states the default for training in
+commercial purposes (https://cohere.com/pricing). None of the pages read states the default for training in
 plain words, though the opt-out wording implies it is on until opted out.
 `docs.cohere.com/docs/data-retention-and-opt-out` returned 404. Only part of
 https://cohere.com/terms-of-use was read.
