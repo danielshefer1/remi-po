@@ -1,0 +1,320 @@
+{
+ "english": {
+  "notes": [
+   "Wife: Dana, vegetarian",
+   "Son Yoav plays football on Tuesdays at 17:00",
+   "Works at Wix as a backend developer",
+   "His mother Rachel lives in Haifa",
+   "Allergic to peanuts",
+   "The dog is called Biscuit",
+   "Prefers meetings after 10:00",
+   "Daughter Noa studies at Ohel Shem high school",
+   "Gym on Sunday and Wednesday mornings",
+   "Family doctor: Dr. Cohen at Maccabi",
+   "Brother Avi lives in Berlin",
+   "Likes black coffee, no sugar",
+   "Car: white Mazda 3, service due every 15,000 km",
+   "Dana's birthday is March 12",
+   "Partner at work: Shira from the data team",
+   "Doesn't eat meat on Mondays",
+   "Kids' school ends at 13:30 on Fridays",
+   "Subscription to Habima theatre",
+   "Plays guitar, lessons with Erez on Thursdays",
+   "Upstairs neighbours: the Levi family"
+  ],
+  "questions": [
+   [
+    "What doesn't Dana eat?",
+    0
+   ],
+   [
+    "Book dinner with my wife on Thursday",
+    0
+   ],
+   [
+    "Remind me to pick Yoav up from practice",
+    1
+   ],
+   [
+    "When does my son have practice?",
+    1
+   ],
+   [
+    "I need to visit my mom this weekend",
+    3
+   ],
+   [
+    "Can you order me pad thai with peanuts?",
+    4
+   ],
+   [
+    "Need to take Biscuit to the vet",
+    5
+   ],
+   [
+    "Can you set the team sync for 9am?",
+    6
+   ],
+   [
+    "When is Noa's parent-teacher meeting?",
+    7
+   ],
+   [
+    "Am I free for a workout on Wednesday?",
+    8
+   ],
+   [
+    "I need a doctor's appointment",
+    9
+   ],
+   [
+    "What's the time difference to my brother?",
+    10
+   ],
+   [
+    "the car is making a weird noise",
+    12
+   ],
+   [
+    "What should I get my wife for her birthday?",
+    13
+   ],
+   [
+    "set a meeting with Shira",
+    14
+   ],
+   [
+    "Where should I have lunch on Monday?",
+    15
+   ],
+   [
+    "Who picks up the kids on Friday?",
+    16
+   ],
+   [
+    "Is there a good play this month?",
+    17
+   ],
+   [
+    "Move my guitar lesson",
+    18
+   ],
+   [
+    "Remind me to return the drill to the upstairs neighbours",
+    19
+   ]
+  ]
+ },
+ "hebrew": {
+  "notes": [
+   "אשתו: דנה, צמחונית",
+   "הבן יואב משחק כדורגל בימי שלישי ב-17:00",
+   "עובד בוויקס כמפתח backend",
+   "אמא שלו, רחל, גרה בחיפה",
+   "אלרגי לבוטנים",
+   "הכלב קוראים לו ביסקוויט",
+   "מעדיף פגישות אחרי 10:00",
+   "הבת נועה לומדת בתיכון אהל שם",
+   "חדר כושר בבקרים של ראשון ורביעי",
+   "רופא המשפחה: ד\"ר כהן בקופת חולים מכבי",
+   "האח אבי גר בברלין",
+   "אוהב קפה שחור בלי סוכר",
+   "רכב: מאזדה 3 לבנה, טיפול כל 15,000 ק\"מ",
+   "יום ההולדת של דנה ב-12 במרץ",
+   "שותפה בעבודה: שירה מצוות הדאטה",
+   "לא אוכל בשר בימי שני",
+   "הלימודים של הילדים נגמרים ב-13:30 בימי שישי",
+   "מנוי לתיאטרון הבימה",
+   "מנגן בגיטרה, שיעורים עם ארז בימי חמישי",
+   "השכנים מלמעלה: משפחת לוי"
+  ],
+  "questions": [
+   [
+    "מה דנה לא אוכלת?",
+    0
+   ],
+   [
+    "תזמין לי ארוחת ערב עם אשתי ביום חמישי",
+    0
+   ],
+   [
+    "תזכיר לי לאסוף את יואב מהאימון",
+    1
+   ],
+   [
+    "מתי יש לבן שלי אימון?",
+    1
+   ],
+   [
+    "אני צריך לבקר את אמא בסוף השבוע",
+    3
+   ],
+   [
+    "אפשר להזמין לי פד תאי עם בוטנים?",
+    4
+   ],
+   [
+    "צריך לקחת את ביסקוויט לווטרינר",
+    5
+   ],
+   [
+    "תקבע את הסנכרון של הצוות ל-9 בבוקר",
+    6
+   ],
+   [
+    "מתי האסיפת הורים של נועה?",
+    7
+   ],
+   [
+    "אני פנוי לאימון ביום רביעי?",
+    8
+   ],
+   [
+    "אני צריך תור לרופא",
+    9
+   ],
+   [
+    "כמה שעות הפרש לאחי?",
+    10
+   ],
+   [
+    "האוטו עושה רעש מוזר",
+    12
+   ],
+   [
+    "מה לקנות לאשתי ליום הולדת?",
+    13
+   ],
+   [
+    "תקבע פגישה עם שירה",
+    14
+   ],
+   [
+    "איפה כדאי לאכול צהריים ביום שני?",
+    15
+   ],
+   [
+    "מי אוסף את הילדים ביום שישי?",
+    16
+   ],
+   [
+    "יש הצגה טובה החודש?",
+    17
+   ],
+   [
+    "תזיז לי את שיעור הגיטרה",
+    18
+   ],
+   [
+    "תזכיר לי להחזיר את המקדחה לשכנים מלמעלה",
+    19
+   ]
+  ]
+ },
+ "mixed": {
+  "notes": [
+   "Wife: Dana, vegetarian",
+   "הבן יואב משחק כדורגל בימי שלישי ב-17:00",
+   "Works at Wix as a backend developer",
+   "אמא שלו, רחל, גרה בחיפה",
+   "Allergic to peanuts",
+   "הכלב קוראים לו ביסקוויט",
+   "Prefers meetings after 10:00",
+   "הבת נועה לומדת בתיכון אהל שם",
+   "Gym on Sunday and Wednesday mornings",
+   "רופא המשפחה: ד\"ר כהן בקופת חולים מכבי",
+   "Brother Avi lives in Berlin",
+   "אוהב קפה שחור בלי סוכר",
+   "Car: white Mazda 3, service due every 15,000 km",
+   "יום ההולדת של דנה ב-12 במרץ",
+   "Partner at work: Shira from the data team",
+   "לא אוכל בשר בימי שני",
+   "Kids' school ends at 13:30 on Fridays",
+   "מנוי לתיאטרון הבימה",
+   "Plays guitar, lessons with Erez on Thursdays",
+   "השכנים מלמעלה: משפחת לוי"
+  ],
+  "questions": [
+   [
+    "מה דנה לא אוכלת?",
+    0
+   ],
+   [
+    "Book dinner with my wife on Thursday",
+    0
+   ],
+   [
+    "תזכיר לי לאסוף את יואב מהאימון",
+    1
+   ],
+   [
+    "When does my son have practice?",
+    1
+   ],
+   [
+    "I need to visit my mom this weekend",
+    3
+   ],
+   [
+    "אפשר להזמין לי פד תאי עם בוטנים?",
+    4
+   ],
+   [
+    "צריך לקחת את ביסקוויט לווטרינר",
+    5
+   ],
+   [
+    "Can you set the team sync for 9am?",
+    6
+   ],
+   [
+    "מתי האסיפת הורים של נועה?",
+    7
+   ],
+   [
+    "Am I free for a workout on Wednesday?",
+    8
+   ],
+   [
+    "I need a doctor's appointment",
+    9
+   ],
+   [
+    "כמה שעות הפרש לאחי?",
+    10
+   ],
+   [
+    "the car is making a weird noise",
+    12
+   ],
+   [
+    "מה לקנות לאשתי ליום הולדת?",
+    13
+   ],
+   [
+    "set a meeting with Shira",
+    14
+   ],
+   [
+    "איפה כדאי לאכול צהריים ביום שני?",
+    15
+   ],
+   [
+    "Who picks up the kids on Friday?",
+    16
+   ],
+   [
+    "יש הצגה טובה החודש?",
+    17
+   ],
+   [
+    "Move my guitar lesson",
+    18
+   ],
+   [
+    "Remind me to return the drill to the upstairs neighbours",
+    19
+   ]
+  ]
+ }
+}
