@@ -60,9 +60,10 @@ voyage-4-large 26, voyage-4 26, embed-multilingual-v3.0 25.
    needing a lead of 2: voyage-4 35, embed-v5.0-pro 34, voyage-4-large 33. voyage-4 leads
    by 1. Still tied.
 5. A list price at least 25% lower, from the vendor's own page: voyage-4 ($0.06/M) is 50%
-   lower than voyage-4-large ($0.12/M), both on Voyage's pricing page. embed-v5.0-pro has no
-   price on any Cohere page (cohere.com/pricing lists none for Embed), so the rule cannot
-   compare it. Only third parties list it, at $0.12/M, and the rule bars those. Not resolvable.
+   lower than voyage-4-large ($0.12/M), both on Voyage's pricing page. No embed-v5.0-pro
+   price was found on cohere.com/pricing (one tab of that page, "Advanced retrieval models",
+   did not load), so the rule could not compare it. Only third parties list it, at $0.12/M,
+   and the rule bars those. Not resolvable.
 6. Still tied: STOP, with a recommendation.
 
 Outcome: the rule stopped at step 6 and the owner chose `voyage-4` on 2026-11-08, on privacy and
