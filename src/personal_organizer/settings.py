@@ -141,7 +141,7 @@ class ModelSettings(BaseModel):
     chat_model: str
     fallback_model: str
     embedding_model: str
-    embedding_dimensions: int = 1536
+    embedding_dimensions: int = 1024
     transcription_model: str
     # A stronger model the agent can hand a hard turn to; unset leaves the handoff off.
     strong_model: str | None = None
@@ -416,6 +416,17 @@ class VoiceSettings(BaseModel):
     request_timeout_s: float = 30.0
 
 
+class EmbeddingSettings(BaseModel):
+    """The hosted embedding service (Voyage). The model is ``MODELS__EMBEDDING_MODEL``.
+
+    No ``enabled`` flag: nothing calls it yet, and a missing key is a ``ConfigError`` when
+    the provider is built.
+    """
+
+    api_key: SecretStr | None = None
+    request_timeout_s: float = 15.0
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -442,6 +453,7 @@ class Settings(BaseSettings):
     onboarding: OnboardingSettings = OnboardingSettings()
     agent: AgentSettings = AgentSettings()
     voice: VoiceSettings = VoiceSettings()
+    embedding: EmbeddingSettings = EmbeddingSettings()
     flags: dict[str, bool] = Field(default_factory=dict)
 
     @property
@@ -580,6 +592,7 @@ __all__ = [
     "AppSettings",
     "ComposioSettings",
     "DatabaseSettings",
+    "EmbeddingSettings",
     "GowaSettings",
     "LangfuseSettings",
     "LoggingSettings",
