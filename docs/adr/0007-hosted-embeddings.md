@@ -1,7 +1,7 @@
 # ADR 0007: Hosted embeddings
 
-Status: Awaiting decision. The winner rule stops at its price step (see Decision).
-Recommendation: `voyage-4`, pending the owner's yes.
+Status: Accepted: `voyage-4`, chosen by the owner on 2026-11-08 after the winner rule tied (see
+Decision).
 
 ## Context
 
@@ -65,12 +65,12 @@ voyage-4-large 26, voyage-4 26, embed-multilingual-v3.0 25.
    compare it. Only third parties list it, at $0.12/M, and the rule bars those. Not resolvable.
 6. Still tied: STOP, with a recommendation.
 
-Outcome: STOP, Awaiting decision. Task 3 does not start.
+Outcome: the rule stopped at step 6 and the owner chose `voyage-4` on 2026-11-08, on privacy and
+published price, since the quality differences were within the rule's noise.
 
-Recommendation: `voyage-4`. It has the best hit@1 of the tied group, passes every gate, is
+Reasons given for `voyage-4`: it has the best hit@1 of the tied group, passes every gate, is
 half the price of voyage-4-large on Voyage's own page, and ties or beats the others on
-quality within the noise the rule itself names. Choosing it, or embed-v5.0-pro, is the
-owner's call. Two things to know first: `embed-multilingual-v3.0` has the best raw hit@1 for
+quality within the noise the rule itself names. Two caveats: `embed-multilingual-v3.0` has the best raw hit@1 for
 Hebrew (19) but is weakest on Hebrew-English (5/7) and was out by the rule at step 4; and a Voyage opt-out needs a payment method (see Data use).
 
 Dimension, for whichever model is chosen: 1024. It is common to all four candidates and under
@@ -96,8 +96,10 @@ license Customer Content to Voyage "to train, improve, and otherwise further dev
 Service" unless the customer opts out. The opt-out is a toggle under Terms of Service in the
 dashboard; it needs a payment method on file; it applies only to content sent after it is set,
 and content sent earlier may still be used; opting out may void free tokens at Voyage's
-discretion. After opting out, content is deleted right after processing. The terms set no
-other retention period. The terms say "Customer Content" and do not name the API explicitly.
+discretion. After opting out, content is deleted right after processing, which the FAQ calls
+zero-day retention. Opting out cannot be undone from the dashboard, and it needs an organization
+Admin. For anyone not opted out, the licence is perpetual and no deletion period is given. The
+terms say "Customer Content" and do not name the API explicitly.
 The MongoDB page (https://www.mongodb.com/docs/voyageai/management/model-training-data/)
 covers only the Atlas API and is not relevant to `api.voyageai.com`.
 
@@ -105,18 +107,19 @@ Cohere: the opt-out is under Settings, then Data Controls in the dashboard; logg
 generations are deleted after 30 days, with exceptions; the commitments cover accounts with a
 card on file, and trial users fall under the general Terms and Privacy Policy
 (https://cohere.com/enterprise-data-commitments). Trial keys are capped at 1,000 API calls a
-month (https://docs.cohere.com/docs/rate-limits). The default for training was not stated on
-the pages fetched (https://cohere.com/model-training-privacy-notice says only that most of the
-time Cohere has no access to inputs). `docs.cohere.com/docs/data-retention-and-opt-out`
-returned 404.
+month (https://docs.cohere.com/docs/rate-limits) and may not be used for production or
+commercial purposes (https://cohere.com/pricing). No page states the default for training in
+plain words, though the opt-out wording implies it is on until opted out.
+`docs.cohere.com/docs/data-retention-and-opt-out` returned 404. Only part of
+https://cohere.com/terms-of-use was read.
 
-Plainly: whichever vendor wins, the opt-out must be set on that account, with a card on file,
-before any real text goes there. For Voyage it also does nothing for text sent before it is
-set.
+Plainly: the opt-out must be set on the Voyage account, with a card on file, before any real
+text goes there. It does nothing for text sent before it is set. So far only the invented test
+set has been sent.
 
 ## Limits
 
 One test set of 20 short notes, not skills; a gap of 1 hit in 27 is noise, and hit@1
 differences of 1 or 2 are weak evidence. `embed-multilingual-v3.0`
-truncates past 512 tokens, if it were chosen. Cohere's Embed pricing and default training
-terms could not be confirmed from Cohere's own pages on 2026-11-08.
+truncates past 512 tokens. Cohere's Embed pricing could not be confirmed from Cohere's own
+pages on 2026-11-08.
