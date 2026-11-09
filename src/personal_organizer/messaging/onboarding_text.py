@@ -123,6 +123,7 @@ _EN: Final = {
         "Got it. It's still in your calendar, though, since I can't take things out yet."
     ),
     "outing_nudge_fallback": "Hey, just checking if you're coming: {summary}. No pressure.",
+    "event_file_name": "event",
 }
 
 _HE: Final = {
@@ -197,6 +198,7 @@ _HE: Final = {
     "group_shared_off": "בסדר, מעכשיו לא אראה כאן מתי יש לך משהו.",
     "outing_kept": "קיבלתי. רק שזה עדיין ביומן שלך, כי אני עוד לא יכול להוריד משם דברים.",
     "outing_nudge_fallback": "היי, רציתי לבדוק אם מסתדר לך להגיע: {summary}. בלי לחץ.",
+    "event_file_name": "אירוע",
 }
 
 ONBOARDING_TEXT: Final[Mapping[str, Mapping[str, str]]] = MappingProxyType(
