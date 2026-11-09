@@ -228,7 +228,7 @@ _URL: Final = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
 # ".evil.com" are seen.
 _BARE_DOMAIN: Final = re.compile(
     r"(?<![\w@-])[\w-]+(?:\.[\w-]+)*\.(?:xn--[a-z0-9-]+|[a-z]{2,}|ישראל|קום)(?![a-z0-9-])(?:/\S*)?"
-    r"|(?<![\d.])\d{1,3}(?:\.\d{1,3}){3}(?![\d.])(?:[:/]\S*)?",
+    r"|(?<![\d.])\d{1,3}(?:\.\d{1,3}){3}(?!\.?\d)(?:[:/]\S*)?",
     re.IGNORECASE,
 )
 _URL_END: Final = ".,;:!?)]}'\"\u05f3\u05f4"
