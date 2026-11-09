@@ -653,7 +653,10 @@ def _claims_dad_is_shown(reply: str, language: str) -> bool:
     )
 
 
-@_both("Remi, show what I've got on, and Dad's too", "רמי, תראה מה יש לי וגם מה יש לאבא")
+@_both(
+    "Remi, show this group what I've got on, and Dad's too",
+    "רמי, תראה לקבוצה מה יש לי ביומן, וגם מה יש לאבא",
+)
 async def test_okay_mixed_with_someone_elses(text: str, language: str, llm: AnthropicLLM) -> None:
     group = Group()
     reply = await _group_turn(text, llm, group, asker="Noa")
