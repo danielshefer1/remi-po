@@ -35,13 +35,14 @@ import structlog
 
 from personal_organizer.core.errors import (
     AmbiguousDeliveryError,
+    AttachmentRefusedError,
     MediaUnavailableError,
     MessageTooLongError,
     RejectedChannelError,
     TransientChannelError,
 )
 from personal_organizer.core.phone import normalise_e164
-from personal_organizer.interfaces.channel import OutboundMessage
+from personal_organizer.interfaces.channel import Attachment, OutboundMessage
 from personal_organizer.interfaces.voice import MAX_AUDIO_BYTES, Audio
 from personal_organizer.messaging.text import WHATSAPP_TEXT_LIMIT
 from personal_organizer.providers.channel.gowa.inbound import CHANNEL_NAME
@@ -53,7 +54,19 @@ log = structlog.get_logger(__name__)
 SEND_PATH: Final = "send/message"
 POLL_PATH: Final = "send/poll"
 PRESENCE_PATH: Final = "send/chat-presence"
+IMAGE_PATH: Final = "send/image"
+FILE_PATH: Final = "send/file"
 DOWNLOAD_PATH: Final = "message/{message_id}/download"
+#: The gateway's config says 20 MB but nothing applies it to an uploaded image
+#: (docs/superpowers/plans/2026-11-09-89-send-media.md), so we enforce it.
+MAX_IMAGE_BYTES: Final = 20_000_000
+#: The gateway answers 400 above 50 MB (`src/validations/send_validation.go:242-247`).
+MAX_DOCUMENT_BYTES: Final = 50_000_000
+#: GOWA v9.6.0 takes jpeg and png as images (`send_validation.go:133-143`); WebP is not one.
+_IMAGE_TYPES: Final = frozenset({"image/jpeg", "image/png"})
+#: Just past the gateway's own 45 s deadline (`src/ui/rest/middleware/timeout.go:12`), so a
+#: slow send comes back as its 504 rather than as our timeout.
+ATTACHMENT_TIMEOUT: Final = httpx.Timeout(50.0, connect=5.0)
 #: The gateway fetches from WhatsApp's CDN before it answers: slower than a send.
 DOWNLOAD_TIMEOUT: Final = httpx.Timeout(30.0, connect=5.0)
 #: A group chat's JID ends so; it is sent to as given, not as a phone number.
@@ -118,6 +131,11 @@ class GowaOutbound:
     async def send_text(self, message: OutboundMessage) -> str:
         if len(message.body) > WHATSAPP_TEXT_LIMIT:
             raise MessageTooLongError(len(message.body), WHATSAPP_TEXT_LIMIT)
+        attachment = message.attachment
+        if attachment and message.recipient.endswith(GROUP_SUFFIX):
+            raise RejectedChannelError(None)  # private chats only
+        if attachment:
+            self._check(attachment)
         if message.recipient.endswith(GROUP_SUFFIX):
             jid = message.recipient
         else:
@@ -125,7 +143,13 @@ class GowaOutbound:
             if phone is None:
                 raise RejectedChannelError(None)
             jid = phone_jid(phone)
-        if message.poll_options:  # no typing indicator for a poll
+        if attachment:
+            await self._typing(jid)
+            field, path = ("image", IMAGE_PATH) if attachment.is_image else ("file", FILE_PATH)
+            data = await self._post(
+                path, {"phone": jid, "caption": message.body}, part=(field, attachment)
+            )
+        elif message.poll_options:  # no typing indicator for a poll
             data = await self._post(
                 POLL_PATH,
                 {
@@ -144,6 +168,14 @@ class GowaOutbound:
             # A 2xx means the gateway took it; without the id we cannot match receipts.
             raise AmbiguousDeliveryError("send accepted without a message id")
         return provider_message_id
+
+    @staticmethod
+    def _check(attachment: Attachment) -> None:
+        if attachment.is_image and attachment.mime_type not in _IMAGE_TYPES:
+            raise AttachmentRefusedError("type")
+        limit = MAX_IMAGE_BYTES if attachment.is_image else MAX_DOCUMENT_BYTES
+        if len(attachment.content) > limit:
+            raise AttachmentRefusedError("too_big")
 
     async def mark_read(self, provider_message_id: str) -> None:
         """A no-op: the gateway's read endpoint needs the chat's JID, which this protocol
@@ -219,9 +251,25 @@ class GowaOutbound:
                 log.info("gowa.presence_failed", status_code=response.status_code)
         await self._sleep(self._typing_delay_s + self._uniform(0.0, self._typing_jitter_s))
 
-    async def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    async def _post(
+        self,
+        path: str,
+        payload: dict[str, Any],
+        *,
+        part: tuple[str, Attachment] | None = None,
+    ) -> dict[str, Any]:
         try:
-            response = await self._http.post(path, json=payload, headers=self._headers)
+            if part:
+                field, file = part
+                response = await self._http.post(
+                    path,
+                    data=payload,
+                    files={field: (file.filename, file.content, file.mime_type)},
+                    headers=self._headers,
+                    timeout=ATTACHMENT_TIMEOUT,
+                )
+            else:
+                response = await self._http.post(path, json=payload, headers=self._headers)
         except _NOT_SENT as exc:
             log.warning("gowa.unreachable", error_type=type(exc).__name__)
             raise TransientChannelError("GOWA gateway unreachable") from exc
