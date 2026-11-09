@@ -1750,6 +1750,11 @@ class TestLinksAllowed:
             ("according to www.good.example", True),
             ("according to good.example", True),
             ("no links here, closes at 21.30", True),
+            ("according to ב-good.example", True),
+            ("מ-good.example", True),
+            ("בgood.example", True),
+            ("ב-evil.example", False),
+            ("בevil.example", False),
             ("https://www.good.example/a?b=2", False),
             ("https://www.good.example/a?b=1/", False),
             ("HTTPS://www.good.example/a?b=1", False),
@@ -1786,6 +1791,11 @@ class TestLinksAllowed:
     )
     def test_with_results(self, reply: str, allowed: bool) -> None:
         assert links_allowed(reply, self.SOURCES) is allowed
+
+    def test_a_malformed_result_url_is_skipped(self) -> None:
+        sources = {"https://[bad/x", "https://good.example/a"}
+        assert links_allowed("no links here", sources) is True
+        assert links_allowed("according to good.example", sources) is True
 
     @pytest.mark.parametrize(
         ("reply", "allowed"), [("see good.example", True), ("http://x", False)]

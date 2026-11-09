@@ -36,7 +36,8 @@ from personal_organizer.observability.langfuse import observation
 log = structlog.get_logger(__name__)
 
 MAX_TOOL_ROUNDS: Final = 4
-# Two continuations at 5 web calls a turn; a stuck turn costs three 60-second requests.
+# Two continuations at 5 web calls a turn. The pause and tool-round caps are independent, so the
+# worst case is 7 requests of 60 s, plus 1 for a Hebrew redo.
 MAX_PAUSES: Final = 2
 # Adaptive thinking counts against this too, and so does every tool call in one completion:
 # a month of class reminders (~50 set_reminder calls) overran 4096.
