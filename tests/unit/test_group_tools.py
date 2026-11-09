@@ -11,7 +11,7 @@ import pytest
 from personal_organizer.db.models.tenant import LANGUAGES
 from personal_organizer.interfaces.calendar import CalendarEvent
 from personal_organizer.messaging.groups.prompt import group_prompt
-from personal_organizer.messaging.groups.turn import busy_blocks
+from personal_organizer.messaging.groups.turn import GROUP_TOOLS, busy_blocks
 
 ZONE = ZoneInfo("Asia/Jerusalem")
 
@@ -66,3 +66,7 @@ def test_group_prompt_lists_open_outings() -> None:
     line = "Family dinner, Friday 2026-10-23, 19:00-21:00"
     assert line in group_prompt("en", now, "Dana", True, outings=(line,))
     assert "still open for votes" not in group_prompt("en", now, "Dana", True)
+
+
+def test_a_group_has_no_file_tool() -> None:
+    assert "send_event_file" not in {tool["name"] for tool in GROUP_TOOLS}

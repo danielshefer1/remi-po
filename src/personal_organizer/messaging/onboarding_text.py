@@ -19,7 +19,9 @@ added; ``change_*``, ``series_split`` and ``calendar_disconnected_change`` for a
 removal, #63) are the agent's (``messaging.agent``). ``reminder`` is sent by the
 reminder job, and the ``briefing_*`` lines by the morning briefing (Iteration 05).
 ``voice_unheard`` answers a voice note that couldn't be heard (Iteration 06). The ``group_*``
-and ``outing_*`` lines are the family groups' (Iteration 07). ``{zone}`` is a
+and ``outing_*`` lines are the family groups' (Iteration 07). ``event_file_caption`` captions an
+event's calendar file, and ``file_sent``, ``file_too_big``, ``file_type``, ``file_failed`` and
+``file_unsure`` are code's say on how sending it went (#89). ``{zone}`` is a
 ``timezones.zone_label``
 ("Jerusalem"), never an IANA name. No line offers numbered options: people answer in words.
 """
@@ -124,6 +126,17 @@ _EN: Final = {
     ),
     "outing_nudge_fallback": "Hey, just checking if you're coming: {summary}. No pressure.",
     "event_file_name": "event",
+    "event_file_caption": (
+        "Here's the calendar file for {when}. Open it to add it to your calendar."
+    ),
+    "file_sent": "Sent it over.",
+    "file_too_big": "That file is too big to send on WhatsApp, sorry.",
+    "file_type": (
+        "I can't send that kind of file on this number, sorry. "
+        "Want the details written out here instead?"
+    ),
+    "file_failed": "I couldn't send the file just now. Try me again in a bit.",
+    "file_unsure": ("I'm not sure the file got through. If you don't see it, just ask me again."),
 }
 
 _HE: Final = {
@@ -199,6 +212,14 @@ _HE: Final = {
     "outing_kept": "קיבלתי. רק שזה עדיין ביומן שלך, כי אני עוד לא יכול להוריד משם דברים.",
     "outing_nudge_fallback": "היי, רציתי לבדוק אם מסתדר לך להגיע: {summary}. בלי לחץ.",
     "event_file_name": "אירוע",
+    "event_file_caption": "הנה הקובץ ליומן, ל{when}. פותחים אותו וזה נכנס ליומן.",
+    "file_sent": "שלחתי לך.",
+    "file_too_big": "הקובץ הזה גדול מדי בשביל וואטסאפ, אז לא יכולתי לשלוח אותו. סליחה.",
+    "file_type": (
+        "את סוג הקובץ הזה אני לא יכול לשלוח מהמספר הזה, סליחה. לכתוב את הפרטים כאן במקום?"
+    ),
+    "file_failed": "לא הצלחתי לשלוח את הקובץ כרגע. אפשר לנסות שוב עוד מעט.",
+    "file_unsure": "אני לא בטוח שהקובץ הגיע. אם הוא לא אצלך, אפשר פשוט לבקש שוב.",
 }
 
 ONBOARDING_TEXT: Final[Mapping[str, Mapping[str, str]]] = MappingProxyType(
