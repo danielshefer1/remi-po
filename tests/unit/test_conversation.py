@@ -10,7 +10,7 @@ import pytest
 
 from personal_organizer.core.errors import LLMUnavailableError
 from personal_organizer.interfaces.llm import Completion, Message
-from personal_organizer.messaging.conversation import MAX_TOOL_ROUNDS, converse
+from personal_organizer.messaging.conversation import MAX_PAUSES, MAX_TOOL_ROUNDS, converse
 from tests.fixtures.llm import ScriptedLLM, call, said
 
 
@@ -101,3 +101,69 @@ async def test_a_reply_not_in_english_is_not_redone(reply: str) -> None:
 async def test_english_is_left_alone_unless_hebrew_is_asked() -> None:
     llm = ScriptedLLM(said("Yes, you're free."))
     assert await run(llm, Tools()) == "Yes, you're free."
+
+
+def paused(content: str = "", n: int = 0, **extra: Any) -> Completion:
+    native = [{"type": "server_tool_use", "id": f"srv-{n}"}]
+    return replace(said(content), finish_reason="pause_turn", native=native, **extra)
+
+
+async def test_a_pause_continues_with_no_new_user_message() -> None:
+    llm = ScriptedLLM(paused(), said("Done."))
+    assert await run(llm, Tools()) == "Done."
+    before, last = llm.calls[1][-2:]
+    assert before == Message("user", "hello")
+    assert last == Message("assistant", "", native=paused().native, paused=True)
+
+
+async def test_every_paused_turn_stays_in_order() -> None:
+    llm = ScriptedLLM(paused(n=1), paused(n=2), said("Done."))
+    assert await run(llm, Tools()) == "Done."
+    assert llm.calls[2][-2:] == [
+        Message("assistant", "", native=paused(n=1).native, paused=True),
+        Message("assistant", "", native=paused(n=2).native, paused=True),
+    ]
+
+
+async def test_pauses_are_capped() -> None:
+    llm = ScriptedLLM(*[paused(n=n) for n in range(MAX_PAUSES + 2)])
+    assert await run(llm, Tools()) == ""
+    assert len(llm.calls) == MAX_PAUSES + 1
+
+
+async def test_a_pause_is_not_a_tool_round() -> None:
+    looping = [said(f"round {n}", call("set_language", language="en")) for n in range(10)]
+    tools = Tools()
+    await run(ScriptedLLM(paused(), *looping), tools)
+    assert len(tools.ran) == MAX_TOOL_ROUNDS
+
+
+async def test_the_narration_of_a_pause_is_not_the_reply() -> None:
+    assert await run(ScriptedLLM(paused("Checking."), said("Answer.")), Tools()) == "Answer."
+
+
+async def test_web_sources_are_known_before_tools_run() -> None:
+    seen: set[str] = set()
+    sources: set[str] = set()
+
+    async def run_tool(name: str, arguments: Mapping[str, Any]) -> str:
+        seen.update(sources)
+        return "ok"
+
+    llm = ScriptedLLM(
+        replace(said("", call("set_language", language="en")), web_sources=("https://g.example",)),
+        said("Done."),
+    )
+    await converse([], "hi", system="s", tools=[], run_tool=run_tool, llm=llm, web_sources=sources)
+    assert seen == {"https://g.example"}
+
+
+async def test_a_redo_that_pauses_keeps_the_first_reply() -> None:
+    llm = ScriptedLLM(said("Yes, you're free."), paused())
+    assert await hebrew(llm) == "Yes, you're free."
+
+
+async def test_a_redo_that_searched_keeps_the_first_reply() -> None:
+    redo = replace(said("כן, את פנויה."), web_sources=("https://g.example",))
+    llm = ScriptedLLM(said("Yes, you're free."), redo)
+    assert await hebrew(llm) == "Yes, you're free."

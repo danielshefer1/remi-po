@@ -70,3 +70,7 @@ def test_group_prompt_lists_open_outings() -> None:
 
 def test_a_group_has_no_file_tool() -> None:
     assert "send_event_file" not in {tool["name"] for tool in GROUP_TOOLS}
+
+
+def test_a_group_has_no_web_tools() -> None:
+    assert not {"web_search", "web_fetch"} & {tool["name"] for tool in GROUP_TOOLS}

@@ -10,6 +10,11 @@ back as the SDK returned it (``Message.native``), thinking included, as the API 
 ``stop_reason == "refusal"`` has no server-side fallback on Haiku. It is a
 :class:`LLMRejectedError`, so the turn falls back to fixed text rather than retrying.
 
+Hosted web tools (search, fetch) are typed tools, passed through as given. Their result blocks
+go back exactly as received, inside ``Message.native``, because the API rejects a modified one;
+only the reply text after the last web block counts, and the result URLs are reported apart.
+Page text, titles and cited text are kept out of Langfuse. A turn with such a tool waits longer.
+
 The system prompt is one block marked for caching. The SDK's errors are translated without
 chaining (D8): their messages carry the response body, and Sentry sends ``__cause__``.
 """
@@ -34,6 +39,55 @@ log = structlog.get_logger(__name__)
 #: Statuses worth another attempt later. Any 5xx (529 "overloaded" included) is too.
 _TRANSIENT_STATUSES: Final = frozenset({408, 429})
 _EFFORT: Final = "low"
+_WEB_TIMEOUT: Final = 60.0
+_WEB_BLOCKS: Final = frozenset(
+    {"server_tool_use", "web_search_tool_result", "web_fetch_tool_result"}
+)
+_WEB_RESULTS: Final = frozenset({"web_search_tool_result", "web_fetch_tool_result"})
+
+
+def _tool_param(tool: Mapping[str, Any]) -> dict[str, Any]:
+    if "type" in tool:
+        return dict(tool)
+    return {
+        "name": tool["name"],
+        "description": tool["description"],
+        "input_schema": tool["input_schema"],
+    }
+
+
+def _final_text(content: Sequence[Any]) -> str:
+    """The text after the last web block: before it is only narration."""
+    last = max((i for i, block in enumerate(content) if block.type in _WEB_BLOCKS), default=-1)
+    return "".join(block.text for block in content[last + 1 :] if block.type == "text")
+
+
+def _web_sources(content: Sequence[Any]) -> tuple[str, ...]:
+    urls: list[str] = []
+    for block in content:
+        # A failed search or fetch has an object for ``content``, not a list.
+        if block.type == "web_search_tool_result" and isinstance(block.content, list):
+            urls.extend(result.url for result in block.content)
+        elif block.type == "web_fetch_tool_result" and block.content.type == "web_fetch_result":
+            urls.append(block.content.url)
+    return tuple(dict.fromkeys(urls))
+
+
+def _traced(blocks: Sequence[Any]) -> list[dict[str, Any]]:
+    """Blocks for Langfuse without page text, titles, citations or encrypted content."""
+    out: list[dict[str, Any]] = []
+    for block in blocks:
+        item = block.to_dict() if hasattr(block, "to_dict") else dict(block)
+        if item.get("type") in _WEB_RESULTS:
+            item = {
+                "type": item["type"],
+                "tool_use_id": item.get("tool_use_id"),
+                "content": "<omitted>",
+            }
+        elif item.get("type") == "text":
+            item.pop("citations", None)
+        out.append(item)
+    return out
 
 
 def _wire(messages: Sequence[Message]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -74,8 +128,10 @@ def _wire(messages: Sequence[Message]) -> tuple[list[dict[str, Any]], list[dict[
     while wire and wire[0]["role"] != "user":
         wire.pop(0)
     # And the last: a trailing turn of ours is a prefill, which Haiku 5.5 refuses with a 400.
-    while wire and wire[-1]["role"] != "user":
-        wire.pop()
+    # A paused web turn is the exception: the API resumes it from that last assistant turn.
+    if not (messages and messages[-1].paused):
+        while wire and wire[-1]["role"] != "user":
+            wire.pop()
     if not system:
         return [], wire
     block = {"type": "text", "text": "\n\n".join(system), "cache_control": {"type": "ephemeral"}}
@@ -138,22 +194,25 @@ class AnthropicLLM:
             params["system"] = cast("list[TextBlockParam]", system)
         if tools:
             # tool_choice stays auto: a forced call skips thinking.
-            params["tools"] = cast(
-                "list[ToolParam]",
-                [
-                    {
-                        "name": t["name"],
-                        "description": t["description"],
-                        "input_schema": t["input_schema"],
-                    }
-                    for t in tools
-                ],
-            )
+            params["tools"] = cast("list[ToolParam]", [_tool_param(t) for t in tools])
+        # shortcut: a raised AGENT__STRONG_TIMEOUT_S is ignored on a web turn,
+        # upgrade to max() if that is ever set above 60.
+        client = (
+            self._client.with_options(timeout=_WEB_TIMEOUT)
+            if any("type" in t for t in tools or ())
+            else self._client
+        )
+        traced = [
+            {**m, "content": _traced(m["content"])}
+            if m["role"] == "assistant" and isinstance(m["content"], list)
+            else m
+            for m in wire
+        ]
         with observation(
-            "llm.complete", as_type="generation", model=self._model, input=wire
+            "llm.complete", as_type="generation", model=self._model, input=traced
         ) as generation:
             try:
-                response = await self._client.messages.create(**params)
+                response = await client.messages.create(**params)
             except anthropic.AnthropicError as exc:
                 raise _translate(exc) from None
             usage = response.usage
@@ -169,7 +228,7 @@ class AnthropicLLM:
             )
             if generation is not None:
                 generation.update(
-                    output=[block.to_dict() for block in response.content],
+                    output=_traced(response.content),
                     usage_details={"input": tokens_in, "output": usage.output_tokens},
                     metadata={
                         "finish_reason": response.stop_reason,
@@ -186,13 +245,14 @@ class AnthropicLLM:
         if response.stop_reason == "refusal":
             raise LLMRejectedError(None)
         return Completion(
-            content="".join(block.text for block in response.content if block.type == "text"),
+            content=_final_text(response.content),
             model=response.model,
             tokens_in=tokens_in,
             tokens_out=usage.output_tokens,
             finish_reason=response.stop_reason or "",
             tool_calls=calls,
             native=response.content,
+            web_sources=_web_sources(response.content),
         )
 
 

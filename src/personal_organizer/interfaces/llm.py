@@ -3,7 +3,8 @@
 Kept provider-neutral so a second provider is configuration plus an adapter rather than a
 rewrite. Roles are ``system``, ``user``, ``assistant`` and ``tool`` (a tool's result, answering
 ``tool_call_id``). A tool is a ``{"name", "description", "input_schema"}`` dict, the schema
-being JSON Schema.
+being JSON Schema. A tool with a ``"type"`` key is a provider's own typed tool (Anthropic's
+hosted web search, say) and is passed through unchanged.
 """
 
 from __future__ import annotations
@@ -29,6 +30,8 @@ class Message:
     #: An assistant turn as the provider returned it, sent back unchanged. Claude's thinking
     #: blocks must go back with the tool calls they led to; nothing else reads this.
     native: Any = field(default=None, compare=False)
+    #: Resume this assistant turn: it goes back last, with nothing after it.
+    paused: bool = False
 
 
 @dataclass(frozen=True)
@@ -40,6 +43,9 @@ class Completion:
     finish_reason: str
     tool_calls: tuple[ToolCall, ...] = ()
     native: Any = field(default=None, compare=False)
+    #: The ``url`` of each web result in this completion, in order, deduped; never a URL from
+    #: inside a page.
+    web_sources: tuple[str, ...] = ()
 
 
 @runtime_checkable
