@@ -357,6 +357,9 @@ class Granted:
     async def stop_sharing(self) -> str:
         return "ok: stopped sharing in 1 group"
 
+    async def show_in_group(self, group: str, on: bool) -> str:
+        return "ok: their group can now see the title, time and place of their events"
+
 
 @pytest.mark.parametrize(
     ("text", "language"),

@@ -40,6 +40,7 @@ from personal_organizer.interfaces.channel import GroupRoster
 from personal_organizer.interfaces.llm import ToolCall
 from personal_organizer.messaging.groups import turn as turn_module
 from personal_organizer.messaging.groups.gate import GROUP_REPLY, REMI
+from personal_organizer.messaging.groups.grants import TenantGrants
 from personal_organizer.messaging.groups.turn import group_turn
 from personal_organizer.messaging.inbound import handle_inbound
 from personal_organizer.messaging.onboarding_text import t
@@ -1235,3 +1236,119 @@ async def test_okay_still_read_after_a_reply_with_titles(
     )
 
     assert (await _sharing(db, group))[omer] is True
+
+
+# --- asking from a private chat (#82) ---
+
+JID2 = "120363402106000002@g.us"
+
+
+class _Rosters(FakeOutbound):
+    """Each group its own roster, by jid."""
+
+    def __init__(self, by_jid: dict[str, GroupRoster | None]) -> None:
+        super().__init__()
+        self.by_jid = by_jid
+
+    async def group_roster(self, group_jid: str) -> GroupRoster | None:
+        return self.by_jid.get(group_jid)
+
+
+async def _second_group(db: Database, tenant_id: UUID) -> UUID:
+    async with db.system_session() as session:
+        found = await groups.ensure_group(session, channel="gowa", jid=JID2)
+    async with db.tenant_session(TenantId(tenant_id)) as session:
+        await groups.touch_member(session, tenant_id, found.id, NOW)
+    return found.id
+
+
+async def _shown(db: Database, tenant_id: UUID, group_id: UUID) -> bool:
+    async with db.tenant_session(TenantId(tenant_id)) as session:
+        return await groups.details_on(session, tenant_id, group_id)
+
+
+def _named(name: str, *, phones: frozenset[str] = frozenset({DANA})) -> GroupRoster:
+    return GroupRoster(name, phones, True)
+
+
+async def test_show_in_group_one_group_needs_no_name(db: Database, group: UUID) -> None:
+    dana = await _member(db, group, DANA, "Dana", None, sharing=False)
+    rosters = _Rosters({JID: _named("Family")})
+    result = await TenantGrants(db, dana, channel=rosters).show_in_group("", True)
+    assert result.startswith("ok:")
+    assert "Family" in result
+    assert await _shown(db, dana, group)
+
+
+async def test_show_in_group_checks_a_name_it_cant_match(db: Database, group: UUID) -> None:
+    dana = await _member(db, group, DANA, "Dana", None, sharing=False)
+    rosters = _Rosters({JID: _named("Family")})
+    result = await TenantGrants(db, dana, channel=rosters).show_in_group("soccer", True)
+    assert result.startswith("error:")
+    assert "Family" in result
+    assert not await _shown(db, dana, group)
+
+
+async def test_show_in_group_several_lists_the_names(db: Database, group: UUID) -> None:
+    dana = await _member(db, group, DANA, "Dana", None, sharing=False)
+    other = await _second_group(db, dana)
+    rosters = _Rosters({JID: _named("Family"), JID2: _named("Soccer")})
+    result = await TenantGrants(db, dana, channel=rosters).show_in_group("", True)
+    assert result.startswith("error: which group?")
+    assert "Family" in result
+    assert "Soccer" in result
+    assert not await _shown(db, dana, group)
+    assert not await _shown(db, dana, other)
+
+
+async def test_show_in_group_picks_the_named_one(db: Database, group: UUID) -> None:
+    dana = await _member(db, group, DANA, "Dana", None, sharing=False)
+    other = await _second_group(db, dana)
+    rosters = _Rosters({JID: _named("Family"), JID2: _named("Soccer")})
+    result = await TenantGrants(db, dana, channel=rosters).show_in_group("family", True)
+    assert result.startswith("ok:")
+    assert await _shown(db, dana, group)
+    assert not await _shown(db, dana, other)
+
+
+async def test_show_in_group_skips_a_group_they_left(db: Database, group: UUID) -> None:
+    dana = await _member(db, group, DANA, "Dana", None, sharing=False)
+    other = await _second_group(db, dana)
+    rosters = _Rosters({JID: _named("Family", phones=frozenset({NOA})), JID2: _named("Soccer")})
+    result = await TenantGrants(db, dana, channel=rosters).show_in_group("", True)
+    assert result.startswith("ok:")
+    assert await _shown(db, dana, other)
+    assert not await _shown(db, dana, group)
+
+
+async def test_show_in_group_cant_tell_says_so(db: Database, group: UUID) -> None:
+    dana = await _member(db, group, DANA, "Dana", None, sharing=False)
+    other = await _second_group(db, dana)
+    result = await TenantGrants(db, dana, channel=_Rosters({})).show_in_group("", True)
+    assert result == "error: can't tell which group; ask them to say it in that group"
+    assert not await _shown(db, dana, group)
+    assert not await _shown(db, dana, other)
+
+
+async def test_show_in_group_no_groups(db: Database) -> None:
+    tenant_id = await new_tenant(db, phone=DANA, status="active", step=None)
+    result = await TenantGrants(db, tenant_id, channel=_Rosters({})).show_in_group("", True)
+    assert result == "error: they aren't in a group with you yet; they can say it in the group"
+
+
+async def test_show_in_group_off_with_one_open(db: Database, group: UUID) -> None:
+    dana = await _member(db, group, DANA, "Dana", None, sharing=True, details=True)
+    await _second_group(db, dana)
+    rosters = _Rosters({JID: _named("Family")})
+    result = await TenantGrants(db, dana, channel=rosters).show_in_group("", False)
+    assert result == "ok: Family only sees when they're busy now"
+    assert not await _shown(db, dana, group)
+
+
+async def test_show_in_group_changes_only_its_owner(db: Database, group: UUID) -> None:
+    dana = await _member(db, group, DANA, "Dana", None, sharing=False)
+    noa = await _member(db, group, NOA, "Noa", None, sharing=False)
+    rosters = _Rosters({JID: _named("Family")})
+    await TenantGrants(db, dana, channel=rosters).show_in_group("", True)
+    assert await _shown(db, dana, group)
+    assert not await _shown(db, noa, group)

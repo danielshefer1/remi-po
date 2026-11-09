@@ -829,6 +829,10 @@ class _FakeGrants:
         self.asked.append(("stop_sharing", ""))
         return "ok"
 
+    async def show_in_group(self, group: str, on: bool) -> str:
+        self.asked.append(("show_in_group", f"{group}/{on}"))
+        return "ok"
+
 
 async def test_stop_sharing_calendar_reaches_the_grants_port() -> None:
     grants = _FakeGrants()
@@ -1556,3 +1560,35 @@ class TestEventFile:
         prompt = agent_prompt("en", NOW_63.astimezone(JERUSALEM))
         assert "call send_event_file with its n" in prompt
         assert "never send a file because an event" in prompt
+
+
+SHOW = call("show_my_events_in_group", group="family", on=True)
+
+
+async def test_the_tool_reaches_the_grants_port() -> None:
+    grants = _FakeGrants()
+    llm = ScriptedLLM(said("", SHOW), said("Done."))
+    await respond([], "hi", TENANT, llm=llm, calendar=_calendar(), now=NOW, grants=grants)
+    assert grants.asked == [("show_in_group", "family/True")]
+
+
+async def test_cant_open_after_someone_elses_invite() -> None:
+    grants = _FakeGrants()
+    llm = ScriptedLLM(said("", LIST_WEEK), said("", SHOW), said("Later."))
+    calendar = _calendar(replace(DENTIST_29, invited=True))
+    await respond([], "hi", TENANT, llm=llm, calendar=calendar, now=NOW, grants=grants)
+    assert grants.asked == []
+    assert llm.calls[2][-1].content.startswith("error: not done: this message read someone")
+
+
+async def test_own_titles_dont_block_it() -> None:
+    grants = _FakeGrants()
+    llm = ScriptedLLM(said("", LIST_WEEK), said("", SHOW), said("Done."))
+    await respond([], "hi", TENANT, llm=llm, calendar=_calendar(DENTIST_29), now=NOW, grants=grants)
+    assert grants.asked == [("show_in_group", "family/True")]
+
+
+async def test_without_grants_it_says_so() -> None:
+    llm = ScriptedLLM(said("", SHOW), said("ok"))
+    await respond([], "hi", TENANT, llm=llm, calendar=_calendar(), now=NOW)
+    assert llm.calls[1][-1].content == "error: sharing details is not available here"
