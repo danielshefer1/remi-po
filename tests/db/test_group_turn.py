@@ -1352,3 +1352,46 @@ async def test_show_in_group_changes_only_its_owner(db: Database, group: UUID) -
     await TenantGrants(db, dana, channel=rosters).show_in_group("", True)
     assert await _shown(db, dana, group)
     assert not await _shown(db, noa, group)
+
+
+async def test_show_in_group_a_name_it_cant_check_opens_nothing(db: Database, group: UUID) -> None:
+    dana = await _member(db, group, DANA, "Dana", None, sharing=False)
+    result = await TenantGrants(db, dana, channel=_Rosters({})).show_in_group("soccer", True)
+    assert result == "error: can't tell which group; ask them to say it in that group"
+    assert not await _shown(db, dana, group)
+
+
+async def test_show_in_group_a_name_with_no_group_reader_opens_nothing(
+    db: Database, group: UUID
+) -> None:
+    dana = await _member(db, group, DANA, "Dana", None, sharing=False)
+    result = await TenantGrants(db, dana, channel=None).show_in_group("soccer", True)
+    assert result.startswith("error: can't tell")
+    assert not await _shown(db, dana, group)
+
+
+async def test_show_in_group_off_closes_all_when_names_cant_be_read(
+    db: Database, group: UUID
+) -> None:
+    dana = await _member(db, group, DANA, "Dana", None, sharing=True, details=True)
+    other = await _second_group(db, dana)
+    async with db.tenant_session(TenantId(dana)) as session:
+        await groups.set_details(session, dana, other, True)
+    result = await TenantGrants(db, dana, channel=_Rosters({})).show_in_group("soccer", False)
+    assert result.startswith("ok:")
+    assert not await _shown(db, dana, group)
+    assert not await _shown(db, dana, other)
+
+
+async def test_show_in_group_off_with_a_readable_wrong_name_closes_nothing(
+    db: Database, group: UUID
+) -> None:
+    dana = await _member(db, group, DANA, "Dana", None, sharing=True, details=True)
+    other = await _second_group(db, dana)
+    async with db.tenant_session(TenantId(dana)) as session:
+        await groups.set_details(session, dana, other, True)
+    rosters = _Rosters({JID: _named("Family"), JID2: _named("Soccer")})
+    result = await TenantGrants(db, dana, channel=rosters).show_in_group("book club", False)
+    assert result.startswith("error: which group?")
+    assert await _shown(db, dana, group)
+    assert await _shown(db, dana, other)

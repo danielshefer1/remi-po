@@ -118,10 +118,18 @@ class TenantGrants:
         named = [g for g, n in names.items() if wanted and n.casefold() == wanted]
         if len(named) == 1:
             picked = named[0]
-        elif len(chosen) == 1 and (not wanted or chosen[0] not in names):
+        elif len(chosen) == 1 and not wanted:
             picked = chosen[0]
         elif not chosen:
             return none
+        elif not on and len(names) < len(chosen):  # stopping must work with the gateway down
+            async with self._db.tenant_session(TenantId(self._tenant_id)) as session:
+                for group_id in chosen:
+                    await groups.set_details(session, self._tenant_id, group_id, False)
+            return (
+                "ok: stopped showing their events in every group they had opened, because the "
+                "group names couldn't be read right now; say that plainly"
+            )
         elif names:
             return (
                 f"error: which group? they are in: {', '.join(names.values())}; ask once which "
