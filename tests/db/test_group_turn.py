@@ -34,9 +34,10 @@ from personal_organizer.db.repositories.connections import (
     bind_connection,
     revoke_connection,
 )
-from personal_organizer.db.repositories.tenants import set_live_calendar, set_timezone
+from personal_organizer.db.repositories.tenants import get_tenant, set_live_calendar, set_timezone
 from personal_organizer.interfaces.calendar import CalendarEvent
 from personal_organizer.interfaces.channel import GroupRoster
+from personal_organizer.interfaces.llm import ToolCall
 from personal_organizer.messaging.groups import turn as turn_module
 from personal_organizer.messaging.groups.gate import GROUP_REPLY, REMI
 from personal_organizer.messaging.groups.turn import group_turn
@@ -1006,3 +1007,170 @@ async def test_private_event_is_not_in_granted_details(
     private = channel.sent[0]
     assert "Lunch out" in private.body
     assert "Secret thing" not in private.body
+
+
+SHOW = "Remi, show my events to this group"
+STAND_IN = (
+    "[My last reply drew on people's calendars and isn't kept. {asked}"
+    "To repeat anything, call who_is_free again.]"
+)
+
+
+async def _details(db: Database, group: UUID) -> dict[UUID, bool]:
+    async with db.system_session() as session:
+        members = await groups.group_tenants(session, group)
+    return {tenant_id: await _is_on(db, tenant_id, group) for tenant_id, _ in members}
+
+
+async def _last_context(db: Database, group: UUID) -> str:
+    async with db.system_session() as session:
+        return [c for c in await groups.recent_context(session, group) if c.sender_name == REMI][
+            -1
+        ].body
+
+
+async def test_show_my_events_changes_only_the_writer(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    dana = await _member(db, group, DANA, "Dana", "ca_dana", sharing=False)
+    noa = await _member(db, group, NOA, "Noa", "ca_noa", sharing=True)
+    llm = ScriptedLLM(said("", call("show_my_events", on=True)), said("Sure."))
+
+    channel, _ = await _say(db, owner_conn, onboarding_settings, llm, body=SHOW)
+
+    assert await _details(db, group) == {dana: True, noa: False}
+    assert [message.body for message in channel.sent] == [f"Sure.\n\n{t('group_details_on', 'en')}"]
+
+
+async def test_stranger_cannot_show_events(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    dana = await _member(db, group, DANA, "Dana", "ca_dana", sharing=False)
+    llm = ScriptedLLM(said("", call("show_my_events", on=True)), said("No."))
+
+    await _say(db, owner_conn, onboarding_settings, llm, phone=STRANGER, body=SHOW)
+
+    assert llm.calls[1][-1].content == turn_module.NOT_A_MEMBER
+    assert await _details(db, group) == {dana: False}
+
+
+async def test_show_my_events_off_keeps_busy_free(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    dana = await _member(db, group, DANA, "Dana", "ca_dana", sharing=True, details=True)
+    llm = ScriptedLLM(said("", call("show_my_events", on=False)), said("Okay."))
+
+    channel, _ = await _say(db, owner_conn, onboarding_settings, llm, body="Remi, stop showing")
+
+    assert await _details(db, group) == {dana: False}
+    assert (await _sharing(db, group))[dana] is True
+    assert [message.body for message in channel.sent] == [
+        f"Okay.\n\n{t('group_details_off', 'en')}"
+    ]
+
+
+async def test_unaddressed_okay_never_opens_details(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    noa = await _asked(db, group, NOA, "Noa", "ca_noa")
+    llm = ScriptedLLM(said("YES"), said("Noa's in."))
+
+    await _say(db, owner_conn, onboarding_settings, llm, phone=NOA, body="Dan said it's fine")
+
+    assert (await _sharing(db, group))[noa] is True
+    assert await _details(db, group) == {noa: False}
+
+
+@pytest.mark.parametrize(
+    "tool",
+    [
+        call("show_my_events", on=True),
+        call("share_my_calendar", on=True),
+        ToolCall("c1", "call_me", {"name": "Dee"}),
+    ],
+)
+async def test_titles_cant_write_consent(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID, tool: Any
+) -> None:
+    dana = await _member(db, group, DANA, "Dana", "ca_dana", sharing=False)
+    await _member(db, group, NOA, "Noa", "ca_noa", sharing=True, details=True)
+    llm = ScriptedLLM(said("", FRIDAY), said("", tool), said("Okay."))
+
+    await _say(
+        db, owner_conn, onboarding_settings, llm, channel=FakeOutbound(name="gowa", roster=EVERYONE)
+    )
+
+    assert llm.calls[2][-1].content == turn_module._AFTER_TITLES
+    assert (await _details(db, group))[dana] is False
+    assert (await _sharing(db, group))[dana] is False
+    async with db.tenant_session(TenantId(dana)) as session:
+        tenant = await get_tenant(session, dana)
+    assert tenant is not None
+    assert tenant.display_name == "Dana"
+
+
+async def test_turning_off_works_after_titles(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    dana = await _member(db, group, DANA, "Dana", "ca_dana", sharing=True, details=True)
+    llm = ScriptedLLM(said("", FRIDAY), said("", call("show_my_events", on=False)), said("Okay."))
+
+    await _say(
+        db, owner_conn, onboarding_settings, llm, channel=FakeOutbound(name="gowa", roster=EVERYONE)
+    )
+
+    assert "Dentist" in _seen(llm)  # titles were revealed first
+    assert (await _details(db, group))[dana] is False
+
+
+async def test_titles_are_not_kept_in_context(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    await _member(db, group, DANA, "Dana", "ca_dana", sharing=True)
+    await _member(db, group, NOA, "Noa", "ca_noa", sharing=True, details=True)
+    llm = ScriptedLLM(said("", FRIDAY), said("Noa has the Board meeting at 14:00."))
+
+    channel, _ = await _say(
+        db, owner_conn, onboarding_settings, llm, channel=FakeOutbound(name="gowa", roster=EVERYONE)
+    )
+
+    [sent] = channel.sent
+    assert "Board meeting" in sent.body
+    kept = await _last_context(db, group)
+    assert kept == STAND_IN.format(asked="")
+    assert "Board meeting" not in kept
+
+
+async def test_a_busy_only_reply_is_kept_whole(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    await _member(db, group, NOA, "Noa", "ca_noa", sharing=True)
+    llm = ScriptedLLM(said("", FRIDAY), said("Noa is busy 14:00 to 16:00."))
+
+    await _say(db, owner_conn, onboarding_settings, llm, phone=NOA)
+
+    assert await _last_context(db, group) == "Noa is busy 14:00 to 16:00."
+
+
+async def test_okay_still_read_after_a_reply_with_titles(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    await _member(db, group, DANA, "Dana", "ca_dana", sharing=True, details=True)
+    omer = await _member(db, group, "+972504444444", "Omer", None, sharing=False)
+    llm = ScriptedLLM(said("", FRIDAY), said("Dana has the Dentist. Omer, I need your okay."))
+    channel = FakeOutbound(name="gowa", roster=EVERYONE)
+    await _say(db, owner_conn, onboarding_settings, llm, channel=channel)
+    assert await _last_context(db, group) == STAND_IN.format(asked="I asked Omer to okay sharing. ")
+
+    again = ScriptedLLM(said("YES"), said("Omer's in."))
+    await _say(
+        db,
+        owner_conn,
+        onboarding_settings,
+        again,
+        phone="+972504444444",
+        body="ok",
+        channel=channel,
+    )
+
+    assert (await _sharing(db, group))[omer] is True

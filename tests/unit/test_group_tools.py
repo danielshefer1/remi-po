@@ -12,6 +12,7 @@ from personal_organizer.db.models.tenant import LANGUAGES
 from personal_organizer.interfaces.calendar import CalendarEvent
 from personal_organizer.messaging.groups.prompt import group_prompt
 from personal_organizer.messaging.groups.turn import GROUP_TOOLS, _clean, busy_blocks, person_entry
+from personal_organizer.messaging.onboarding_text import t
 
 ZONE = ZoneInfo("Asia/Jerusalem")
 
@@ -163,3 +164,18 @@ def test_a_title_with_http_stays_busy() -> None:
     assert entry["events"] == []
     assert len(entry["busy"]) == 1
     assert "workshop" not in json.dumps(entry)
+
+
+def test_group_tools_offer_show_my_events() -> None:
+    [tool] = [tool for tool in GROUP_TOOLS if tool["name"] == "show_my_events"]
+    schema = tool["input_schema"]
+    assert schema["required"] == ["on"]
+    assert set(schema["properties"]) == {"on"}
+
+
+@pytest.mark.parametrize("language", LANGUAGES)
+@pytest.mark.parametrize("key", ["group_details_on", "group_details_off"])
+def test_group_details_copy(key: str, language: str) -> None:
+    text = t(key, language)
+    assert text
+    assert "{" not in text
