@@ -32,6 +32,7 @@ from personal_organizer.interfaces.channel import Attachment
 from personal_organizer.interfaces.llm import Completion, ToolCall
 from personal_organizer.messaging.agent import (
     _AFTER_WEB,
+    _LINK_AFTER_WEB,
     MAX_FIELD,
     MAX_PROPOSALS,
     MAX_WINDOW,
@@ -46,6 +47,7 @@ from personal_organizer.messaging.agent import (
     change_summary,
     check_event,
     event_summary,
+    links_allowed,
     read_calendar,
     respond,
     week_of,
@@ -1567,16 +1569,18 @@ class TestWeb:
         schedule: InMemorySchedule | None = None,
         proposed: list[CalendarEvent] | None = None,
         strong: ScriptedLLM | None = None,
+        changed: list[ProposedChange] | None = None,
     ) -> str:
         return await respond(
             [],
             "hi",
             TENANT,
             llm=llm,
-            calendar=_calendar(),
+            calendar=_calendar(DENTIST_29),
             now=NOW,
             schedule=schedule,
             proposed=proposed,
+            changed=changed,
             strong=strong,
         )
 
@@ -1664,3 +1668,106 @@ class TestWeb:
     async def test_nothing_after_a_failure_is_empty(self) -> None:
         llm = ScriptedLLM(self._read(call("remember", text="x")), said(""))
         assert await self._respond(llm) == ""
+
+    @pytest.mark.parametrize("field", ["title", "location"])
+    @pytest.mark.parametrize(
+        "bad", ["Verify at https://evil.example/x", "evil.example/login", "see HTTP"]
+    )
+    async def test_a_page_cant_plant_a_link_in_a_new_event(self, field: str, bad: str) -> None:
+        proposed: list[CalendarEvent] = []
+        args = {"title": "Lunch", "start": "2026-10-30T12:00", "end": "2026-10-30T13:00"}
+        args[field] = bad
+        llm = ScriptedLLM(self._read(call("propose_event", **args)), said("ok"))
+        await self._respond(llm, proposed=proposed)
+        assert proposed == []
+        assert llm.calls[1][-1].content == _LINK_AFTER_WEB
+        # Without a web result in the turn, the same event is proposed as ever.
+        plain = ScriptedLLM(said("", call("propose_event", **args)), said("ok"))
+        await self._respond(plain, proposed=proposed)
+        assert len(proposed) == 1
+
+    @pytest.mark.parametrize("field", ["title", "location"])
+    @pytest.mark.parametrize("bad", ["Verify at https://evil.example/x", "evil.example/login"])
+    async def test_a_page_cant_plant_a_link_in_a_change(self, field: str, bad: str) -> None:
+        changed: list[ProposedChange] = []
+        change = _change(n=1, **{field: bad})
+        llm = ScriptedLLM(said("", LIST_WEEK), self._read(change), said("ok"))
+        await self._respond(llm, changed=changed)
+        assert changed == []
+        assert llm.calls[2][-1].content == _LINK_AFTER_WEB
+        plain = ScriptedLLM(said("", LIST_WEEK), said("", change), said("ok"))
+        await self._respond(plain, changed=changed)
+        assert len(changed) == 1
+
+    async def test_a_clean_proposal_after_reading_still_lands(self) -> None:
+        proposed: list[CalendarEvent] = []
+        changed: list[ProposedChange] = []
+        change = _change(n=1, title="Checkup", location="Clinic 5")
+        llm = ScriptedLLM(said("", LIST_WEEK), self._read(change, DENTIST), said("ok"))
+        await self._respond(llm, proposed=proposed, changed=changed)
+        # one at a time: the change lands, and the event after it is told to wait
+        assert len(changed) == 1
+        llm = ScriptedLLM(self._read(DENTIST), said("ok"))
+        await self._respond(llm, proposed=proposed)
+        assert len(proposed) == 1
+
+    async def test_a_reply_can_name_a_source_from_this_turn(self) -> None:
+        llm = ScriptedLLM(self._read(LIST_WEEK), said("It's here: https://good.example/a"))
+        assert await self._respond(llm) == "It's here: https://good.example/a"
+
+    async def test_a_url_not_from_a_result_drops_the_reply(self) -> None:
+        llm = ScriptedLLM(self._read(LIST_WEEK), said("It's here: https://evil.example/a"))
+        assert await self._respond(llm) == ""
+
+    async def test_the_url_rule_is_unchanged_with_no_web(self) -> None:
+        llm = ScriptedLLM(said("https://good.example/a"))
+        assert await self._respond(llm) == ""
+
+    async def test_sources_do_not_carry_over_a_hand_off(self) -> None:
+        cheap = ScriptedLLM(self._read(TIMETABLE))
+        strong = ScriptedLLM(said("https://good.example/a"))
+        assert await self._respond(cheap, strong=strong) == ""
+
+    def test_the_prompt_lets_them_look_the_link_up_again(self) -> None:
+        prompt = agent_prompt("en", NOW.astimezone(JERUSALEM))
+        assert "if you read it in an earlier message, look it up again first" in prompt
+
+
+class TestLinksAllowed:
+    SOURCES: ClassVar[set[str]] = {
+        "https://www.good.example/a?b=1",
+        "https://good.example/wiki/Foo_(bar)",
+    }
+
+    @pytest.mark.parametrize(
+        ("reply", "allowed"),
+        [
+            ("It closes at 9. https://www.good.example/a?b=1", True),
+            ("(https://www.good.example/a?b=1)", True),
+            ("https://www.good.example/a?b=1.", True),
+            ("https://good.example/wiki/Foo_(bar)", True),
+            ("according to www.good.example", True),
+            ("according to good.example", True),
+            ("no links here, closes at 21.30", True),
+            ("https://www.good.example/a?b=2", False),
+            ("https://www.good.example/a?b=1/", False),
+            ("HTTPS://www.good.example/a?b=1", False),
+            ("https://www.good.example/a?b=1#x", False),
+            ("https://www.good.example.evil.example/a?b=1", False),
+            ("https://www.good.example@evil.example/a", False),
+            ("https://www.g\u043e\u043ed.example/a?b=1", False),
+            ("https://evil.example/", False),
+            ("evil.example", False),
+            ("good.example/secret", False),
+            ("www.g\u043e\u043ed.example", False),
+            ("visit http", False),
+        ],
+    )
+    def test_with_results(self, reply: str, allowed: bool) -> None:
+        assert links_allowed(reply, self.SOURCES) is allowed
+
+    @pytest.mark.parametrize(
+        ("reply", "allowed"), [("see good.example", True), ("http://x", False)]
+    )
+    def test_without_results(self, reply: str, allowed: bool) -> None:
+        assert links_allowed(reply, set()) is allowed
