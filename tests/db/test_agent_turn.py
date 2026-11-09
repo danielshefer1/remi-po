@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import functools
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
@@ -242,6 +243,14 @@ class TestFallbacks:
     ) -> None:
         tenant = await _active(db)
         _, channel, _ = await _turn(db, owner_conn, tenant, ScriptedLLM(said("  ")))
+        assert [m.body for m in channel.sent] == [t("agent_unavailable", "he")]
+
+    async def test_a_turn_that_keeps_pausing_gets_the_fixed_line(
+        self, db: Database, owner_conn: Any
+    ) -> None:
+        tenant = await _active(db)
+        paused = replace(said("hm"), finish_reason="pause_turn")
+        _, channel, _ = await _turn(db, owner_conn, tenant, ScriptedLLM(*[paused] * 4))
         assert [m.body for m in channel.sent] == [t("agent_unavailable", "he")]
 
     async def test_an_overlong_answer_is_cut_to_one_message(
