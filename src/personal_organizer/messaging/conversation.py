@@ -8,7 +8,9 @@ the model can say so or ask again; only the caller decides what a tool *did*.
 Bounds: at most :data:`MAX_TOOL_ROUNDS` rounds of tool calls and :data:`MAX_TOKENS` per
 completion. A model still calling tools after the last round has its text taken as the reply,
 which may be empty, and a completion cut off at ``max_tokens`` is an empty reply; the caller
-has a fallback for that.
+has a fallback for that. A ``pause_turn`` (the web tools' own loop ran long) is sent back as it
+is, with no new user message, at most :data:`MAX_PAUSES` times; it is not a tool round, and past
+the cap the reply is empty.
 
 With ``hebrew`` (the person wrote Hebrew, and Hebrew is their language), a reply with no Hebrew
 in it is said again once, in Hebrew (#62). If the redo fails or still isn't Hebrew, the first
@@ -34,6 +36,8 @@ from personal_organizer.observability.langfuse import observation
 log = structlog.get_logger(__name__)
 
 MAX_TOOL_ROUNDS: Final = 4
+# Two continuations at 5 web calls a turn; a stuck turn costs three 60-second requests.
+MAX_PAUSES: Final = 2
 # Adaptive thinking counts against this too, and so does every tool call in one completion:
 # a month of class reminders (~50 set_reminder calls) overran 4096.
 MAX_TOKENS: Final = 16384
@@ -53,17 +57,30 @@ async def converse(
     run_tool: RunTool,
     llm: LLMProvider,
     hebrew: bool = False,
+    web_sources: set[str] | None = None,
 ) -> str:
     """The model's reply to ``text``, after any tool calls it makes on the way."""
     messages = [Message("system", system), *history, Message("user", text)]
     with observation("conversation.turn"):
-        rounds = 0
+        rounds = pauses = 0
         while True:
             completion = await llm.complete(messages, tools=tools, max_tokens=MAX_TOKENS)
+            if web_sources is not None:
+                web_sources.update(completion.web_sources)
             if completion.finish_reason == "max_tokens":
                 # Half a sentence or half a tool call's arguments: neither is worth using.
                 log.info("conversation.truncated", rounds=rounds)
                 return ""
+            if completion.finish_reason == "pause_turn":
+                # The server's web loop hit its limit: send it back as is to carry on.
+                if pauses == MAX_PAUSES:
+                    log.info("conversation.paused_out")
+                    return ""
+                pauses += 1
+                messages.append(
+                    Message("assistant", completion.content, native=completion.native, paused=True)
+                )
+                continue
             if not completion.tool_calls or rounds == MAX_TOOL_ROUNDS:
                 if hebrew and completion.content.strip() and not completion.tool_calls:
                     return await _in_hebrew(messages, completion, tools=tools, llm=llm)
@@ -104,9 +121,9 @@ async def _in_hebrew(
         redo = await llm.complete(asked, tools=tools, max_tokens=MAX_TOKENS)
     except LLMError:
         return reply.content
-    if redo.tool_calls or redo.finish_reason == "max_tokens":
+    if redo.tool_calls or redo.finish_reason in ("max_tokens", "pause_turn"):
         return reply.content
     return redo.content if detect_language(redo.content) == HEBREW else reply.content
 
 
-__all__ = ["MAX_TOKENS", "MAX_TOOL_ROUNDS", "RunTool", "converse"]
+__all__ = ["MAX_PAUSES", "MAX_TOKENS", "MAX_TOOL_ROUNDS", "RunTool", "converse"]
