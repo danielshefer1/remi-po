@@ -508,7 +508,7 @@ class TestEventFile:
         )
         advance, channel, _ = await _turn(db, owner_conn, tenant, self._script(), inbox_id=inbox_id)
         assert all(m.attachment is None for m in channel.sent)
-        assert advance.reply.endswith(t("file_unsure", "he"))
+        assert (advance.reply or "").endswith(t("file_unsure", "he"))
 
     async def test_the_last_attempt_tells_them(self, db: Database, owner_conn: Any) -> None:
         tenant = await _active(db, stored=True)
@@ -516,7 +516,7 @@ class TestEventFile:
         advance, _, _ = await _turn(
             db, owner_conn, tenant, self._script(), channel=channel, last_attempt=True
         )
-        assert advance.reply.endswith(t("file_failed", "he"))
+        assert (advance.reply or "").endswith(t("file_failed", "he"))
 
     async def test_nothing_of_the_file_is_logged_or_recorded(
         self, db: Database, owner_conn: Any
@@ -530,13 +530,13 @@ class TestEventFile:
         assert "BEGIN:VCALENDAR" not in str([dict(r) for r in rows])
         assert "רופא שיניים" not in str([dict(r) for r in rows])
         for message in await messages_of(db, tenant.id):
-            assert "BEGIN:VCALENDAR" not in message.body
+            assert "BEGIN:VCALENDAR" not in (message.body or "")
 
     async def test_a_model_failure_after_the_file_is_not_an_apology(
         self, db: Database, owner_conn: Any
     ) -> None:
         tenant = await _active(db, stored=True)
-        llm = ScriptedLLM(said("", TOMORROW), said("", SEND_FILE), LLMRejectedError("no"))
+        llm = ScriptedLLM(said("", TOMORROW), said("", SEND_FILE), LLMRejectedError(400))
         advance, channel, _ = await _turn(db, owner_conn, tenant, llm)
         assert advance.reply == t("file_sent", "he")
         assert [m.body for m in channel.sent][-1] == t("file_sent", "he")
@@ -564,7 +564,7 @@ class TestEventFile:
     ) -> None:
         tenant = await _active(db, stored=True)
         channel = FakeOutbound(AttachmentRefusedError("type"), name="gowa")
-        llm = ScriptedLLM(said("", TOMORROW), said("", SEND_FILE), LLMRejectedError("no"))
+        llm = ScriptedLLM(said("", TOMORROW), said("", SEND_FILE), LLMRejectedError(400))
         advance, _, _ = await _turn(db, owner_conn, tenant, llm, channel=channel)
         assert advance.reply == t("file_type", "he")
 
@@ -572,7 +572,7 @@ class TestEventFile:
         self, db: Database, owner_conn: Any
     ) -> None:
         tenant = await _active(db, stored=True)
-        advance, _, _ = await _turn(db, owner_conn, tenant, ScriptedLLM(LLMRejectedError("no")))
+        advance, _, _ = await _turn(db, owner_conn, tenant, ScriptedLLM(LLMRejectedError(400)))
         assert advance.reply == t("agent_unavailable", "he")
 
     async def test_no_proposal_is_stored_on_the_fallback(
@@ -582,7 +582,7 @@ class TestEventFile:
         propose = call(
             "propose_event", title="Lunch", start="2026-10-14T12:00", end="2026-10-14T13:00"
         )
-        llm = ScriptedLLM(said("", TOMORROW), said("", SEND_FILE, propose), LLMRejectedError("no"))
+        llm = ScriptedLLM(said("", TOMORROW), said("", SEND_FILE, propose), LLMRejectedError(400))
         advance, _, _ = await _turn(db, owner_conn, tenant, llm)
         assert advance.reply == t("file_sent", "he")
         async with db.tenant_session(TenantId(tenant.id)) as session:
