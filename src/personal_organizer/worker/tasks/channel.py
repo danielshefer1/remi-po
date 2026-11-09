@@ -26,7 +26,7 @@ from uuid import UUID
 
 import procrastinate
 import structlog
-from sqlalchemy.exc import InterfaceError, OperationalError
+from sqlalchemy.exc import InterfaceError, OperationalError, ProgrammingError
 
 from personal_organizer.core.errors import (
     CalendarProviderUnavailableError,
@@ -65,6 +65,7 @@ INBOUND_RETRY: Final = procrastinate.RetryStrategy(
         TranscriptionUnavailableError,
         OperationalError,
         InterfaceError,
+        ProgrammingError,  # a deploy running ahead of its migration: the column arrives shortly
     },
 )
 

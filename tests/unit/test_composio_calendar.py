@@ -433,6 +433,39 @@ class TestChanges:
         assert "boss@example.com" not in repr(invite)
 
 
+@pytest.mark.parametrize(
+    ("visibility", "private"),
+    [
+        ("private", True),
+        ("confidential", True),
+        ("secret", True),
+        (["x"], True),
+        ("default", False),
+        ("public", False),
+        (None, False),
+    ],
+)
+async def test_visibility_is_read(visibility: Any, private: bool) -> None:
+    item = {
+        "id": "v",
+        "start": {"dateTime": "2026-10-13T20:00:00+03:00"},
+        "end": {"dateTime": "2026-10-13T21:00:00+03:00"},
+    }
+    if visibility is not None:
+        item["visibility"] = visibility
+    [event] = await list_events(list_api({"items": [item]}))
+    assert event.private is private
+
+
+async def test_a_private_series_part_stays_private() -> None:
+    api = create_api()
+    await connector(api).create_event(ACCOUNT, TENANT, replace(DINNER, private=True))
+    assert sent(api, CREATE_EVENT)["arguments"]["visibility"] == "private"
+    api = create_api()
+    await connector(api).create_event(ACCOUNT, TENANT, DINNER)
+    assert "visibility" not in sent(api, CREATE_EVENT)["arguments"]
+
+
 class TestParsing:
     async def test_events_keep_title_times_and_location_only(self) -> None:
         timed, *_ = await list_events(list_api())

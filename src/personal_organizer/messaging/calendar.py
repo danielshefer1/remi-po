@@ -239,7 +239,14 @@ class TenantCalendar:
             location = target.location if change.location is None else change.location or None
             title = change.title or target.title
             new = CalendarEvent(
-                "", title, start, end, all_day=target.all_day, location=location, rule=rule
+                "",
+                title,
+                start,
+                end,
+                all_day=target.all_day,
+                location=location,
+                rule=rule,
+                private=master.private,
             )
         if target.start > master.start:
             ended = end_lines(lines, target.start.astimezone(zone), target.all_day)

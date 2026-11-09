@@ -148,7 +148,7 @@ def _when(field: Any, zone: tzinfo | None) -> tuple[datetime, bool]:
 
 def _event(item: Any, zone: tzinfo | None) -> CalendarEvent:
     """Title, times and location only: descriptions and attendees are anyone's to write. Of the
-    organizer, only whether it is us."""
+    organizer, only whether it is us; of the visibility, only whether it is private."""
     start, all_day = _when(item["start"], zone)
     end, _ = _when(item["end"], zone)
     title, location = item.get("summary", ""), item.get("location")
@@ -169,6 +169,7 @@ def _event(item: Any, zone: tzinfo | None) -> CalendarEvent:
         link=link if isinstance(link, str) and link.startswith("https://") else None,
         series_id=series_id,
         invited=organizer is not None and organizer.get("self") is not True,
+        private=item.get("visibility") not in (None, "default", "public"),
     )
 
 
@@ -316,6 +317,8 @@ class ComposioConnector:
             arguments["timezone"] = event.start.tzinfo.key
         if event.location:
             arguments["location"] = event.location
+        if event.private:
+            arguments["visibility"] = "private"
         if event.rule:
             arguments["recurrence"] = [_google_rule(event)]
         payload = await self._execute(CREATE_EVENT, arguments, account_id, user_id)
