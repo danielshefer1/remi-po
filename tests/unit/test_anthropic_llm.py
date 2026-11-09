@@ -62,6 +62,63 @@ TOOL_USE = {
     "name": "set_timezone",
     "input": {"zone": "Asia/Jerusalem"},
 }
+SEARCH_USE = {
+    "type": "server_tool_use",
+    "id": "srvtoolu_1",
+    "name": "web_search",
+    "input": {"query": "bakery hours"},
+}
+SEARCH_RESULT = {
+    "type": "web_search_tool_result",
+    "tool_use_id": "srvtoolu_1",
+    "content": [
+        {
+            "type": "web_search_result",
+            "url": "https://good.example/a",
+            "title": "TITLE-1",
+            "encrypted_content": "ENC-1",
+            "page_age": None,
+        }
+    ],
+}
+FETCH_RESULT = {
+    "type": "web_fetch_tool_result",
+    "tool_use_id": "srvtoolu_2",
+    "content": {
+        "type": "web_fetch_result",
+        "url": "https://good.example/a",
+        "retrieved_at": None,
+        "content": {
+            "type": "document",
+            "title": "Page",
+            "citations": None,
+            "source": {
+                "type": "text",
+                "media_type": "text/plain",
+                "data": "PAGE-TEXT see https://evil.example/x",
+            },
+        },
+    },
+}
+SEARCH_ERROR = {
+    "type": "web_search_tool_result",
+    "tool_use_id": "srvtoolu_1",
+    "content": {"type": "web_search_tool_result_error", "error_code": "unavailable"},
+}
+CITED = {
+    "type": "text",
+    "text": "Closes at 9.",
+    "citations": [
+        {
+            "type": "web_search_result_location",
+            "url": "https://good.example/a",
+            "title": "TITLE-1",
+            "encrypted_index": "IDX-1",
+            "cited_text": "CITED-TEXT",
+        }
+    ],
+}
+WEB = {"type": "web_search_20260209", "name": "web_search", "max_uses": 3}
 
 
 class Api:
@@ -70,8 +127,10 @@ class Api:
     def __init__(self, *responses: httpx2.Response | Exception) -> None:
         self.responses = list(responses)
         self.bodies: list[dict[str, Any]] = []
+        self.requests: list[httpx2.Request] = []
 
     def __call__(self, request: httpx2.Request) -> httpx2.Response:
+        self.requests.append(request)
         self.bodies.append(json.loads(request.content))
         response = self.responses.pop(0)
         if isinstance(response, Exception):
@@ -306,3 +365,137 @@ async def test_each_call_is_a_langfuse_generation(
     [update] = fake.generation.updates
     assert update["usage_details"] == {"input": 110, "output": 5}
     assert update["metadata"]["tools"] == ["set_timezone"]
+
+
+class TestWebTools:
+    async def test_a_typed_tool_goes_unchanged(self, agent_settings: Settings) -> None:
+        api = Api(answer(text("ok")))
+        await llm(agent_settings, api).complete(
+            [Message("user", "hi")], tools=[TOOL, WEB], max_tokens=1024
+        )
+        assert api.bodies[0]["tools"] == [TOOL, WEB]
+
+    async def test_web_blocks_go_back_exactly(self, agent_settings: Settings) -> None:
+        blocks: list[dict[str, Any]] = [THINKING, SEARCH_USE, SEARCH_RESULT, text("x"), CITED]
+        api = Api(answer(*blocks), answer(text("ok")))
+        target = llm(agent_settings, api)
+        first = await target.complete([Message("user", "hi")], tools=[WEB], max_tokens=1024)
+        await target.complete(
+            [
+                Message("user", "hi"),
+                Message("assistant", first.content, native=first.native),
+                Message("user", "again"),
+            ],
+            tools=[WEB],
+            max_tokens=1024,
+        )
+        assert api.bodies[1]["messages"][1]["content"] == blocks
+
+    async def test_a_paused_turn_goes_back_last(self, agent_settings: Settings) -> None:
+        blocks: list[dict[str, Any]] = [SEARCH_USE, SEARCH_RESULT]
+        api = Api(answer(*blocks, stop_reason="pause_turn"), answer(text("ok")))
+        target = llm(agent_settings, api)
+        first = await target.complete([Message("user", "hi")], tools=[WEB], max_tokens=1024)
+        await target.complete(
+            [
+                Message("user", "hi"),
+                Message("assistant", "", native=first.native, paused=True),
+            ],
+            tools=[WEB],
+            max_tokens=1024,
+        )
+        last = api.bodies[1]["messages"][-1]
+        assert last["role"] == "assistant"
+        assert last["content"] == blocks
+
+    async def test_a_trailing_turn_not_paused_is_still_dropped(
+        self, agent_settings: Settings
+    ) -> None:
+        api = Api(answer(SEARCH_USE, SEARCH_RESULT, text("Done.")), answer(text("ok")))
+        target = llm(agent_settings, api)
+        first = await target.complete([Message("user", "hi")], tools=[WEB], max_tokens=1024)
+        await target.complete(
+            [
+                Message("user", "thanks"),
+                Message("assistant", "Done.", native=first.native, paused=False),
+            ],
+            max_tokens=1024,
+        )
+        assert [m["role"] for m in api.bodies[1]["messages"]] == ["user"]
+
+    async def test_a_turn_mixing_server_and_client_tools(self, agent_settings: Settings) -> None:
+        api = Api(answer(SEARCH_USE, TOOL_USE, stop_reason="tool_use"), answer(text("ok")))
+        target = llm(agent_settings, api)
+        first = await target.complete([Message("user", "hi")], tools=[TOOL, WEB], max_tokens=1024)
+        await target.complete(
+            [
+                Message("user", "hi"),
+                Message("assistant", first.content, first.tool_calls, native=first.native),
+                Message("tool", "ok", tool_call_id="toolu_1"),
+            ],
+            tools=[TOOL, WEB],
+            max_tokens=1024,
+        )
+        last = api.bodies[1]["messages"][-1]
+        assert [block["type"] for block in last["content"]] == ["tool_result"]
+
+    async def test_narration_before_a_search_is_not_the_reply(
+        self, agent_settings: Settings
+    ) -> None:
+        api = Api(answer(text("I'll check."), SEARCH_USE, SEARCH_RESULT, text("Closes at 9.")))
+        done = await llm(agent_settings, api).complete(
+            [Message("user", "hi")], tools=[WEB], max_tokens=1024
+        )
+        assert done.content == "Closes at 9."
+
+    async def test_nothing_after_a_failed_search_is_empty(self, agent_settings: Settings) -> None:
+        api = Api(answer(text("Checking."), SEARCH_USE, SEARCH_ERROR))
+        done = await llm(agent_settings, api).complete(
+            [Message("user", "hi")], tools=[WEB], max_tokens=1024
+        )
+        assert done.content == ""
+        assert done.web_sources == ()
+
+    async def test_text_around_a_citation_stays_whole(self, agent_settings: Settings) -> None:
+        api = Api(answer(SEARCH_USE, SEARCH_RESULT, text("Closes "), CITED))
+        done = await llm(agent_settings, api).complete(
+            [Message("user", "hi")], tools=[WEB], max_tokens=1024
+        )
+        assert done.content == "Closes Closes at 9."
+
+    async def test_web_sources_are_only_the_result_urls(self, agent_settings: Settings) -> None:
+        api = Api(answer(SEARCH_USE, SEARCH_RESULT, FETCH_RESULT, CITED))
+        done = await llm(agent_settings, api).complete(
+            [Message("user", "hi")], tools=[WEB], max_tokens=1024
+        )
+        assert done.web_sources == ("https://good.example/a",)
+
+    async def test_a_web_turn_waits_longer(self, agent_settings: Settings) -> None:
+        api = Api(answer(text("ok")), answer(text("ok")))
+        target = llm(agent_settings, api)
+        await target.complete([Message("user", "hi")], tools=[WEB], max_tokens=1024)
+        await target.complete([Message("user", "hi")], tools=[TOOL], max_tokens=1024)
+        assert api.requests[0].extensions["timeout"]["read"] == 60.0
+        assert api.requests[1].extensions["timeout"]["read"] == 20.0
+
+    async def test_page_text_never_reaches_langfuse(
+        self, agent_settings: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = FakeLangfuse()
+        monkeypatch.setattr(langfuse, "_client", fake)
+        api = Api(answer(SEARCH_USE, SEARCH_RESULT, FETCH_RESULT, CITED), answer(text("ok")))
+        target = llm(agent_settings, api)
+        first = await target.complete([Message("user", "hi")], tools=[WEB], max_tokens=1024)
+        await target.complete(
+            [
+                Message("user", "hi"),
+                Message("assistant", first.content, native=first.native),
+                Message("user", "again"),
+            ],
+            tools=[WEB],
+            max_tokens=1024,
+        )
+        seen = json.dumps([fake.opened, fake.generation.updates], default=str)
+        for secret in ("PAGE-TEXT", "CITED-TEXT", "ENC-1", "evil.example"):
+            assert secret not in seen
+        assert "bakery hours" in seen
