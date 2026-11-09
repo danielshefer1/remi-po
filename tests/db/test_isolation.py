@@ -351,6 +351,7 @@ async def test_updates_through_every_repository_function_leave_b_alone(
         await tenants.activate(session, seeded.b)
         await links.consume_link(session, seeded.b, nonce="nonce-b", now=NOW)
         await groups.set_sharing(session, seeded.b, group, False)
+        await groups.set_details(session, seeded.b, group, False)
         await groups.set_display_name(session, seeded.b, "Mallory")
         # B's real grant to X. In rls-only mode this removes A's own grant to X; never B's.
         await groups.revoke(session, seeded.b, X)
