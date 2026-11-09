@@ -8,7 +8,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from personal_organizer.core.errors import ChannelError, TransientChannelError
-from personal_organizer.interfaces.channel import OutboundChannel, OutboundMessage
+from personal_organizer.interfaces.channel import GroupRoster, OutboundChannel, OutboundMessage
 from personal_organizer.messaging.inbox import InboxRow
 from personal_organizer.messaging.onboarding import Advance
 from personal_organizer.messaging.tenancy import TenantState
@@ -19,7 +19,11 @@ class FakeOutbound:
     name = "whatsapp"
 
     def __init__(
-        self, *failures: ChannelError, mark_read_fails: bool = False, name: str = "whatsapp"
+        self,
+        *failures: ChannelError,
+        mark_read_fails: bool = False,
+        name: str = "whatsapp",
+        roster: GroupRoster | None = None,
     ) -> None:
         self.name = name
         self.failures = list(failures)
@@ -27,6 +31,8 @@ class FakeOutbound:
         self.attempts: list[OutboundMessage] = []
         self.sent: list[OutboundMessage] = []
         self.read: list[str] = []
+        self.roster = roster
+        self.roster_calls: list[str] = []
 
     async def send_text(self, message: OutboundMessage) -> str:
         self.attempts.append(message)
@@ -39,6 +45,10 @@ class FakeOutbound:
         if self.mark_read_fails:
             raise TransientChannelError("provider down")
         self.read.append(provider_message_id)
+
+    async def group_roster(self, group_jid: str) -> GroupRoster | None:
+        self.roster_calls.append(group_jid)
+        return self.roster
 
 
 class Spy:

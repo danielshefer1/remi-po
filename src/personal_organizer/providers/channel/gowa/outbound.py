@@ -42,11 +42,11 @@ from personal_organizer.core.errors import (
     TransientChannelError,
 )
 from personal_organizer.core.phone import normalise_e164
-from personal_organizer.interfaces.channel import Attachment, OutboundMessage
+from personal_organizer.interfaces.channel import Attachment, GroupRoster, OutboundMessage
 from personal_organizer.interfaces.voice import MAX_AUDIO_BYTES, Audio
 from personal_organizer.messaging.text import WHATSAPP_TEXT_LIMIT
 from personal_organizer.providers.channel.gowa.inbound import CHANNEL_NAME
-from personal_organizer.providers.channel.gowa.parser import phone_jid
+from personal_organizer.providers.channel.gowa.parser import jid_user, phone_jid
 from personal_organizer.settings import GowaSettings
 
 log = structlog.get_logger(__name__)
@@ -56,6 +56,7 @@ POLL_PATH: Final = "send/poll"
 PRESENCE_PATH: Final = "send/chat-presence"
 IMAGE_PATH: Final = "send/image"
 FILE_PATH: Final = "send/file"
+PARTICIPANTS_PATH: Final = "group/participants"
 DOWNLOAD_PATH: Final = "message/{message_id}/download"
 #: The gateway's config says 20 MB but nothing applies it to an uploaded image
 #: (docs/superpowers/plans/2026-11-09-89-send-media.md), so we enforce it.
@@ -218,6 +219,36 @@ class GowaOutbound:
         if "." not in filename:  # the extension names the format; notes are ogg/opus
             filename = "voice.ogg"
         return Audio(content, filename)
+
+    async def group_roster(self, group_jid: str) -> GroupRoster | None:
+        """Who is in the group now, from the gateway; ``None`` when that can't be told.
+
+        Never raises: the response shape is from GOWA's OpenAPI, not seen live.
+        """
+        try:
+            data = (await self._get(PARTICIPANTS_PATH, params={"group_id": group_jid})).json()
+            results = data["results"]
+            members = results["participants"]
+            if not isinstance(members, list) or not members:
+                return None
+            phones: set[str] = set()
+            complete = True
+            for member in members:
+                raw = member.get("phone_number") if isinstance(member, dict) else None
+                phone = normalise_e164(jid_user(raw)) if isinstance(raw, str) else None
+                if phone:
+                    phones.add(phone)
+                else:
+                    complete = False
+            if not phones:
+                return None
+            name = results.get("name")
+            name = name.strip() if isinstance(name, str) else ""
+            return GroupRoster(name or None, frozenset(phones), complete)
+        except TransientChannelError, MediaUnavailableError:
+            return None
+        except ValueError, KeyError, TypeError, AttributeError:
+            return None
 
     async def _get(self, path: str, *, params: dict[str, str] | None = None) -> httpx.Response:
         try:

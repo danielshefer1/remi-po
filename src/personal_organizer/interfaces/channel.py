@@ -140,6 +140,21 @@ class OutboundChannel(Protocol):
     async def mark_read(self, provider_message_id: str) -> None: ...
 
 
+@dataclass(frozen=True, slots=True)
+class GroupRoster:
+    name: str | None
+    phones: frozenset[str]  # E.164
+    #: Every participant's phone could be read, so a phone not listed really is not there.
+    complete: bool
+
+
+@runtime_checkable
+class GroupReader(Protocol):
+    async def group_roster(self, group_jid: str) -> GroupRoster | None:
+        """Who is in the group now; ``None`` when that can't be told. Never raises."""
+        ...
+
+
 @runtime_checkable
 class Channel(InboundChannel, OutboundChannel, Protocol):
     """Both halves -- what a provider implements in full, and what contract tests target."""
@@ -150,6 +165,8 @@ __all__ = [
     "Channel",
     "DeliveryStatus",
     "DeliveryUpdate",
+    "GroupReader",
+    "GroupRoster",
     "InboundChannel",
     "InboundMessage",
     "OutboundChannel",
