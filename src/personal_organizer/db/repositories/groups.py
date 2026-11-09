@@ -6,8 +6,8 @@ Three kinds of call, each in its own session:
   :func:`sweep_context`, :func:`recent_context`) are not tenant data:
   ``Database.system_session()``.
 * A person's own membership, grants and name (:func:`touch_member`, :func:`set_sharing`,
-  :func:`groups_of`, :func:`sharing_in`, :func:`grant`, :func:`revoke`,
-  :func:`set_display_name`): their
+  :func:`groups_of`, :func:`sharing_in`, :func:`set_details`, :func:`details_on`,
+  :func:`details_in`, :func:`grant`, :func:`revoke`, :func:`set_display_name`): their
   ``Database.tenant_session(tenant_id)``. A grant row belongs to its owner.
 * Reading across people (:func:`group_tenants`, :func:`peers_of`, :func:`detail_grantors`,
   :func:`due_nudges`): ``system_session``, through the ``SECURITY DEFINER`` functions of
@@ -16,6 +16,7 @@ Three kinds of call, each in its own session:
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime, timedelta
 from typing import Final
 from uuid import UUID
@@ -120,8 +121,14 @@ async def set_sharing(
 ) -> None:
     """Okay (or stop) showing busy/free in the group; either answers any open ask, unless
     ``close_ask`` is false. Stopping is always the person's own say, so :func:`ask` skips them
-    until they share again. :func:`touch_member` comes first."""
-    values: dict[str, object] = {"sharing": sharing, "stopped_at": None if sharing else func.now()}
+    until they share again. Details were never agreed to by this call, so it always turns them
+    off: they imply sharing, and a plain "ok" or "stop" must not leave them on (only
+    :func:`set_details` turns them on). :func:`touch_member` comes first."""
+    values: dict[str, object] = {
+        "sharing": sharing,
+        "stopped_at": None if sharing else func.now(),
+        "show_details": False,
+    }
     if close_ask:
         values["asked_at"] = None
     await session.execute(
@@ -129,6 +136,42 @@ async def set_sharing(
         .where(GroupMember.group_id == group_id)
         .values(values)
     )
+
+
+async def set_details(session: AsyncSession, tenant_id: UUID, group_id: UUID, on: bool) -> None:
+    """Show (or stop showing) the group the titles of the person's events. Turning it on also
+    shares, as :func:`set_sharing` would, so details never outlive sharing. :func:`touch_member`
+    comes first."""
+    values: dict[str, object] = {"show_details": on}
+    if on:
+        values |= {"sharing": True, "stopped_at": None, "asked_at": None}
+    await session.execute(
+        scoped(update(GroupMember), GroupMember, tenant_id)
+        .where(GroupMember.group_id == group_id)
+        .values(values)
+    )
+
+
+async def details_on(session: AsyncSession, tenant_id: UUID, group_id: UUID) -> bool:
+    """Does the tenant show this group their event details?"""
+    stmt = scoped(select(GroupMember.show_details), GroupMember, tenant_id).where(
+        GroupMember.group_id == group_id
+    )
+    return bool((await session.scalars(stmt)).first())
+
+
+async def details_in(session: AsyncSession, tenant_id: UUID) -> list[UUID]:
+    """The groups the tenant shows event details in."""
+    stmt = scoped(select(GroupMember.group_id), GroupMember, tenant_id).where(
+        GroupMember.show_details
+    )
+    return list(await session.scalars(stmt))
+
+
+async def group_jids(session: AsyncSession, group_ids: Sequence[UUID]) -> dict[UUID, str]:
+    """The WhatsApp id of each group. In ``system_session``."""
+    stmt = select(WaGroup.id, WaGroup.jid).where(WaGroup.id.in_(group_ids))
+    return {row[0]: row[1] for row in await session.execute(stmt)}
 
 
 async def ask(session: AsyncSession, tenant_id: UUID, group_id: UUID, now: datetime) -> bool:
@@ -243,9 +286,12 @@ __all__ = [
     "ask",
     "clear_ask",
     "detail_grantors",
+    "details_in",
+    "details_on",
     "due_nudges",
     "ensure_group",
     "grant",
+    "group_jids",
     "group_tenants",
     "groups_of",
     "mark_served",
@@ -253,6 +299,7 @@ __all__ = [
     "peers_of",
     "recent_context",
     "revoke",
+    "set_details",
     "set_display_name",
     "set_sharing",
     "sharing_in",
