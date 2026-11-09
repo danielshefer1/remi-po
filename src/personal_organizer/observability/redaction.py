@@ -185,6 +185,7 @@ SAFE_KEYS: Final = frozenset(
         "provider",
         "tokens_in",
         "tokens_out",
+        "text_count",
         "latency_ms",
         "cost_usd",
         "finish_reason",

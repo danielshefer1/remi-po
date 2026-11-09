@@ -187,6 +187,28 @@ class TranscriptionRefusedError(VoiceError):
     code = "transcription_refused"
 
 
+class EmbeddingError(AppError):
+    """A text could not be embedded.
+
+    Separate from :class:`LLMError`, whose handlers send a person fixed text: that is the
+    wrong response to a failed search. Messages are fixed strings, never the text.
+    """
+
+    code = "embedding_error"
+
+
+class EmbeddingUnavailableError(EmbeddingError):
+    """Timed out, unreachable, throttled or a 5xx. The same request may work later."""
+
+    code = "embedding_unavailable"
+
+
+class EmbeddingRejectedError(EmbeddingError):
+    """A 4xx, or a response we cannot use. Retrying won't help."""
+
+    code = "embedding_rejected"
+
+
 __all__ = [
     "AmbiguousDeliveryError",
     "AppError",
@@ -198,6 +220,9 @@ __all__ = [
     "ChannelError",
     "ChannelNotConfiguredError",
     "ConfigError",
+    "EmbeddingError",
+    "EmbeddingRejectedError",
+    "EmbeddingUnavailableError",
     "EventChangedError",
     "LLMError",
     "LLMRejectedError",

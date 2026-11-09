@@ -430,6 +430,19 @@ class TestVoice:
         assert "sk-proj-test" not in repr(cfg) + cfg.model_dump_json()
 
 
+class TestEmbedding:
+    def test_no_key_by_default(self, settings: Settings) -> None:
+        assert settings.embedding.api_key is None
+
+    def test_the_key_is_read_and_hidden(self, settings_factory: Any) -> None:
+        cfg = settings_factory(EMBEDDING__API_KEY="embed-test-key")
+        assert cfg.embedding.api_key is not None
+        assert "embed-test-key" not in repr(cfg) + cfg.model_dump_json()
+
+    def test_the_default_dimension_is_1024(self, settings: Settings) -> None:
+        assert settings.models.embedding_dimensions == 1024
+
+
 class TestPublicBaseUrl:
     def test_unset_by_default(self, settings: Settings) -> None:
         assert settings.app.public_base_url is None
