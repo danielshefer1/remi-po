@@ -1476,7 +1476,8 @@ class TestEventFile:
         _, sink, _ = await self._run(said("", self.SEND), said("ok"), events=(evil,))
         [(_, caption)] = sink.sent
         assert "evil.example" not in caption
-        assert "2026-10-29" in caption
+        assert "Thursday 29 October" in caption
+        assert "2026-" not in caption
 
     async def test_one_file_per_message(self) -> None:
         _, sink, llm = await self._run(said("", self.SEND, self.SEND), said("ok"))

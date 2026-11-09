@@ -229,6 +229,35 @@ _HE_WEEKDAYS: Final = (
     "יום ראשון",
 )
 
+_MONTHS: Final = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+]
+_HE_MONTHS: Final = [
+    "ינואר",
+    "פברואר",
+    "מרץ",
+    "אפריל",
+    "מאי",
+    "יוני",
+    "יולי",
+    "אוגוסט",
+    "ספטמבר",
+    "אוקטובר",
+    "נובמבר",
+    "דצמבר",
+]
+
 _TIME_FORMAT: Final = "start and end are local times in their time zone, ISO 8601 with no offset"
 
 TOOLS: Final[tuple[Mapping[str, Any], ...]] = (
@@ -857,12 +886,24 @@ def day_label(when: date, language: str) -> str:
     return f"{names[when.weekday()]} {when.isoformat()}"
 
 
-def _when(event: CalendarEvent, zone: ZoneInfo, language: str) -> str:
+def spoken_day(when: date, language: str) -> str:
+    """The day the way a person says it: "Friday 23 October", "יום שישי, 23 באוקטובר"."""
+    if language == HEBREW:
+        return f"{_HE_WEEKDAYS[when.weekday()]}, {when.day} ב{_HE_MONTHS[when.month - 1]}"
+    return f"{WEEKDAYS[when.weekday()]} {when.day} {_MONTHS[when.month - 1]}"
+
+
+def _when(
+    event: CalendarEvent,
+    zone: ZoneInfo,
+    language: str,
+    label: Callable[[date, str], str] = day_label,
+) -> str:
     """The local day and times, e.g. "Friday 2026-10-23, 09:00-10:00"."""
     start, end = event.start.astimezone(zone), event.end.astimezone(zone)
 
     def day(when: date) -> str:
-        return day_label(when, language)
+        return label(when, language)
 
     if event.all_day:
         last = max(end.date() - timedelta(days=1), start.date())
@@ -1578,7 +1619,9 @@ async def respond(
             file_tried = True
             target = shown[n - 1]
             caption = t(
-                "event_file_caption", tenant.language, when=_when(target, zone, tenant.language)
+                "event_file_caption",
+                tenant.language,
+                when=_when(target, zone, tenant.language, spoken_day),
             )
             try:
                 status = await send_file(
@@ -1844,9 +1887,12 @@ async def agent_turn(
     changed: list[ProposedChange] = []
     links: list[str] = []
 
+    # The fixed line for how the file went, for a turn whose model fails after the file is out.
+    filed: list[str] = []
+
     async def send_file(attachment: Attachment, caption: str) -> str:
         try:
-            return await send_once(
+            status = await send_once(
                 db,
                 channel,
                 inbox_id=row.id,
@@ -1856,10 +1902,16 @@ async def agent_turn(
                 text=caption,
                 attachment=attachment,
             )
+        except AttachmentRefusedError as refused:
+            filed[:] = ["file_too_big" if refused.reason == "too_big" else "file_type"]
+            raise
         except TransientChannelError:
             if not last_attempt:
                 raise
+            filed[:] = ["file_failed"]
             return "failed"
+        filed[:] = [{"failed": "file_failed", "unknown": "file_unsure"}.get(status, "file_sent")]
+        return status
 
     async def connect_link() -> str:
         assert settings is not None  # only passed when there are settings
@@ -1868,6 +1920,7 @@ async def agent_turn(
         return url
 
     # The model and calendar log lines inside this turn carry the row, never its words.
+    failed = False
     with structlog.contextvars.bound_contextvars(inbox_id=str(row.id)):
         try:
             reply = await respond(
@@ -1892,12 +1945,17 @@ async def agent_turn(
                 raise
             log.warning("agent.fallback", reason="unavailable")
             reply = ""
+            failed = True
         except LLMRejectedError:
             log.warning("agent.fallback", reason="rejected")
             reply = ""
+            failed = True
+    if failed and filed:
+        # The file was tried: say how it went, not that nothing could be answered.
+        reply = t(filed[0], tenant.language)
     if bubbles(reply) == [""]:  # nothing but break lines says nothing
         reply = ""
-    asking = bool(reply and (proposed or changed))
+    asking = bool(reply and not failed and (proposed or changed))
     if asking:
         kind, payload = (
             (CHANGE_EVENT, _change_payload(changed[0], row.id, zone))

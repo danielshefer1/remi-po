@@ -16,6 +16,7 @@ import pytest
 from structlog.testing import capture_logs
 
 from personal_organizer.core.errors import (
+    AttachmentRefusedError,
     CalendarProviderUnavailableError,
     LLMRejectedError,
     LLMUnavailableError,
@@ -530,3 +531,59 @@ class TestEventFile:
         assert "רופא שיניים" not in str([dict(r) for r in rows])
         for message in await messages_of(db, tenant.id):
             assert "BEGIN:VCALENDAR" not in message.body
+
+    async def test_a_model_failure_after_the_file_is_not_an_apology(
+        self, db: Database, owner_conn: Any
+    ) -> None:
+        tenant = await _active(db, stored=True)
+        llm = ScriptedLLM(said("", TOMORROW), said("", SEND_FILE), LLMRejectedError("no"))
+        advance, channel, _ = await _turn(db, owner_conn, tenant, llm)
+        assert advance.reply == t("file_sent", "he")
+        assert [m.body for m in channel.sent][-1] == t("file_sent", "he")
+        async with db.tenant_session(TenantId(tenant.id)) as session:
+            assert await current(session, tenant.id, now=NOW) is None
+
+    async def test_the_last_attempt_unavailable_after_the_file(
+        self, db: Database, owner_conn: Any
+    ) -> None:
+        tenant = await _active(db, stored=True)
+        llm = ScriptedLLM(said("", TOMORROW), said("", SEND_FILE), LLMUnavailableError("down"))
+        advance, _, _ = await _turn(db, owner_conn, tenant, llm, last_attempt=True)
+        assert advance.reply == t("file_sent", "he")
+
+    async def test_unavailable_before_the_last_attempt_still_retries(
+        self, db: Database, owner_conn: Any
+    ) -> None:
+        tenant = await _active(db, stored=True)
+        llm = ScriptedLLM(said("", TOMORROW), said("", SEND_FILE), LLMUnavailableError("down"))
+        with pytest.raises(LLMUnavailableError):
+            await _turn(db, owner_conn, tenant, llm)
+
+    async def test_a_refused_file_then_a_model_failure_gets_the_refusal(
+        self, db: Database, owner_conn: Any
+    ) -> None:
+        tenant = await _active(db, stored=True)
+        channel = FakeOutbound(AttachmentRefusedError("type"), name="gowa")
+        llm = ScriptedLLM(said("", TOMORROW), said("", SEND_FILE), LLMRejectedError("no"))
+        advance, _, _ = await _turn(db, owner_conn, tenant, llm, channel=channel)
+        assert advance.reply == t("file_type", "he")
+
+    async def test_a_model_failure_with_no_file_is_the_usual_apology(
+        self, db: Database, owner_conn: Any
+    ) -> None:
+        tenant = await _active(db, stored=True)
+        advance, _, _ = await _turn(db, owner_conn, tenant, ScriptedLLM(LLMRejectedError("no")))
+        assert advance.reply == t("agent_unavailable", "he")
+
+    async def test_no_proposal_is_stored_on_the_fallback(
+        self, db: Database, owner_conn: Any
+    ) -> None:
+        tenant = await _active(db, stored=True)
+        propose = call(
+            "propose_event", title="Lunch", start="2026-10-14T12:00", end="2026-10-14T13:00"
+        )
+        llm = ScriptedLLM(said("", TOMORROW), said("", SEND_FILE, propose), LLMRejectedError("no"))
+        advance, _, _ = await _turn(db, owner_conn, tenant, llm)
+        assert advance.reply == t("file_sent", "he")
+        async with db.tenant_session(TenantId(tenant.id)) as session:
+            assert await current(session, tenant.id, now=NOW) is None
