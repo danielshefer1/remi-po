@@ -15,11 +15,12 @@ import pytest
 
 from personal_organizer.core.errors import (
     AmbiguousDeliveryError,
+    AttachmentRefusedError,
     MessageTooLongError,
     RejectedChannelError,
     TransientChannelError,
 )
-from personal_organizer.interfaces.channel import OutboundChannel, OutboundMessage
+from personal_organizer.interfaces.channel import Attachment, OutboundChannel, OutboundMessage
 from personal_organizer.messaging.text import WHATSAPP_TEXT_LIMIT
 from personal_organizer.providers.channel.whatsapp.outbound import WhatsAppOutbound
 
@@ -185,3 +186,132 @@ class TestClassification:
         with pytest.raises(RejectedChannelError) as excinfo:
             await channel.send_text(MESSAGE)
         assert excinfo.value.provider_code == code
+
+
+HEBREW = "ארוחת ערב.pdf"
+PDF = Attachment(b"%PDF-1.7 x", HEBREW, "application/pdf")
+PNG = Attachment(b"\x89PNG", "cake.png", "image/png")
+
+
+def _media(
+    upload: Callable[[httpx.Request], httpx.Response] | None = None,
+    send: Callable[[httpx.Request], httpx.Response] | None = None,
+) -> Callable[[httpx.Request], httpx.Response]:
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/media"):
+            return (upload or _json(200, {"id": "M1"}))(request)
+        return (send or _json(200, OK_SEND))(request)
+
+    return respond
+
+
+def _msg(attachment: Attachment | None, body: str = "c") -> OutboundMessage:
+    return OutboundMessage(recipient="+31612345678", body=body, attachment=attachment)
+
+
+class TestAttachments:
+    async def test_a_document_is_uploaded_then_sent(self) -> None:
+        channel, recorder = _channel(_media())
+        assert await channel.send_text(_msg(PDF)) == "wamid.SENT1"
+        upload, send = recorder.requests
+        assert upload.url.path.endswith("/106540352242922/media")
+        assert send.url.path.endswith("/106540352242922/messages")
+        for part in (
+            b'name="messaging_product"',
+            b"whatsapp",
+            b'name="type"',
+            b"application/pdf",
+            b'name="file"',
+        ):
+            assert part in upload.content
+        assert upload.headers["Authorization"] == f"Bearer {TOKEN}"
+        assert json.loads(send.content) == {
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": "+31612345678",
+            "type": "document",
+            "document": {"id": "M1", "caption": "c", "filename": HEBREW},
+        }
+
+    async def test_an_image_has_no_filename(self) -> None:
+        channel, recorder = _channel(_media())
+        await channel.send_text(_msg(PNG))
+        body = json.loads(recorder.requests[1].content)
+        assert body["type"] == "image"
+        assert body["image"] == {"id": "M1", "caption": "c"}
+
+    async def test_an_empty_caption_is_left_out(self) -> None:
+        channel, recorder = _channel(_media())
+        await channel.send_text(_msg(PDF, body=""))
+        assert "caption" not in json.loads(recorder.requests[1].content)["document"]
+
+    async def test_the_hebrew_name_is_not_uploaded(self) -> None:
+        channel, recorder = _channel(_media())
+        await channel.send_text(_msg(PDF))
+        assert HEBREW.encode() not in recorder.requests[0].content
+
+    async def test_an_ics_is_refused(self) -> None:
+        channel, recorder = _channel(_media())
+        ics = Attachment(b"BEGIN:VCALENDAR", "x.ics", "text/calendar")
+        with pytest.raises(AttachmentRefusedError) as excinfo:
+            await channel.send_text(_msg(ics))
+        assert excinfo.value.reason == "type"
+        assert recorder.requests == []
+
+    @pytest.mark.parametrize(
+        "attachment",
+        [
+            Attachment(b"x" * 5_000_001, "a.png", "image/png"),
+            Attachment(b"x" * 100_000_001, "a.pdf", "application/pdf"),
+        ],
+        ids=["image", "document"],
+    )
+    async def test_too_big_makes_no_request(self, attachment: Attachment) -> None:
+        channel, recorder = _channel(_media())
+        with pytest.raises(AttachmentRefusedError) as excinfo:
+            await channel.send_text(_msg(attachment))
+        assert excinfo.value.reason == "too_big"
+        assert recorder.requests == []
+
+    async def test_it_never_sends_a_link(self) -> None:
+        channel, recorder = _channel(_media())
+        await channel.send_text(_msg(PDF))
+        assert "link" not in json.loads(recorder.requests[1].content)["document"]
+
+    @pytest.mark.parametrize(
+        "upload",
+        [
+            pytest.param(_raise(httpx.ConnectError), id="connect-error"),
+            pytest.param(_raise(httpx.ReadTimeout), id="read-timeout"),
+            pytest.param(_json(500, {}), id="500"),
+            pytest.param(_json(429, _graph_error(80007)), id="429"),
+        ],
+    )
+    async def test_a_failed_upload_is_transient_and_sends_nothing(
+        self, upload: Callable[[httpx.Request], httpx.Response]
+    ) -> None:
+        channel, recorder = _channel(_media(upload=upload))
+        with pytest.raises(TransientChannelError):
+            await channel.send_text(_msg(PDF))
+        assert all(r.url.path.endswith("/media") for r in recorder.requests)
+
+    @pytest.mark.parametrize(
+        ("upload", "code"),
+        [
+            pytest.param(_json(400, _graph_error(131053)), 131053, id="400"),
+            pytest.param(_json(200, {}), None, id="no-id"),
+        ],
+    )
+    async def test_a_refused_upload_is_rejected(
+        self, upload: Callable[[httpx.Request], httpx.Response], code: int | None
+    ) -> None:
+        channel, recorder = _channel(_media(upload=upload))
+        with pytest.raises(RejectedChannelError) as excinfo:
+            await channel.send_text(_msg(PDF))
+        assert excinfo.value.provider_code == code
+        assert all(r.url.path.endswith("/media") for r in recorder.requests)
+
+    async def test_a_timeout_on_the_send_itself_is_ambiguous(self) -> None:
+        channel, _ = _channel(_media(send=_raise(httpx.ReadTimeout)))
+        with pytest.raises(AmbiguousDeliveryError):
+            await channel.send_text(_msg(PDF))
