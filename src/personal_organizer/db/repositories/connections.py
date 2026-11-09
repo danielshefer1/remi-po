@@ -15,7 +15,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from personal_organizer.db.models.tenant import CalendarConnection
+from personal_organizer.db.models.tenant import CalendarConnection, Event
 from personal_organizer.db.repositories.scope import scoped
 
 #: The partial unique index behind "at most one active row per tenant".
@@ -125,6 +125,10 @@ async def revoke_connection(session: AsyncSession, tenant_id: UUID, connection_i
         scoped(update(CalendarConnection), CalendarConnection, tenant_id)
         .where(CalendarConnection.id == connection_id, CalendarConnection.status == "active")
         .values(status="revoked")
+    )
+    # Copies of a calendar we can no longer read must not stay shown as public.
+    await session.execute(
+        scoped(update(Event), Event, tenant_id).where(Event.source == "google").values(private=None)
     )
 
 

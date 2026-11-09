@@ -17,7 +17,11 @@ from personal_organizer.core.errors import (
 from personal_organizer.core.types import TenantId
 from personal_organizer.db.engine import Database
 from personal_organizer.db.repositories import events as event_rows
-from personal_organizer.db.repositories.connections import active_connection, bind_connection
+from personal_organizer.db.repositories.connections import (
+    active_connection,
+    bind_connection,
+    revoke_connection,
+)
 from personal_organizer.db.repositories.tenants import set_timezone
 from personal_organizer.interfaces.calendar import ACCOUNT_ACTIVE, CalendarEvent, ConnectedAccount
 from personal_organizer.messaging.calendar_sync import sync_calendar
@@ -164,6 +168,22 @@ async def test_sync_revoked_account_disconnects(db: Database) -> None:
         assert await active_connection(session, tenant_id) is None
     assert [e.title for e in await _stored(db, tenant_id)] == ["Copied"]
     assert await _due(db, NOW + timedelta(days=1)) == []  # nothing to sync any more
+
+
+async def test_disconnect_makes_copies_private(db: Database) -> None:
+    tenant_id = await _tenant(db)
+    await sync_calendar(
+        tenant_id, db=db, provider=InMemoryCalendar([_event("Copied", 3, "g1")]), now=NOW
+    )
+    async with db.tenant_session(TenantId(tenant_id)) as session:
+        await event_rows.add_event(session, tenant_id, _event("Mine", 4, ""), source="remi")
+        account = await active_connection(session, tenant_id)
+        assert account is not None
+        await revoke_connection(session, tenant_id, account.id)
+    assert {e.title: e.private for e in await _stored(db, tenant_id)} == {
+        "Copied": True,
+        "Mine": False,
+    }
 
 
 async def test_sync_not_connected_but_account_active_is_not_revoked(db: Database) -> None:

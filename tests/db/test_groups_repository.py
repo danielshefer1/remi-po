@@ -329,3 +329,90 @@ async def test_stop_is_not_asked_again(db: Database) -> None:
     async with db.tenant_session(TenantId(eden)) as session:
         await groups.set_sharing(session, eden, group_id, True)
     assert not await _stopped(db, eden)
+
+
+# --- showing a group the event details ----------------------------------------------------
+
+
+async def _details_on(db: Database, tenant_id: UUID, group_id: UUID) -> bool:
+    async with db.tenant_session(TenantId(tenant_id)) as session:
+        return await groups.details_on(session, tenant_id, group_id)
+
+
+async def _set_details(db: Database, tenant_id: UUID, group_id: UUID, on: bool) -> None:
+    async with db.tenant_session(TenantId(tenant_id)) as session:
+        await groups.set_details(session, tenant_id, group_id, on)
+
+
+async def _shares(db: Database, tenant_id: UUID, group_id: UUID) -> bool:
+    async with db.tenant_session(TenantId(tenant_id)) as session:
+        return group_id in await groups.sharing_in(session, tenant_id)
+
+
+async def test_details_default_off(db: Database) -> None:
+    group_id = await _group(db)
+    eden = await _member(db, "+972501110001", group_id, sharing=False)
+    assert not await _details_on(db, eden, group_id)
+
+
+async def test_set_details_also_shares(db: Database) -> None:
+    group_id = await _group(db)
+    eden = await _member(db, "+972501110001", group_id, sharing=False)
+    await _ask(db, eden, group_id, NOW)
+    async with db.tenant_session(TenantId(eden)) as session:
+        await groups.set_sharing(session, eden, group_id, False, close_ask=False)
+    assert await _stopped(db, eden)
+    await _set_details(db, eden, group_id, True)
+    assert await _details_on(db, eden, group_id)
+    assert await _shares(db, eden, group_id)
+    assert not await _stopped(db, eden)
+    assert not await _open_ask(db, eden, group_id, NOW)
+
+
+async def test_set_details_off_keeps_sharing(db: Database) -> None:
+    group_id = await _group(db)
+    eden = await _member(db, "+972501110001", group_id, sharing=False)
+    await _set_details(db, eden, group_id, True)
+    await _set_details(db, eden, group_id, False)
+    assert not await _details_on(db, eden, group_id)
+    assert await _shares(db, eden, group_id)
+
+
+@pytest.mark.parametrize("sharing", [True, False])
+async def test_set_sharing_clears_details(db: Database, sharing: bool) -> None:
+    group_id = await _group(db)
+    eden = await _member(db, "+972501110001", group_id, sharing=False)
+    await _set_details(db, eden, group_id, True)
+    async with db.tenant_session(TenantId(eden)) as session:
+        await groups.set_sharing(session, eden, group_id, sharing)
+    assert not await _details_on(db, eden, group_id)
+
+
+async def test_details_are_per_group(db: Database) -> None:
+    a = await _group(db)
+    b = await _group(db, "120363000000000002@g.us")
+    eden = await _member(db, "+972501110001", a, sharing=False)
+    await _join(db, eden, b, sharing=False)
+    await _set_details(db, eden, a, True)
+    assert not await _details_on(db, eden, b)
+    async with db.tenant_session(TenantId(eden)) as session:
+        assert await groups.details_in(session, eden) == [a]
+
+
+async def test_details_of_another_tenant_cannot_be_read(db: Database) -> None:
+    group_id = await _group(db)
+    noa = await _member(db, "+972501110001", group_id, sharing=False)
+    dana = await _member(db, "+972501110002", group_id, sharing=False)
+    await _set_details(db, noa, group_id, True)
+    async with db.tenant_session(TenantId(dana)) as session:
+        assert await groups.details_on(session, noa, group_id) is False
+
+
+async def test_group_jids(db: Database) -> None:
+    a = await _group(db)
+    b = await _group(db, "120363000000000002@g.us")
+    async with db.system_session() as session:
+        assert await groups.group_jids(session, [a, b]) == {
+            a: "120363000000000001@g.us",
+            b: "120363000000000002@g.us",
+        }

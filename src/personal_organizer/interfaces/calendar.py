@@ -7,7 +7,8 @@ row and passes that row's account and user ids, so nothing a model writes can pi
 calendar a call reaches. Both stay dependency-free, so swapping an adapter never reaches the
 callers.
 
-``CalendarEvent`` carries the title, the times and the location, and nothing else. Anyone can
+``CalendarEvent`` carries the title, the times, the location and whether Google marks it private
+(anything but ``default``/``public``), and nothing else. Anyone can
 send an invite into your calendar, so its description and attendees never reach a prompt.
 ``link`` is the provider's page for the event, for the confirmation of one just created.
 """
@@ -38,6 +39,7 @@ class CalendarEvent:
     link: str | None = None
     rule: str | None = None
     series_id: str | None = None
+    private: bool = False
     invited: bool = False
 
 

@@ -121,6 +121,14 @@ _EN: Final = {
         "Done, from now on I'll show here when you're busy. Only the times, never what it is."
     ),
     "group_shared_off": "Okay, I won't show your schedule here anymore.",
+    "group_details_on": (
+        "Done, from now on this group can see what's on your calendar: what it is, when and "
+        "where. Anything marked private stays just busy."
+    ),
+    "group_details_off": (
+        "Okay, from now on this group only sees when you're busy. What I already wrote here "
+        "stays in the chat."
+    ),
     "outing_kept": (
         "Got it. It's still in your calendar, though, since I can't take things out yet."
     ),
@@ -209,6 +217,12 @@ _HE: Final = {
     "group_details": "הנה מה שיש, רק בשבילך:",
     "group_shared_on": "סגור, מעכשיו אראה כאן מתי יש לך משהו. רק את השעות, אף פעם לא מה זה.",
     "group_shared_off": "בסדר, מעכשיו לא אראה כאן מתי יש לך משהו.",
+    "group_details_on": (
+        "סגור, מעכשיו הקבוצה תראה מה יש לך ביומן: מה זה, מתי ואיפה. מה שמסומן כפרטי יופיע רק כתפוס."
+    ),
+    "group_details_off": (
+        "בסדר, מעכשיו הקבוצה תראה רק מתי יש לך משהו. מה שכבר כתבתי כאן נשאר בצ'אט."
+    ),
     "outing_kept": "קיבלתי. רק שזה עדיין ביומן שלך, כי אני עוד לא יכול להוריד משם דברים.",
     "outing_nudge_fallback": "היי, רציתי לבדוק אם מסתדר לך להגיע: {summary}. בלי לחץ.",
     "event_file_name": "אירוע",

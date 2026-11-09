@@ -278,6 +278,27 @@ async def test_google_following_ends_and_creates(db: Database) -> None:
     assert [e.title for e in await cal.events(*WIDE)] == ["Class"] * 2 + ["New class"] * 3
 
 
+async def test_private_series_split_stays_private(db: Database) -> None:
+    google = InMemoryCalendar(
+        [
+            CalendarEvent(
+                "ser",
+                "Class",
+                CLASS_AT,
+                CLASS_AT + timedelta(hours=1),
+                rule="FREQ=WEEKLY",
+                private=True,
+            )
+        ]
+    )
+    cal = await _calendar(db, google)
+    await cal.refresh(*WIDE)
+    listed = list(await cal.events(*WIDE))
+    await cal.change(EventChange(listed[2], which="following", title="New class"))
+    assert google.events[-1].title == "New class"
+    assert google.events[-1].private is True
+
+
 async def test_google_following_new_pattern_starts_on_its_first_day(db: Database) -> None:
     cal, google, listed = await _google_series(db)
     await cal.change(EventChange(listed[2], which="following", rule="FREQ=WEEKLY;BYDAY=TH"))

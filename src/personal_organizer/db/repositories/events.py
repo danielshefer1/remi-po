@@ -51,6 +51,7 @@ def _to_event(row: Event, zone: tzinfo | None = None) -> CalendarEvent:
         rule=row.rule,
         series_id=row.series_id,
         invited=row.invited,
+        private=row.source == "google" and row.private is not False,
     )
 
 
@@ -172,6 +173,7 @@ async def _upsert_google(
                 "external_id": e.external_id,
                 "series_id": e.series_id,
                 "invited": e.invited,
+                "private": e.private,
             }
             for e in events
         ]
@@ -188,6 +190,7 @@ async def _upsert_google(
                 "source": stmt.excluded.source,
                 "series_id": stmt.excluded.series_id,
                 "invited": stmt.excluded.invited,
+                "private": stmt.excluded.private,
             },
         )
     )

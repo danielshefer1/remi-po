@@ -200,7 +200,8 @@ class Event(Base, TenantMixin):
     for an import, the row id for ``remi``. ``rule`` is #53's. ``series_id`` is
     the series a single-date row or a Google instance belongs to, ``original_start`` where that
     date fell before it moved, ``skipped`` the occurrence starts a series leaves out, and
-    ``invited`` whether the owner was invited rather than the organizer (#63).
+    ``invited`` whether the owner was invited rather than the organizer (#63), ``private`` whether
+    Google marks it private (#82; ``NULL`` on a ``google`` row, unknown, reads as private).
     """
 
     __tablename__ = "events"
@@ -224,6 +225,7 @@ class Event(Base, TenantMixin):
         ARRAY(DateTime(timezone=True)), server_default=text("'{}'")
     )
     invited: Mapped[bool] = mapped_column(server_default=text("false"))
+    private: Mapped[bool | None]
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
 
@@ -242,6 +244,7 @@ class GroupMember(Base, TenantMixin):
     seen_at: Mapped[datetime]
     asked_at: Mapped[datetime | None]
     stopped_at: Mapped[datetime | None]
+    show_details: Mapped[bool] = mapped_column(server_default=text("false"))
 
 
 class DetailGrant(Base, TenantMixin):

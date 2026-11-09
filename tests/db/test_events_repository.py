@@ -10,7 +10,8 @@ from uuid import UUID
 from zoneinfo import ZoneInfo
 
 import pytest
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
+from sqlalchemy.exc import ProgrammingError
 
 from personal_organizer.core.errors import EventChangedError
 from personal_organizer.core.types import TenantId
@@ -21,6 +22,7 @@ from personal_organizer.db.repositories.connections import bind_connection
 from personal_organizer.db.repositories.tenants import get_tenant, set_live_calendar
 from personal_organizer.interfaces.calendar import CalendarEvent, EventChange
 from personal_organizer.settings import Settings
+from personal_organizer.worker.tasks.channel import INBOUND_RETRY
 from tests.fixtures.connect import TRUNCATE_CONNECT_TABLES, make_active, seed_tenant
 
 pytestmark = [pytest.mark.db]
@@ -460,3 +462,38 @@ async def test_split_across_dst(db: Database) -> None:
     got = await _read(db, tenant_id, *window)
     assert {f"{e.start.astimezone(JLM):%H:%M}" for e in got} == {"18:00"}
     assert [e.title for e in got] == ["Class"] * 8 + ["Late class"] * 6
+
+
+async def test_google_copy_keeps_private(db: Database) -> None:
+    tenant_id = await _tenant(db)
+    secret = replace(_event("Therapy", NOW + timedelta(hours=2), ext="g1"), private=True)
+    async with db.tenant_session(TenantId(tenant_id)) as session:
+        await events.replace_imported(session, tenant_id, *WIDE, [secret])
+        [read] = await events.events_between(session, tenant_id, *WIDE)
+    assert read.private is True
+    async with db.tenant_session(TenantId(tenant_id)) as session:
+        await events.replace_imported(session, tenant_id, *WIDE, [replace(secret, private=False)])
+        [read] = await events.events_between(session, tenant_id, *WIDE)
+    assert read.private is False
+
+
+async def test_unknown_flag_is_private(db: Database) -> None:
+    tenant_id = await _tenant(db)
+    async with db.tenant_session(TenantId(tenant_id)) as session:
+        await events.replace_imported(
+            session, tenant_id, *WIDE, [_event("Copied", NOW + timedelta(hours=2), ext="g1")]
+        )
+        await events.add_event(
+            session, tenant_id, _event("Mine", NOW + timedelta(hours=4)), source="remi"
+        )
+        await session.execute(update(Event).values(private=None))
+        read = {e.title: e.private for e in await events.events_between(session, tenant_id, *WIDE)}
+    assert read == {"Copied": True, "Mine": False}
+
+
+async def test_missing_column_is_retried(db: Database) -> None:
+    tenant_id = await _tenant(db)
+    async with db.tenant_session(TenantId(tenant_id)) as session:
+        with pytest.raises(ProgrammingError):
+            await session.execute(text("SELECT no_such_column FROM events"))
+    assert ProgrammingError in (INBOUND_RETRY.retry_exceptions or ())

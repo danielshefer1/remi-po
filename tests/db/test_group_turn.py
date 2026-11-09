@@ -16,6 +16,7 @@ from uuid import UUID
 from zoneinfo import ZoneInfo
 
 import pytest
+from sqlalchemy import update
 
 from personal_organizer.core.errors import (
     CalendarProviderUnavailableError,
@@ -25,19 +26,28 @@ from personal_organizer.core.errors import (
 )
 from personal_organizer.core.types import TenantId
 from personal_organizer.db.engine import Database
+from personal_organizer.db.models.tenant import Event
 from personal_organizer.db.repositories import events as event_rows
 from personal_organizer.db.repositories import groups
-from personal_organizer.db.repositories.connections import bind_connection
-from personal_organizer.db.repositories.tenants import set_live_calendar, set_timezone
+from personal_organizer.db.repositories.connections import (
+    active_connection,
+    bind_connection,
+    revoke_connection,
+)
+from personal_organizer.db.repositories.tenants import get_tenant, set_live_calendar, set_timezone
 from personal_organizer.interfaces.calendar import CalendarEvent
+from personal_organizer.interfaces.channel import GroupRoster
+from personal_organizer.interfaces.llm import ToolCall
 from personal_organizer.messaging.groups import turn as turn_module
 from personal_organizer.messaging.groups.gate import GROUP_REPLY, REMI
+from personal_organizer.messaging.groups.grants import TenantGrants
 from personal_organizer.messaging.groups.turn import group_turn
 from personal_organizer.messaging.inbound import handle_inbound
 from personal_organizer.messaging.onboarding_text import t
 from personal_organizer.providers.calendar.memory import InMemoryCalendar
 from personal_organizer.settings import Settings
 from tests.fixtures.channels import FakeOutbound, Spy, insert_inbox
+from tests.fixtures.connect import suspend
 from tests.fixtures.llm import NoLLM, ScriptedLLM, call, said
 from tests.fixtures.tenants import new_tenant
 
@@ -51,6 +61,7 @@ ZONE = ZoneInfo("Asia/Jerusalem")
 JID = "120363402106000001@g.us"
 DANA, NOA, EDEN = "+972501111111", "+972502222222", "+972503333333"
 STRANGER = "+972500000009"
+EVERYONE = GroupRoster("Family", frozenset({DANA, NOA, EDEN}), True)
 FRIDAY = call("who_is_free", start="2026-10-23T00:00", end="2026-10-24T00:00")
 
 
@@ -106,6 +117,7 @@ async def _member(
     *,
     sharing: bool,
     live: bool = True,
+    details: bool = False,
 ) -> UUID:
     """``live``: Remi reads their Google every time, which these tests' fake provider serves."""
     tenant_id = await new_tenant(db, phone=phone, status="active", step=None)
@@ -120,6 +132,8 @@ async def _member(
         await groups.touch_member(session, tenant_id, group_id, NOW)
         if sharing:  # a member starts out not sharing; set_sharing(False) is an explicit stop
             await groups.set_sharing(session, tenant_id, group_id, True)
+        if details:
+            await groups.set_details(session, tenant_id, group_id, True)
     return tenant_id
 
 
@@ -135,13 +149,14 @@ async def _say(
     channel: FakeOutbound | None = None,
     inbox_id: UUID | None = None,
     last_attempt: bool = False,
+    jid: str = JID,
 ) -> tuple[FakeOutbound, InMemoryCalendar]:
     """Run one message through the gate; pass ``channel`` and ``inbox_id`` to retry it."""
     calendar = calendar or Calendars(CALENDARS)
     channel = channel or FakeOutbound(name="gowa")
     if inbox_id is None:
         inbox_id = await insert_inbox(
-            conn, phone=phone, body=body, group_id=JID, sender_name="WhatsApp name", sent_at=NOW
+            conn, phone=phone, body=body, group_id=jid, sender_name="WhatsApp name", sent_at=NOW
         )
     await handle_inbound(
         inbox_id,
@@ -767,3 +782,616 @@ async def test_okay_needs_the_whole_name_asked(
     assert channel.sent == []
     assert (await _sharing(db, group))[dan] is False
     assert await _asked_now(db, group, dan)
+
+
+def _entry(llm: ScriptedLLM, name: str) -> dict[str, Any]:
+    entry: dict[str, Any] = next(p for p in _tool_result(llm)["people"] if p["name"] == name)
+    return entry
+
+
+async def _ask(
+    db: Database,
+    conn: Any,
+    settings: Settings,
+    *,
+    roster: GroupRoster | None = EVERYONE,
+    calendar: InMemoryCalendar | None = None,
+    jid: str = JID,
+) -> tuple[ScriptedLLM, FakeOutbound]:
+    llm = ScriptedLLM(said("", FRIDAY), said("Here is Friday."))
+    channel = FakeOutbound(name="gowa", roster=roster)
+    await _say(db, conn, settings, llm, channel=channel, calendar=calendar, jid=jid)
+    return llm, channel
+
+
+async def _opened_pair(db: Database, group: UUID) -> tuple[UUID, UUID]:
+    dana = await _member(db, group, DANA, "Dana", "ca_dana", sharing=True, details=True)
+    noa = await _member(db, group, NOA, "Noa", "ca_noa", sharing=True, details=True)
+    return dana, noa
+
+
+async def _is_on(db: Database, tenant_id: UUID, group: UUID) -> bool:
+    async with db.tenant_session(TenantId(tenant_id)) as session:
+        return await groups.details_on(session, tenant_id, group)
+
+
+async def test_member_who_didnt_opt_in_shows_no_title(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    await _member(db, group, DANA, "Dana", "ca_dana", sharing=True, details=True)
+    await _member(db, group, NOA, "Noa", "ca_noa", sharing=True)
+    llm, _ = await _ask(db, owner_conn, onboarding_settings)
+    assert "Board meeting" not in _seen(llm)
+    assert "Dentist" in _seen(llm)
+    assert "events" not in _entry(llm, "Noa")
+
+
+async def test_opened_events_read_under_their_owners_tenant(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    await _member(db, group, DANA, "Dana", None, sharing=True)
+    noa = await _member(db, group, NOA, "Noa", None, sharing=True, details=True)
+    async with db.tenant_session(TenantId(noa)) as session:
+        await event_rows.add_event(
+            session, noa, CalendarEvent("", "Noa's yoga", _at(14), _at(15)), source="remi"
+        )
+    llm, _ = await _ask(db, owner_conn, onboarding_settings)
+    assert _entry(llm, "Noa")["events"][0]["title"] == "Noa's yoga"
+
+
+async def test_opted_in_one_group_only(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    other = "120363402106000002@g.us"
+    async with db.system_session() as session:
+        b = await groups.ensure_group(session, channel="gowa", jid=other)
+        await groups.mark_served(session, b.id, NOW)
+    dana = await _member(db, group, DANA, "Dana", "ca_dana", sharing=True)
+    noa = await _member(db, group, NOA, "Noa", "ca_noa", sharing=True, details=True)
+    for member in (dana, noa):
+        async with db.tenant_session(TenantId(member)) as session:
+            await groups.touch_member(session, member, b.id, NOW)
+            await groups.set_sharing(session, member, b.id, True)
+    llm, _ = await _ask(db, owner_conn, onboarding_settings, jid=other)
+    assert "Board meeting" not in _seen(llm)
+
+
+async def test_private_event_stays_busy(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    await _member(db, group, DANA, "Dana", "ca_dana", sharing=True)
+    await _member(db, group, NOA, "Noa", "ca_noa", sharing=True, details=True)
+    secret = CalendarEvent("n1", "Board meeting", _at(14), _at(16), private=True)
+    llm, _ = await _ask(
+        db, owner_conn, onboarding_settings, calendar=Calendars({"ca_noa": [secret]})
+    )
+    assert "Board meeting" not in _seen(llm)
+    assert _entry(llm, "Noa")["busy"][0]["start"] == "2026-10-23T14:00"
+
+
+async def test_imported_before_the_change_stays_busy(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    await _member(db, group, DANA, "Dana", "ca_dana", sharing=True)
+    noa = await _member(db, group, NOA, "Noa", "ca_noa", sharing=True, details=True)
+    async with db.tenant_session(TenantId(noa)) as session:
+        await event_rows.upsert_google(
+            session, noa, CalendarEvent("n1", "Board meeting", _at(14), _at(16))
+        )
+        # As a row imported before #82 reads: Google's flag was never stored.
+        await session.execute(update(Event).values(private=None))
+    llm, _ = await _ask(db, owner_conn, onboarding_settings, calendar=NoaDown(CALENDARS))
+    assert "Board meeting" not in _seen(llm)
+
+
+async def test_opened_member_is_read_fresh(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    await _member(db, group, DANA, "Dana", "ca_dana", sharing=True)
+    await _member(db, group, NOA, "Noa", "ca_noa", sharing=True, details=True, live=False)
+    calendar = Calendars(CALENDARS)
+    await _ask(db, owner_conn, onboarding_settings, calendar=calendar)
+    assert "ca_noa" in [account for account, *_ in calendar.calls]
+
+
+async def test_a_link_in_a_title_never_reaches_the_model(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    await _member(db, group, DANA, "Dana", "ca_dana", sharing=True)
+    await _member(db, group, NOA, "Noa", "ca_noa", sharing=True, details=True)
+    linked = CalendarEvent(
+        "n1",
+        "Sync https://zoom.us/j/1 call",
+        _at(14),
+        _at(15),
+        location="https://zoom.us/j/1",
+        private=False,
+    )
+    llm, channel = await _ask(
+        db, owner_conn, onboarding_settings, calendar=Calendars({"ca_noa": [linked]})
+    )
+    assert "http" not in _seen(llm)
+    assert [m.body for m in channel.sent] == ["Here is Friday."]
+
+
+async def test_member_who_left_goes_back_to_busy(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    _, noa = await _opened_pair(db, group)
+    llm, _ = await _ask(
+        db, owner_conn, onboarding_settings, roster=GroupRoster("F", frozenset({DANA}), True)
+    )
+    assert "Board meeting" not in _seen(llm)
+    assert not await _is_on(db, noa, group)
+
+
+async def test_incomplete_roster_keeps_the_choice(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    _, noa = await _opened_pair(db, group)
+    llm, _ = await _ask(
+        db, owner_conn, onboarding_settings, roster=GroupRoster("F", frozenset({DANA}), False)
+    )
+    assert "Board meeting" not in _seen(llm)
+    assert await _is_on(db, noa, group)
+
+
+async def test_no_roster_means_busy_only(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    _, noa = await _opened_pair(db, group)
+    llm, channel = await _ask(db, owner_conn, onboarding_settings, roster=None)
+    assert "Board meeting" not in _seen(llm)
+    assert [m.body for m in channel.sent] == ["Here is Friday."]
+    assert await _is_on(db, noa, group)
+
+
+async def test_roster_asked_once_and_only_when_needed(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    await _opened_pair(db, group)
+    _, channel = await _ask(db, owner_conn, onboarding_settings)
+    assert len(channel.roster_calls) == 1
+
+
+async def test_roster_not_asked_when_nobody_opened(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    await _member(db, group, DANA, "Dana", "ca_dana", sharing=True)
+    _, channel = await _ask(db, owner_conn, onboarding_settings)
+    assert channel.roster_calls == []
+
+
+async def test_suspended_member_is_not_read(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    _, noa = await _opened_pair(db, group)
+    await suspend(db, noa)
+    llm, _ = await _ask(db, owner_conn, onboarding_settings)
+    assert [p["name"] for p in _tool_result(llm)["people"]] == ["Dana"]
+
+
+async def test_disconnected_member_keeps_only_native_titles(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    await _member(db, group, DANA, "Dana", "ca_dana", sharing=True)
+    noa = await _member(db, group, NOA, "Noa", "ca_noa", sharing=True, details=True)
+    async with db.tenant_session(TenantId(noa)) as session:
+        await event_rows.upsert_google(
+            session, noa, CalendarEvent("n1", "Google thing", _at(14), _at(15), private=False)
+        )
+        await event_rows.add_event(
+            session, noa, CalendarEvent("", "Remi thing", _at(16), _at(17)), source="remi"
+        )
+        connection = await active_connection(session, noa)
+        assert connection is not None
+        await revoke_connection(session, noa, connection.id)
+    llm, _ = await _ask(db, owner_conn, onboarding_settings)
+    assert [e["title"] for e in _entry(llm, "Noa")["events"]] == ["Remi thing"]
+    assert "Google thing" not in _seen(llm)
+
+
+async def test_private_event_is_not_in_granted_details(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    await _granted(db, group)
+    calendar = Calendars(
+        {
+            "ca_noa": [
+                CalendarEvent("n1", "Secret thing", _at(14), _at(15), private=True),
+                CalendarEvent("n2", "Lunch out", _at(12), _at(13), private=False),
+            ]
+        }
+    )
+    llm = ScriptedLLM(said("", FRIDAY), said("Noa is busy."))
+    channel, _ = await _say(db, owner_conn, onboarding_settings, llm, calendar=calendar)
+    private = channel.sent[0]
+    assert "Lunch out" in private.body
+    assert "Secret thing" not in private.body
+
+
+SHOW = "Remi, show my events to this group"
+STAND_IN = (
+    "[My last reply drew on people's calendars and isn't kept. {asked}"
+    "To repeat anything, check the calendars again.]"
+)
+
+
+async def _details(db: Database, group: UUID) -> dict[UUID, bool]:
+    async with db.system_session() as session:
+        members = await groups.group_tenants(session, group)
+    return {tenant_id: await _is_on(db, tenant_id, group) for tenant_id, _ in members}
+
+
+async def _last_context(db: Database, group: UUID) -> str:
+    async with db.system_session() as session:
+        return [c for c in await groups.recent_context(session, group) if c.sender_name == REMI][
+            -1
+        ].body
+
+
+async def test_show_my_events_changes_only_the_writer(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    dana = await _member(db, group, DANA, "Dana", "ca_dana", sharing=False)
+    noa = await _member(db, group, NOA, "Noa", "ca_noa", sharing=True)
+    llm = ScriptedLLM(said("", call("show_my_events", on=True)), said("Sure."))
+
+    channel, _ = await _say(db, owner_conn, onboarding_settings, llm, body=SHOW)
+
+    assert await _details(db, group) == {dana: True, noa: False}
+    assert [message.body for message in channel.sent] == [f"Sure.\n\n{t('group_details_on', 'en')}"]
+
+
+async def test_stranger_cannot_show_events(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    dana = await _member(db, group, DANA, "Dana", "ca_dana", sharing=False)
+    llm = ScriptedLLM(said("", call("show_my_events", on=True)), said("No."))
+
+    await _say(db, owner_conn, onboarding_settings, llm, phone=STRANGER, body=SHOW)
+
+    assert llm.calls[1][-1].content == turn_module.NOT_A_MEMBER
+    assert await _details(db, group) == {dana: False}
+
+
+async def test_show_my_events_off_keeps_busy_free(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    dana = await _member(db, group, DANA, "Dana", "ca_dana", sharing=True, details=True)
+    llm = ScriptedLLM(said("", call("show_my_events", on=False)), said("Okay."))
+
+    channel, _ = await _say(db, owner_conn, onboarding_settings, llm, body="Remi, stop showing")
+
+    assert await _details(db, group) == {dana: False}
+    assert (await _sharing(db, group))[dana] is True
+    assert [message.body for message in channel.sent] == [
+        f"Okay.\n\n{t('group_details_off', 'en')}"
+    ]
+
+
+async def test_unaddressed_okay_never_opens_details(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    noa = await _asked(db, group, NOA, "Noa", "ca_noa")
+    llm = ScriptedLLM(said("YES"), said("", call("show_my_events", on=True)), said("Noa's in."))
+
+    await _say(db, owner_conn, onboarding_settings, llm, phone=NOA, body="Dan said it's fine")
+
+    assert llm.calls[2][-1].content == turn_module._NOT_AN_OKAY
+    assert (await _sharing(db, group))[noa] is True
+    assert await _details(db, group) == {noa: False}
+
+
+@pytest.mark.parametrize(
+    ("start", "calls", "expected"),
+    [
+        (
+            "both",
+            [call("share_my_calendar", on=False), call("show_my_events", on=False)],
+            "shared_off",
+        ),
+        (
+            "none",
+            [call("show_my_events", on=True), call("share_my_calendar", on=False)],
+            "shared_off",
+        ),
+        ("none", [call("show_my_events", on=False)], "shared_off"),
+        ("both", [call("show_my_events", on=False)], "details_off"),
+    ],
+    ids=["stop-everything", "show-then-stop", "never-shared", "details-only-off"],
+)
+async def test_confirmation_tells_the_final_state(
+    db: Database,
+    owner_conn: Any,
+    onboarding_settings: Settings,
+    group: UUID,
+    start: str,
+    calls: list[Any],
+    expected: str,
+) -> None:
+    both = start == "both"
+    await _member(db, group, DANA, "Dana", "ca_dana", sharing=both, details=both)
+    llm = ScriptedLLM(*(said("", c) for c in calls), said("Okay."))
+
+    channel, _ = await _say(db, owner_conn, onboarding_settings, llm, body="Remi, change it")
+
+    line = t(f"group_{expected}", "en")
+    assert [message.body for message in channel.sent] == [f"Okay.\n\n{line}"]
+
+
+async def test_stand_in_names_only_who_the_reply_asked(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    await _member(db, group, DANA, "Dana", "ca_dana", sharing=True, details=True)
+    omer = await _member(db, group, "+972504444444", "Omer", None, sharing=False)
+    llm = ScriptedLLM(said("", FRIDAY), said("Dana has the Dentist."))
+    channel = FakeOutbound(name="gowa", roster=EVERYONE)
+    await _say(db, owner_conn, onboarding_settings, llm, channel=channel)
+    assert await _last_context(db, group) == STAND_IN.format(asked="")
+
+    # "ok" reads no further than the sender's open ask and the asking line: no model call.
+    await _say(
+        db,
+        owner_conn,
+        onboarding_settings,
+        NoLLM(),
+        phone="+972504444444",
+        body="ok",
+        channel=channel,
+    )
+    assert (await _sharing(db, group))[omer] is False
+
+
+@pytest.mark.parametrize(
+    "tool",
+    [
+        call("show_my_events", on=True),
+        call("share_my_calendar", on=True),
+        ToolCall("c1", "call_me", {"name": "Dee"}),
+    ],
+)
+async def test_titles_cant_write_consent(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID, tool: Any
+) -> None:
+    dana = await _member(db, group, DANA, "Dana", "ca_dana", sharing=False)
+    await _member(db, group, NOA, "Noa", "ca_noa", sharing=True, details=True)
+    llm = ScriptedLLM(said("", FRIDAY), said("", tool), said("Okay."))
+
+    await _say(
+        db, owner_conn, onboarding_settings, llm, channel=FakeOutbound(name="gowa", roster=EVERYONE)
+    )
+
+    assert llm.calls[2][-1].content == turn_module._AFTER_TITLES
+    assert (await _details(db, group))[dana] is False
+    assert (await _sharing(db, group))[dana] is False
+    async with db.tenant_session(TenantId(dana)) as session:
+        tenant = await get_tenant(session, dana)
+    assert tenant is not None
+    assert tenant.display_name == "Dana"
+
+
+async def test_turning_off_works_after_titles(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    dana = await _member(db, group, DANA, "Dana", "ca_dana", sharing=True, details=True)
+    llm = ScriptedLLM(said("", FRIDAY), said("", call("show_my_events", on=False)), said("Okay."))
+
+    await _say(
+        db, owner_conn, onboarding_settings, llm, channel=FakeOutbound(name="gowa", roster=EVERYONE)
+    )
+
+    assert "Dentist" in _seen(llm)  # titles were revealed first
+    assert (await _details(db, group))[dana] is False
+
+
+async def test_titles_are_not_kept_in_context(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    await _member(db, group, DANA, "Dana", "ca_dana", sharing=True)
+    await _member(db, group, NOA, "Noa", "ca_noa", sharing=True, details=True)
+    llm = ScriptedLLM(said("", FRIDAY), said("Noa has the Board meeting at 14:00."))
+
+    channel, _ = await _say(
+        db, owner_conn, onboarding_settings, llm, channel=FakeOutbound(name="gowa", roster=EVERYONE)
+    )
+
+    [sent] = channel.sent
+    assert "Board meeting" in sent.body
+    kept = await _last_context(db, group)
+    assert kept == STAND_IN.format(asked="")
+    assert "Board meeting" not in kept
+
+
+async def test_a_busy_only_reply_is_kept_whole(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    await _member(db, group, NOA, "Noa", "ca_noa", sharing=True)
+    llm = ScriptedLLM(said("", FRIDAY), said("Noa is busy 14:00 to 16:00."))
+
+    await _say(db, owner_conn, onboarding_settings, llm, phone=NOA)
+
+    assert await _last_context(db, group) == "Noa is busy 14:00 to 16:00."
+
+
+async def test_okay_still_read_after_a_reply_with_titles(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    await _member(db, group, DANA, "Dana", "ca_dana", sharing=True, details=True)
+    omer = await _member(db, group, "+972504444444", "Omer", None, sharing=False)
+    llm = ScriptedLLM(said("", FRIDAY), said("Dana has the Dentist. Omer, I need your okay."))
+    channel = FakeOutbound(name="gowa", roster=EVERYONE)
+    await _say(db, owner_conn, onboarding_settings, llm, channel=channel)
+    assert await _last_context(db, group) == STAND_IN.format(asked="I asked Omer to okay sharing. ")
+
+    again = ScriptedLLM(said("YES"), said("Omer's in."))
+    await _say(
+        db,
+        owner_conn,
+        onboarding_settings,
+        again,
+        phone="+972504444444",
+        body="ok",
+        channel=channel,
+    )
+
+    assert (await _sharing(db, group))[omer] is True
+
+
+# --- asking from a private chat (#82) ---
+
+JID2 = "120363402106000002@g.us"
+
+
+class _Rosters(FakeOutbound):
+    """Each group its own roster, by jid."""
+
+    def __init__(self, by_jid: dict[str, GroupRoster | None]) -> None:
+        super().__init__()
+        self.by_jid = by_jid
+
+    async def group_roster(self, group_jid: str) -> GroupRoster | None:
+        return self.by_jid.get(group_jid)
+
+
+async def _second_group(db: Database, tenant_id: UUID) -> UUID:
+    async with db.system_session() as session:
+        found = await groups.ensure_group(session, channel="gowa", jid=JID2)
+    async with db.tenant_session(TenantId(tenant_id)) as session:
+        await groups.touch_member(session, tenant_id, found.id, NOW)
+    return found.id
+
+
+async def _shown(db: Database, tenant_id: UUID, group_id: UUID) -> bool:
+    async with db.tenant_session(TenantId(tenant_id)) as session:
+        return await groups.details_on(session, tenant_id, group_id)
+
+
+def _named(name: str, *, phones: frozenset[str] = frozenset({DANA})) -> GroupRoster:
+    return GroupRoster(name, phones, True)
+
+
+async def test_show_in_group_one_group_needs_no_name(db: Database, group: UUID) -> None:
+    dana = await _member(db, group, DANA, "Dana", None, sharing=False)
+    rosters = _Rosters({JID: _named("Family")})
+    result = await TenantGrants(db, dana, channel=rosters).show_in_group("", True)
+    assert result.startswith("ok:")
+    assert "Family" in result
+    assert await _shown(db, dana, group)
+
+
+async def test_show_in_group_checks_a_name_it_cant_match(db: Database, group: UUID) -> None:
+    dana = await _member(db, group, DANA, "Dana", None, sharing=False)
+    rosters = _Rosters({JID: _named("Family")})
+    result = await TenantGrants(db, dana, channel=rosters).show_in_group("soccer", True)
+    assert result.startswith("error:")
+    assert "Family" in result
+    assert not await _shown(db, dana, group)
+
+
+async def test_show_in_group_several_lists_the_names(db: Database, group: UUID) -> None:
+    dana = await _member(db, group, DANA, "Dana", None, sharing=False)
+    other = await _second_group(db, dana)
+    rosters = _Rosters({JID: _named("Family"), JID2: _named("Soccer")})
+    result = await TenantGrants(db, dana, channel=rosters).show_in_group("", True)
+    assert result.startswith("error: which group?")
+    assert "Family" in result
+    assert "Soccer" in result
+    assert not await _shown(db, dana, group)
+    assert not await _shown(db, dana, other)
+
+
+async def test_show_in_group_picks_the_named_one(db: Database, group: UUID) -> None:
+    dana = await _member(db, group, DANA, "Dana", None, sharing=False)
+    other = await _second_group(db, dana)
+    rosters = _Rosters({JID: _named("Family"), JID2: _named("Soccer")})
+    result = await TenantGrants(db, dana, channel=rosters).show_in_group("family", True)
+    assert result.startswith("ok:")
+    assert await _shown(db, dana, group)
+    assert not await _shown(db, dana, other)
+
+
+async def test_show_in_group_skips_a_group_they_left(db: Database, group: UUID) -> None:
+    dana = await _member(db, group, DANA, "Dana", None, sharing=False)
+    other = await _second_group(db, dana)
+    rosters = _Rosters({JID: _named("Family", phones=frozenset({NOA})), JID2: _named("Soccer")})
+    result = await TenantGrants(db, dana, channel=rosters).show_in_group("", True)
+    assert result.startswith("ok:")
+    assert await _shown(db, dana, other)
+    assert not await _shown(db, dana, group)
+
+
+async def test_show_in_group_cant_tell_says_so(db: Database, group: UUID) -> None:
+    dana = await _member(db, group, DANA, "Dana", None, sharing=False)
+    other = await _second_group(db, dana)
+    result = await TenantGrants(db, dana, channel=_Rosters({})).show_in_group("", True)
+    assert result == "error: can't tell which group; ask them to say it in that group"
+    assert not await _shown(db, dana, group)
+    assert not await _shown(db, dana, other)
+
+
+async def test_show_in_group_no_groups(db: Database) -> None:
+    tenant_id = await new_tenant(db, phone=DANA, status="active", step=None)
+    result = await TenantGrants(db, tenant_id, channel=_Rosters({})).show_in_group("", True)
+    assert result == "error: they aren't in a group with you yet; they can say it in the group"
+
+
+async def test_show_in_group_off_with_one_open(db: Database, group: UUID) -> None:
+    dana = await _member(db, group, DANA, "Dana", None, sharing=True, details=True)
+    await _second_group(db, dana)
+    rosters = _Rosters({JID: _named("Family")})
+    result = await TenantGrants(db, dana, channel=rosters).show_in_group("", False)
+    assert result == "ok: Family only sees when they're busy now"
+    assert not await _shown(db, dana, group)
+
+
+async def test_show_in_group_changes_only_its_owner(db: Database, group: UUID) -> None:
+    dana = await _member(db, group, DANA, "Dana", None, sharing=False)
+    noa = await _member(db, group, NOA, "Noa", None, sharing=False)
+    rosters = _Rosters({JID: _named("Family")})
+    await TenantGrants(db, dana, channel=rosters).show_in_group("", True)
+    assert await _shown(db, dana, group)
+    assert not await _shown(db, noa, group)
+
+
+async def test_show_in_group_a_name_it_cant_check_opens_nothing(db: Database, group: UUID) -> None:
+    dana = await _member(db, group, DANA, "Dana", None, sharing=False)
+    result = await TenantGrants(db, dana, channel=_Rosters({})).show_in_group("soccer", True)
+    assert result == "error: can't tell which group; ask them to say it in that group"
+    assert not await _shown(db, dana, group)
+
+
+async def test_show_in_group_a_name_with_no_group_reader_opens_nothing(
+    db: Database, group: UUID
+) -> None:
+    dana = await _member(db, group, DANA, "Dana", None, sharing=False)
+    result = await TenantGrants(db, dana, channel=None).show_in_group("soccer", True)
+    assert result.startswith("error: can't tell")
+    assert not await _shown(db, dana, group)
+
+
+async def test_show_in_group_off_closes_all_when_names_cant_be_read(
+    db: Database, group: UUID
+) -> None:
+    dana = await _member(db, group, DANA, "Dana", None, sharing=True, details=True)
+    other = await _second_group(db, dana)
+    async with db.tenant_session(TenantId(dana)) as session:
+        await groups.set_details(session, dana, other, True)
+    result = await TenantGrants(db, dana, channel=_Rosters({})).show_in_group("soccer", False)
+    assert result.startswith("ok:")
+    assert not await _shown(db, dana, group)
+    assert not await _shown(db, dana, other)
+
+
+async def test_show_in_group_off_with_a_readable_wrong_name_closes_nothing(
+    db: Database, group: UUID
+) -> None:
+    dana = await _member(db, group, DANA, "Dana", None, sharing=True, details=True)
+    other = await _second_group(db, dana)
+    async with db.tenant_session(TenantId(dana)) as session:
+        await groups.set_details(session, dana, other, True)
+    rosters = _Rosters({JID: _named("Family"), JID2: _named("Soccer")})
+    result = await TenantGrants(db, dana, channel=rosters).show_in_group("book club", False)
+    assert result.startswith("error: which group?")
+    assert await _shown(db, dana, group)
+    assert await _shown(db, dana, other)

@@ -21,7 +21,13 @@ from personal_organizer.core.errors import (
     RejectedChannelError,
     TransientChannelError,
 )
-from personal_organizer.interfaces.channel import Attachment, OutboundChannel, OutboundMessage
+from personal_organizer.interfaces.channel import (
+    Attachment,
+    GroupReader,
+    GroupRoster,
+    OutboundChannel,
+    OutboundMessage,
+)
 from personal_organizer.messaging.text import WHATSAPP_TEXT_LIMIT
 from personal_organizer.providers.channel.gowa.outbound import (
     REACHOUT_TIMELOCK_CODE,
@@ -416,3 +422,74 @@ class TestAttachments:
         channel, _ = _channel(respond)
         with pytest.raises(error):
             await channel.send_text(_with(DOC))
+
+
+def _roster(*participants: dict[str, Any], name: str | None = "Family") -> dict[str, Any]:
+    return {"code": "SUCCESS", "results": {"name": name, "participants": list(participants)}}
+
+
+def _member(phone_number: str | None) -> dict[str, Any]:
+    return {"phone_number": phone_number}
+
+
+class TestGroupRoster:
+    async def test_roster_lists_phones(self) -> None:
+        body = _roster(
+            _member("972501111111@s.whatsapp.net"), _member("972502222222@s.whatsapp.net")
+        )
+        channel, recorder = _channel(_json(200, body))
+        roster = await channel.group_roster("1203@g.us")
+        assert roster == GroupRoster("Family", frozenset({"+972501111111", "+972502222222"}), True)
+        assert recorder.requests[0].method == "GET"
+        assert recorder.paths == ["/group/participants"]
+        assert recorder.requests[0].url.params["group_id"] == "1203@g.us"
+
+    async def test_roster_with_an_unknown_phone_is_incomplete(self) -> None:
+        body = _roster(_member("972501111111@s.whatsapp.net"), _member(None), _member("abc@lid"))
+        channel, _ = _channel(_json(200, body))
+        roster = await channel.group_roster("1203@g.us")
+        assert roster is not None
+        assert roster.phones == frozenset({"+972501111111"})
+        assert roster.complete is False
+
+    @pytest.mark.parametrize("other", ["251512345678901@lid", "972503333333"])
+    async def test_an_id_that_is_not_a_phone_is_not_counted(self, other: str) -> None:
+        body = _roster(_member("972501111111@s.whatsapp.net"), _member(other))
+        channel, _ = _channel(_json(200, body))
+        roster = await channel.group_roster("1203@g.us")
+        assert roster is not None
+        assert roster.phones == frozenset({"+972501111111"})
+        assert roster.complete is False
+
+    async def test_no_participants_is_no_roster(self) -> None:
+        channel, _ = _channel(_json(200, _roster()))
+        assert await channel.group_roster("1203@g.us") is None
+
+    @pytest.mark.parametrize(
+        "respond",
+        [
+            _json(500, {"code": "INTERNAL"}),
+            _json(404, {"code": "NOT_FOUND"}),
+            _raise(httpx.ConnectError),
+            _json(200, ["nope"]),
+            _json(200, {"results": {"participants": "x"}}),
+            _json(200, {"results": {"participants": [1, None]}}),
+            lambda _request: httpx.Response(200, text="not json"),
+        ],
+    )
+    async def test_gateway_down_or_odd_is_no_roster(
+        self, respond: Callable[[httpx.Request], httpx.Response]
+    ) -> None:
+        channel, _ = _channel(respond)
+        assert await channel.group_roster("1203@g.us") is None
+
+    async def test_blank_name_is_none(self) -> None:
+        body = _roster(_member("972501111111@s.whatsapp.net"), name="  ")
+        channel, _ = _channel(_json(200, body))
+        roster = await channel.group_roster("1203@g.us")
+        assert roster is not None
+        assert roster.name is None
+
+    def test_gowa_reads_groups(self) -> None:
+        channel, _ = _channel(_json(200, OK_SEND))
+        assert isinstance(channel, GroupReader)
