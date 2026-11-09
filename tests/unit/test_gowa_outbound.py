@@ -452,6 +452,15 @@ class TestGroupRoster:
         assert roster.phones == frozenset({"+972501111111"})
         assert roster.complete is False
 
+    @pytest.mark.parametrize("other", ["251512345678901@lid", "972503333333"])
+    async def test_an_id_that_is_not_a_phone_is_not_counted(self, other: str) -> None:
+        body = _roster(_member("972501111111@s.whatsapp.net"), _member(other))
+        channel, _ = _channel(_json(200, body))
+        roster = await channel.group_roster("1203@g.us")
+        assert roster is not None
+        assert roster.phones == frozenset({"+972501111111"})
+        assert roster.complete is False
+
     async def test_no_participants_is_no_roster(self) -> None:
         channel, _ = _channel(_json(200, _roster()))
         assert await channel.group_roster("1203@g.us") is None

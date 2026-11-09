@@ -46,7 +46,7 @@ from personal_organizer.interfaces.channel import Attachment, GroupRoster, Outbo
 from personal_organizer.interfaces.voice import MAX_AUDIO_BYTES, Audio
 from personal_organizer.messaging.text import WHATSAPP_TEXT_LIMIT
 from personal_organizer.providers.channel.gowa.inbound import CHANNEL_NAME
-from personal_organizer.providers.channel.gowa.parser import jid_user, phone_jid
+from personal_organizer.providers.channel.gowa.parser import PHONE_SERVER, jid_user, phone_jid
 from personal_organizer.settings import GowaSettings
 
 log = structlog.get_logger(__name__)
@@ -235,7 +235,12 @@ class GowaOutbound:
             complete = True
             for member in members:
                 raw = member.get("phone_number") if isinstance(member, dict) else None
-                phone = normalise_e164(jid_user(raw)) if isinstance(raw, str) else None
+                # a LID is 14-15 digits and would pass as a phone, so only a phone JID counts
+                phone = (
+                    normalise_e164(jid_user(raw))
+                    if isinstance(raw, str) and raw.endswith(PHONE_SERVER)
+                    else None
+                )
                 if phone:
                     phones.add(phone)
                 else:
