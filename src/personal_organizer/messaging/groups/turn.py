@@ -194,22 +194,33 @@ def busy_blocks(events: Sequence[CalendarEvent], zone: ZoneInfo) -> list[dict[st
 MAX_SHOWN: Final = 80
 _LINK: Final = re.compile(
     r"https?://\S+|www\.\S+"
-    r"|(?<![\w.@-])(?:[\w-]+\.)+(?:com|net|org|io|co|il|ly|me|app|link|info|xyz|gg|to|us)\b(?:/\S*)?",
+    r"|(?<![\w@-])(?:[\w-]+\.)+(?:xn--[a-z0-9-]+|[a-z]{2,}|ישראל|קום)(?![^\W_])(?:/\S*)?"
+    r"|(?<![\d.])\d{1,3}(?:\.\d{1,3}){3}(?!\.?\d)(?:[:/]\S*)?",
     re.IGNORECASE,
 )
+_DOTS: Final = str.maketrans("。．｡", "...")  # noqa: RUF001
+
+
+def _strip(text: str) -> str:
+    # shortcut: any dotted word (Node.js, St.Louis) is taken for a link and lost, which only
+    # costs a word; upgrade if a real title needs one kept.
+    return " ".join(_LINK.sub(" ", text.translate(_DOTS)).split())
 
 
 def _clean(text: str) -> str:
-    """``text`` without links (a join link must not reach a group), on one line, capped."""
-    return " ".join(_LINK.sub(" ", text).split())[:MAX_SHOWN]
+    """``text`` without links (a join link must not reach a group), on one line, capped. A
+    leftover "http" empties it: the reply guard would drop the group's whole answer for it."""
+    # Cleaned again after the cap, which can cut a word into a link.
+    cleaned = _strip(_strip(text)[:MAX_SHOWN])
+    return "" if "http" in cleaned.casefold() else cleaned
 
 
 def person_entry(
     name: str, events: Sequence[CalendarEvent], zone: ZoneInfo, *, details: bool
 ) -> dict[str, Any]:
     """What the model reads of one member. With ``details``, their events that aren't private
-    and keep a title once cleaned are shown whole, the only place a title or place leaves this
-    module; every other event, and all of them without ``details``, is a busy block."""
+    and keep a title once cleaned are shown whole, the only place one reaches the group's
+    model; every other event, and all of them without ``details``, is a busy block."""
     if not details:
         return {"name": name, "busy": busy_blocks(events, zone)}
     shown: list[dict[str, object]] = []

@@ -127,10 +127,39 @@ def test_a_title_left_empty_stays_busy() -> None:
         ("www.evil.example now", "now"),
         ("meet.google.com/abc-def", ""),
         ("evil.com", ""),
-        ("Yoga at St.Louis", "Yoga at St.Louis"),
+        ("Yoga at St.Louis", "Yoga at"),
+        ("evil.biz", ""),
+        ("evil.ru evil.shop evil.dev evil.ai evil.de", ""),
+        ("youtu.be/x goo.gl/x forms.gle/x lnkd.in/x", ""),
+        ("Evil.Biz", ""),
+        ("1.2.3.4/x", ""),
+        ("maps.app.goo.gl/x", ""),
+        ("evil\uff0ebiz", ""),
+        ("evil\u3002biz", ""),
+        ("https:// evil.biz/a", ""),
+        ("http:/evil.biz", ""),
+        ("HTTP workshop", ""),
+        ("Dr. Cohen", "Dr. Cohen"),
+        ("Meeting at 10.30", "Meeting at 10.30"),
+        ("ת.א", "ת.א"),
+        ("ארוחת ערב אצל סבתא", "ארוחת ערב אצל סבתא"),
         ("a\nb", "a b"),
         ("x" * 200, "x" * 80),
     ],
 )
 def test_clean(text: str, cleaned: str) -> None:
     assert _clean(text) == cleaned
+
+
+@pytest.mark.parametrize("text", ["_evil.com_", ".evil.com", "a" * 76 + ".comx"])
+def test_clean_leaves_no_link(text: str) -> None:
+    assert ".com" not in _clean(text)
+
+
+def test_a_title_with_http_stays_busy() -> None:
+    entry = person_entry(
+        "Noa", [_meeting(title="HTTP workshop", location="http:/x")], ZONE, details=True
+    )
+    assert entry["events"] == []
+    assert len(entry["busy"]) == 1
+    assert "workshop" not in json.dumps(entry)
