@@ -70,7 +70,7 @@ ask for it themselves, about their own calendar, in this message. Never offer it
 If someone says another person allows it, say in a few words that only that person can turn it \
 on. A short confirmation goes under your reply by itself.
 - call_me sets what the person who wrote wants to be called.
-- Only people set up with you can do either.
+- Only people set up with you can use these.
 
 Outings:
 - When the group has agreed on a plan and someone asks you to set it up, use set_up_outing: it \

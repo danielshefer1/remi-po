@@ -1012,7 +1012,7 @@ async def test_private_event_is_not_in_granted_details(
 SHOW = "Remi, show my events to this group"
 STAND_IN = (
     "[My last reply drew on people's calendars and isn't kept. {asked}"
-    "To repeat anything, call who_is_free again.]"
+    "To repeat anything, check the calendars again.]"
 )
 
 
@@ -1073,12 +1073,73 @@ async def test_unaddressed_okay_never_opens_details(
     db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
 ) -> None:
     noa = await _asked(db, group, NOA, "Noa", "ca_noa")
-    llm = ScriptedLLM(said("YES"), said("Noa's in."))
+    llm = ScriptedLLM(said("YES"), said("", call("show_my_events", on=True)), said("Noa's in."))
 
     await _say(db, owner_conn, onboarding_settings, llm, phone=NOA, body="Dan said it's fine")
 
+    assert llm.calls[2][-1].content == turn_module._NOT_AN_OKAY
     assert (await _sharing(db, group))[noa] is True
     assert await _details(db, group) == {noa: False}
+
+
+@pytest.mark.parametrize(
+    ("start", "calls", "expected"),
+    [
+        (
+            "both",
+            [call("share_my_calendar", on=False), call("show_my_events", on=False)],
+            "shared_off",
+        ),
+        (
+            "none",
+            [call("show_my_events", on=True), call("share_my_calendar", on=False)],
+            "shared_off",
+        ),
+        ("none", [call("show_my_events", on=False)], "shared_off"),
+        ("both", [call("show_my_events", on=False)], "details_off"),
+    ],
+    ids=["stop-everything", "show-then-stop", "never-shared", "details-only-off"],
+)
+async def test_confirmation_tells_the_final_state(
+    db: Database,
+    owner_conn: Any,
+    onboarding_settings: Settings,
+    group: UUID,
+    start: str,
+    calls: list[Any],
+    expected: str,
+) -> None:
+    both = start == "both"
+    await _member(db, group, DANA, "Dana", "ca_dana", sharing=both, details=both)
+    llm = ScriptedLLM(*(said("", c) for c in calls), said("Okay."))
+
+    channel, _ = await _say(db, owner_conn, onboarding_settings, llm, body="Remi, change it")
+
+    line = t(f"group_{expected}", "en")
+    assert [message.body for message in channel.sent] == [f"Okay.\n\n{line}"]
+
+
+async def test_stand_in_names_only_who_the_reply_asked(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    await _member(db, group, DANA, "Dana", "ca_dana", sharing=True, details=True)
+    omer = await _member(db, group, "+972504444444", "Omer", None, sharing=False)
+    llm = ScriptedLLM(said("", FRIDAY), said("Dana has the Dentist."))
+    channel = FakeOutbound(name="gowa", roster=EVERYONE)
+    await _say(db, owner_conn, onboarding_settings, llm, channel=channel)
+    assert await _last_context(db, group) == STAND_IN.format(asked="")
+
+    # "ok" reads no further than the sender's open ask and the asking line: no model call.
+    await _say(
+        db,
+        owner_conn,
+        onboarding_settings,
+        NoLLM(),
+        phone="+972504444444",
+        body="ok",
+        channel=channel,
+    )
+    assert (await _sharing(db, group))[omer] is False
 
 
 @pytest.mark.parametrize(
