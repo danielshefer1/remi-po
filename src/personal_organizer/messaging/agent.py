@@ -223,9 +223,13 @@ _LINK_AFTER_WEB: Final = (
     "error: not proposed: leave any web address out of the title and the location, and try again"
 )
 _URL: Final = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
-# Any letters before the dot, so a lookalike in another alphabet is still seen as a domain.
+# Any letters before the dot, so a lookalike in another alphabet is still seen as a domain; an IPv4
+# address is a link too. The `_` and `.` in the lookbehind are left out, so "_evil.com_" and
+# ".evil.com" are seen.
 _BARE_DOMAIN: Final = re.compile(
-    r"(?<![\w@.-])[\w-]+(?:\.[\w-]+)*\.(?:[a-z]{2,}|xn--[a-z0-9-]+)\b(?:/\S*)?", re.IGNORECASE
+    r"(?<![\w@-])[\w-]+(?:\.[\w-]+)*\.(?:xn--[a-z0-9-]+|[a-z]{2,}|ישראל|קום)(?![a-z0-9-])(?:/\S*)?"
+    r"|(?<![\d.])\d{1,3}(?:\.\d{1,3}){3}(?![\d.])(?:[:/]\S*)?",
+    re.IGNORECASE,
 )
 _URL_END: Final = ".,;:!?)]}'\"\u05f3\u05f4"
 
@@ -247,10 +251,11 @@ def links_allowed(reply: str, sources: Collection[str]) -> bool:
     if "http" in rest.lower():
         return False
     hosts = {(urlsplit(u).hostname or "").removeprefix("www.") for u in sources}
-    # shortcut: an all-non-Latin TLD (.рф) isn't seen as a domain, and "Node.js" reads as one and
-    # drops that reply; list real TLDs if either shows up.
+    # shortcut: only .ישראל and .קום are seen of the non-Latin TLDs, and "Node.js" reads as a domain
+    # and drops that reply; list more TLDs if one shows up.
     return all(
-        m.group().casefold().removeprefix("www.") in hosts for m in _BARE_DOMAIN.finditer(rest)
+        m.group().casefold().strip("_").removeprefix("www.") in hosts
+        for m in _BARE_DOMAIN.finditer(rest)
     )
 
 

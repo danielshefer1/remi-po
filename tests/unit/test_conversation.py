@@ -161,3 +161,9 @@ async def test_web_sources_are_known_before_tools_run() -> None:
 async def test_a_redo_that_pauses_keeps_the_first_reply() -> None:
     llm = ScriptedLLM(said("Yes, you're free."), paused())
     assert await hebrew(llm) == "Yes, you're free."
+
+
+async def test_a_redo_that_searched_keeps_the_first_reply() -> None:
+    redo = replace(said("כן, את פנויה."), web_sources=("https://g.example",))
+    llm = ScriptedLLM(said("Yes, you're free."), redo)
+    assert await hebrew(llm) == "Yes, you're free."

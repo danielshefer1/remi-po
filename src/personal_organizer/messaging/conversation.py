@@ -121,7 +121,7 @@ async def _in_hebrew(
         redo = await llm.complete(asked, tools=tools, max_tokens=MAX_TOKENS)
     except LLMError:
         return reply.content
-    if redo.tool_calls or redo.finish_reason in ("max_tokens", "pause_turn"):
+    if redo.tool_calls or redo.web_sources or redo.finish_reason in ("max_tokens", "pause_turn"):
         return reply.content
     return redo.content if detect_language(redo.content) == HEBREW else reply.content
 

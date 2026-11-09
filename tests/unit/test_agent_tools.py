@@ -47,6 +47,7 @@ from personal_organizer.messaging.agent import (
     change_summary,
     check_event,
     event_summary,
+    has_link,
     links_allowed,
     read_calendar,
     respond,
@@ -1761,6 +1762,22 @@ class TestLinksAllowed:
             ("good.example/secret", False),
             ("www.g\u043e\u043ed.example", False),
             ("visit http", False),
+            ("_evil.com_", False),
+            ("evil.com_", False),
+            ("evil.comב", False),
+            ("185.199.108.153/phish", False),
+            ("1.2.3.4", False),
+            ("1.2.3.4:8080/login", False),
+            (".evil.com/login", False),
+            ("...evil.com", False),
+            ("פישינג.ישראל", False),
+            ("evil.ישראל/login", False),
+            ("evil.קום", False),
+            ("_good.example_", True),
+            ("closes at 21.30", True),
+            ("12.50 shekels", True),
+            ("version 1.2.3", True),
+            ("U.S.A.", True),
         ],
     )
     def test_with_results(self, reply: str, allowed: bool) -> None:
@@ -1771,3 +1788,20 @@ class TestLinksAllowed:
     )
     def test_without_results(self, reply: str, allowed: bool) -> None:
         assert links_allowed(reply, set()) is allowed
+
+
+@pytest.mark.parametrize(
+    ("text", "linked"),
+    [
+        ("_evil.com_", True),
+        ("1.2.3.4", True),
+        ("evil.ישראל", True),
+        ("https://x.example", True),
+        ("Dr. Cohen", False),
+        ("Hall 3.2", False),
+        ("ארוחת ערב עם דנה", False),
+        ("בית קפה הכובשים, רחוב הרצל 5", False),
+    ],
+)
+def test_has_link(text: str, linked: bool) -> None:
+    assert has_link(text) is linked
