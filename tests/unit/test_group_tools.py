@@ -179,3 +179,7 @@ def test_group_details_copy(key: str, language: str) -> None:
     text = t(key, language)
     assert text
     assert "{" not in text
+
+
+def test_a_group_has_no_web_tools() -> None:
+    assert not {"web_search", "web_fetch"} & {tool["name"] for tool in GROUP_TOOLS}
