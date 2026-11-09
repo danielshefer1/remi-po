@@ -89,12 +89,27 @@ class WebhookBatch:
     skipped: int = 0
 
 
+@dataclass(frozen=True, slots=True)
+class Attachment:
+    """A picture or file Remi made or holds, in memory only: no URL, so nothing is fetched."""
+
+    content: bytes = field(repr=False)
+    filename: str = field(repr=False)  # often an event's title
+    mime_type: str
+
+    @property
+    def is_image(self) -> bool:
+        return self.mime_type.startswith("image/")
+
+
 @dataclass(frozen=True)
 class OutboundMessage:
     recipient: str
+    #: With an ``attachment``, the caption.
     body: str
     #: Send ``body`` as a single-choice poll with these options (a group JID recipient).
     poll_options: tuple[str, ...] = ()
+    attachment: Attachment | None = None
 
 
 @runtime_checkable
@@ -131,6 +146,7 @@ class Channel(InboundChannel, OutboundChannel, Protocol):
 
 
 __all__ = [
+    "Attachment",
     "Channel",
     "DeliveryStatus",
     "DeliveryUpdate",

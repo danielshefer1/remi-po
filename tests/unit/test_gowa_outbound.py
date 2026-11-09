@@ -16,11 +16,12 @@ import pytest
 
 from personal_organizer.core.errors import (
     AmbiguousDeliveryError,
+    AttachmentRefusedError,
     MessageTooLongError,
     RejectedChannelError,
     TransientChannelError,
 )
-from personal_organizer.interfaces.channel import OutboundChannel, OutboundMessage
+from personal_organizer.interfaces.channel import Attachment, OutboundChannel, OutboundMessage
 from personal_organizer.messaging.text import WHATSAPP_TEXT_LIMIT
 from personal_organizer.providers.channel.gowa.outbound import (
     REACHOUT_TIMELOCK_CODE,
@@ -311,3 +312,107 @@ class TestClassification:
         with pytest.raises(RejectedChannelError) as excinfo:
             await channel.send_text(MESSAGE)
         assert excinfo.value.provider_code == code
+
+
+DOC = Attachment(b"BEGIN:VCALENDAR", "ארוחת ערב.ics", "text/calendar")
+PNG = Attachment(b"\x89PNG-bytes", "plan.png", "image/png")
+
+
+def _with(attachment: Attachment, recipient: str = "+31612345678") -> OutboundMessage:
+    return OutboundMessage(recipient=recipient, body="Here you go", attachment=attachment)
+
+
+class TestAttachments:
+    async def test_a_document_goes_to_send_file(self) -> None:
+        channel, recorder = _channel(_json(200, OK_SEND))
+        assert await channel.send_text(_with(DOC)) == "3EB0B430B6F8F1D0E053AC"
+        (request,) = recorder.requests
+        assert request.url.path == "/send/file"
+        assert request.headers["content-type"].startswith("multipart/form-data")
+        body = request.content
+        for part in (
+            b'name="phone"',
+            b"31612345678@s.whatsapp.net",
+            b'name="caption"',
+            b"Here you go",
+            b'name="file"',
+            DOC.content,
+        ):
+            assert part in body
+
+    async def test_a_hebrew_filename_arrives_whole(self) -> None:
+        channel, recorder = _channel(_json(200, OK_SEND))
+        await channel.send_text(_with(DOC))
+        assert 'filename="ארוחת ערב.ics"'.encode() in recorder.requests[0].content
+
+    async def test_an_image_goes_to_send_image(self) -> None:
+        channel, recorder = _channel(_json(200, OK_SEND))
+        await channel.send_text(_with(PNG))
+        (request,) = recorder.requests
+        assert request.url.path == "/send/image"
+        assert b'name="image"' in request.content
+        assert b"Content-Type: image/png" in request.content
+
+    async def test_it_never_asks_the_gateway_to_fetch(self) -> None:
+        for attachment in (DOC, PNG):
+            channel, recorder = _channel(_json(200, OK_SEND))
+            await channel.send_text(_with(attachment))
+            assert len(recorder.requests) == 1
+            assert b"image_url" not in recorder.requests[0].content
+            assert b"file_url" not in recorder.requests[0].content
+
+    @pytest.mark.parametrize(
+        "attachment",
+        [
+            Attachment(b"x" * 50_000_001, "big.pdf", "application/pdf"),
+            Attachment(b"x" * 20_000_001, "big.png", "image/png"),
+        ],
+        ids=["document", "image"],
+    )
+    async def test_too_big_makes_no_request(self, attachment: Attachment) -> None:
+        channel, recorder = _channel(_json(200, OK_SEND))
+        with pytest.raises(AttachmentRefusedError) as excinfo:
+            await channel.send_text(_with(attachment))
+        assert excinfo.value.reason == "too_big"
+        assert recorder.requests == []
+
+    async def test_webp_is_refused(self) -> None:
+        channel, recorder = _channel(_json(200, OK_SEND))
+        with pytest.raises(AttachmentRefusedError) as excinfo:
+            await channel.send_text(_with(Attachment(b"RIFF", "a.webp", "image/webp")))
+        assert excinfo.value.reason == "type"
+        assert recorder.requests == []
+
+    async def test_a_group_gets_no_file(self) -> None:
+        channel, recorder = _channel(_json(200, OK_SEND))
+        with pytest.raises(RejectedChannelError):
+            await channel.send_text(_with(DOC, "120363025246125486@g.us"))
+        assert recorder.requests == []
+
+    async def test_the_send_waits_for_the_gateway(self) -> None:
+        channel, recorder = _channel(_json(200, OK_SEND))
+        await channel.send_text(_with(DOC))
+        assert recorder.requests[0].extensions["timeout"]["read"] == 50.0
+
+    async def test_typing_comes_first(self) -> None:
+        channel, recorder = _channel(_json(200, OK_SEND), typing_delay_s=1.0)
+        await channel.send_text(_with(DOC))
+        assert recorder.paths == ["/send/chat-presence", "/send/file"]
+
+    @pytest.mark.parametrize(
+        ("respond", "error"),
+        [
+            (_raise(httpx.ConnectError), TransientChannelError),
+            (_raise(httpx.ReadTimeout), AmbiguousDeliveryError),
+            (_gowa_error(504, "GATEWAY_TIMEOUT"), AmbiguousDeliveryError),
+            (_gowa_error(400, "INVALID_JID"), RejectedChannelError),
+            (_json(200, {"code": "SUCCESS", "results": {}}), AmbiguousDeliveryError),
+        ],
+        ids=["connect", "read-timeout", "504", "invalid-jid", "no-id"],
+    )
+    async def test_failures_are_classified_as_for_text(
+        self, respond: Callable[[httpx.Request], httpx.Response], error: type[Exception]
+    ) -> None:
+        channel, _ = _channel(respond)
+        with pytest.raises(error):
+            await channel.send_text(_with(DOC))

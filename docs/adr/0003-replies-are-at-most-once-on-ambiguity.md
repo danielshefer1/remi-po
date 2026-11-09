@@ -50,3 +50,5 @@ one, and far better than a duplicated reminder or a doubled calendar confirmatio
   `connected:<connection_id>`, and reminders will follow. The states and the rule are the same.
   The key names the event, is unique across kinds and never carries content.
   `tests/db/test_outbox.py` pins the same paths for it.
+- An attachment is rebuilt by the job's re-run and never stored: the outbox row keeps only the
+  delivery state, so a retry that finds the row claimed sends nothing and loses no file.

@@ -13,8 +13,10 @@ from typing import Any
 from uuid import UUID
 
 import pytest
+from structlog.testing import capture_logs
 
 from personal_organizer.core.errors import (
+    AttachmentRefusedError,
     CalendarProviderUnavailableError,
     LLMRejectedError,
     LLMUnavailableError,
@@ -107,8 +109,9 @@ async def _turn(
     phone: str | None = IL_PHONE,
     last_attempt: bool = False,
     settings: Settings | None = None,
+    channel: FakeOutbound | None = None,
 ) -> tuple[Advance, FakeOutbound, UUID]:
-    channel = FakeOutbound(name="gowa")
+    channel = channel or FakeOutbound(name="gowa")
     if inbox_id is None:
         inbox_id = await insert_inbox(
             conn, phone=phone, user_id=None if phone else "IL.1", body="מה יש לי מחר?"
@@ -433,3 +436,154 @@ class TestContext:
         advance, channel, _ = await _turn(db, owner_conn, tenant, NoLLM(), phone=None)
         assert advance == Advance()
         assert channel.attempts == []
+
+
+SEND_FILE = call("send_event_file", n=1)
+
+
+def _without_stamp(content: bytes) -> list[str]:
+    return [line for line in content.decode().splitlines() if not line.startswith("DTSTAMP")]
+
+
+class TestEventFile:
+    @staticmethod
+    def _script() -> ScriptedLLM:
+        return ScriptedLLM(said("", TOMORROW), said("", SEND_FILE), said("זה אצלך."))
+
+    async def test_the_file_then_the_reply(self, db: Database, owner_conn: Any) -> None:
+        tenant = await _active(db, stored=True)
+        _, channel, _ = await _turn(db, owner_conn, tenant, self._script())
+        assert await _kinds(owner_conn) == [("agent:file", "accepted"), (AGENT_REPLY, "accepted")]
+        assert channel.sent[0].attachment is not None
+        assert channel.sent[0].recipient == IL_PHONE
+        assert channel.sent[1].attachment is None
+
+    async def test_a_retry_after_the_file_does_not_resend(
+        self, db: Database, owner_conn: Any
+    ) -> None:
+        class SecondTransient(FakeOutbound):
+            async def send_text(self, message: OutboundMessage) -> str:
+                if len(self.attempts) == 1:
+                    self.attempts.append(message)
+                    raise TransientChannelError("down")
+                return await super().send_text(message)
+
+        tenant = await _active(db, stored=True)
+        channel = SecondTransient(name="gowa")
+        with pytest.raises(TransientChannelError):
+            await _turn(db, owner_conn, tenant, self._script(), channel=channel)
+        [row] = await owner_conn.fetch(
+            "SELECT inbox_id FROM channel_outbox WHERE kind = 'agent:file'"
+        )
+        await _turn(
+            db, owner_conn, tenant, self._script(), channel=channel, inbox_id=row["inbox_id"]
+        )
+        assert [m.attachment is not None for m in channel.sent] == [True, False]
+
+    async def test_a_transient_failure_rebuilds_and_sends(
+        self, db: Database, owner_conn: Any
+    ) -> None:
+        tenant = await _active(db, stored=True)
+        channel = FakeOutbound(TransientChannelError("down"), name="gowa")
+        with pytest.raises(TransientChannelError):
+            await _turn(db, owner_conn, tenant, self._script(), channel=channel)
+        assert await _kinds(owner_conn) == [("agent:file", "pending")]
+        [row] = await owner_conn.fetch("SELECT inbox_id FROM channel_outbox")
+        await _turn(
+            db, owner_conn, tenant, self._script(), channel=channel, inbox_id=row["inbox_id"]
+        )
+        first, sent = channel.attempts[0].attachment, channel.sent[0].attachment
+        assert first is not None
+        assert sent is not None
+        assert _without_stamp(first.content) == _without_stamp(sent.content)
+
+    async def test_a_crash_mid_send_is_not_resent(self, db: Database, owner_conn: Any) -> None:
+        tenant = await _active(db, stored=True)
+        inbox_id = await insert_inbox(owner_conn, phone=IL_PHONE, body="תשלח לי")
+        await owner_conn.execute(
+            "INSERT INTO channel_outbox (channel, inbox_id, kind, recipient_key, status) "
+            "VALUES ('gowa', $1, 'agent:file', $2, 'sending')",
+            inbox_id,
+            f"phone:{IL_PHONE}",
+        )
+        advance, channel, _ = await _turn(db, owner_conn, tenant, self._script(), inbox_id=inbox_id)
+        assert all(m.attachment is None for m in channel.sent)
+        assert (advance.reply or "").endswith(t("file_unsure", "he"))
+
+    async def test_the_last_attempt_tells_them(self, db: Database, owner_conn: Any) -> None:
+        tenant = await _active(db, stored=True)
+        channel = FakeOutbound(TransientChannelError("down"), name="gowa")
+        advance, _, _ = await _turn(
+            db, owner_conn, tenant, self._script(), channel=channel, last_attempt=True
+        )
+        assert (advance.reply or "").endswith(t("file_failed", "he"))
+
+    async def test_nothing_of_the_file_is_logged_or_recorded(
+        self, db: Database, owner_conn: Any
+    ) -> None:
+        tenant = await _active(db, stored=True)
+        with capture_logs() as logs:
+            await _turn(db, owner_conn, tenant, self._script())
+        assert "רופא שיניים" not in str(logs)
+        assert "BEGIN:VCALENDAR" not in str(logs)
+        rows = await owner_conn.fetch("SELECT * FROM channel_outbox")
+        assert "BEGIN:VCALENDAR" not in str([dict(r) for r in rows])
+        assert "רופא שיניים" not in str([dict(r) for r in rows])
+        for message in await messages_of(db, tenant.id):
+            assert "BEGIN:VCALENDAR" not in (message.body or "")
+
+    async def test_a_model_failure_after_the_file_is_not_an_apology(
+        self, db: Database, owner_conn: Any
+    ) -> None:
+        tenant = await _active(db, stored=True)
+        llm = ScriptedLLM(said("", TOMORROW), said("", SEND_FILE), LLMRejectedError(400))
+        advance, channel, _ = await _turn(db, owner_conn, tenant, llm)
+        assert advance.reply == t("file_sent", "he")
+        assert [m.body for m in channel.sent][-1] == t("file_sent", "he")
+        async with db.tenant_session(TenantId(tenant.id)) as session:
+            assert await current(session, tenant.id, now=NOW) is None
+
+    async def test_the_last_attempt_unavailable_after_the_file(
+        self, db: Database, owner_conn: Any
+    ) -> None:
+        tenant = await _active(db, stored=True)
+        llm = ScriptedLLM(said("", TOMORROW), said("", SEND_FILE), LLMUnavailableError("down"))
+        advance, _, _ = await _turn(db, owner_conn, tenant, llm, last_attempt=True)
+        assert advance.reply == t("file_sent", "he")
+
+    async def test_unavailable_before_the_last_attempt_still_retries(
+        self, db: Database, owner_conn: Any
+    ) -> None:
+        tenant = await _active(db, stored=True)
+        llm = ScriptedLLM(said("", TOMORROW), said("", SEND_FILE), LLMUnavailableError("down"))
+        with pytest.raises(LLMUnavailableError):
+            await _turn(db, owner_conn, tenant, llm)
+
+    async def test_a_refused_file_then_a_model_failure_gets_the_refusal(
+        self, db: Database, owner_conn: Any
+    ) -> None:
+        tenant = await _active(db, stored=True)
+        channel = FakeOutbound(AttachmentRefusedError("type"), name="gowa")
+        llm = ScriptedLLM(said("", TOMORROW), said("", SEND_FILE), LLMRejectedError(400))
+        advance, _, _ = await _turn(db, owner_conn, tenant, llm, channel=channel)
+        assert advance.reply == t("file_type", "he")
+
+    async def test_a_model_failure_with_no_file_is_the_usual_apology(
+        self, db: Database, owner_conn: Any
+    ) -> None:
+        tenant = await _active(db, stored=True)
+        advance, _, _ = await _turn(db, owner_conn, tenant, ScriptedLLM(LLMRejectedError(400)))
+        assert advance.reply == t("agent_unavailable", "he")
+
+    async def test_no_proposal_is_stored_on_the_fallback(
+        self, db: Database, owner_conn: Any
+    ) -> None:
+        tenant = await _active(db, stored=True)
+        propose = call(
+            "propose_event", title="Lunch", start="2026-10-14T12:00", end="2026-10-14T13:00"
+        )
+        llm = ScriptedLLM(said("", TOMORROW), said("", SEND_FILE, propose), LLMRejectedError(400))
+        advance, _, _ = await _turn(db, owner_conn, tenant, llm)
+        assert advance.reply == t("file_sent", "he")
+        async with db.tenant_session(TenantId(tenant.id)) as session:
+            assert await current(session, tenant.id, now=NOW) is None

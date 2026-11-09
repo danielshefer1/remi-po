@@ -13,12 +13,13 @@ import pytest
 
 from personal_organizer.core.errors import (
     AmbiguousDeliveryError,
+    AttachmentRefusedError,
     ChannelError,
     RejectedChannelError,
     TransientChannelError,
 )
 from personal_organizer.db.engine import Database
-from personal_organizer.interfaces.channel import OutboundMessage
+from personal_organizer.interfaces.channel import Attachment, OutboundMessage
 from personal_organizer.messaging.outbox import already_sent, send_once, send_parts, sent_message_id
 from personal_organizer.settings import Settings
 from tests.fixtures.channels import FakeOutbound, insert_inbox
@@ -296,3 +297,74 @@ class TestSendParts:
             ("agent_reply", "accepted"),
             ("agent_reply:2", "failed"),
         ]
+
+
+FILE = Attachment(b"BEGIN:SECRET", "Dentist.ics", "text/calendar")
+CAPTION = "Here is the invite."
+
+
+async def _send_file(db: Database, channel: FakeOutbound) -> str:
+    return await send_once(
+        db,
+        channel,
+        inbox_id=None,
+        kind="file",
+        recipient_key=RECIPIENT,
+        to=SENDER_PHONE,
+        text=CAPTION,
+        idempotency_key=KEY,
+        attachment=FILE,
+    )
+
+
+class TestAttachment:
+    async def test_the_attachment_reaches_the_channel(self, db: Database) -> None:
+        channel = FakeOutbound()
+        assert await _send_file(db, channel) == "accepted"
+        assert channel.sent[0].attachment is FILE
+        assert channel.sent[0].body == CAPTION
+
+    async def test_the_outbox_holds_no_file(self, db: Database, owner_conn: Any) -> None:
+        await _send_file(db, FakeOutbound())
+        row = await owner_conn.fetchrow("SELECT * FROM channel_outbox")
+        assert "SECRET" not in str(dict(row))
+        assert "Dentist" not in str(dict(row))
+
+    def test_the_repr_hides_the_file(self) -> None:
+        text = repr(OutboundMessage("+1", "c", attachment=FILE))
+        assert "SECRET" not in text
+        assert "Dentist" not in text
+
+    async def test_transient_then_success_sends_the_file_once(
+        self, db: Database, owner_conn: Any
+    ) -> None:
+        channel = FakeOutbound(TransientChannelError("x"))
+        with pytest.raises(TransientChannelError):
+            await _send_file(db, channel)
+        assert [r["status"] for r in await _outbox(owner_conn)] == ["pending"]
+        assert await _send_file(db, channel) == "accepted"
+        assert len(channel.sent) == 1
+
+    async def test_an_interrupted_file_is_unknown_not_resent(
+        self, db: Database, owner_conn: Any
+    ) -> None:
+        await owner_conn.execute(
+            "INSERT INTO channel_outbox (channel, kind, recipient_key, idempotency_key, status) "
+            "VALUES ('whatsapp', 'file', $1, $2, 'sending')",
+            RECIPIENT,
+            KEY,
+        )
+        channel = FakeOutbound()
+        assert await _send_file(db, channel) == "unknown"
+        assert channel.attempts == []
+
+    async def test_a_refused_attachment_is_failed_and_raised(
+        self, db: Database, owner_conn: Any
+    ) -> None:
+        channel = FakeOutbound(AttachmentRefusedError("too_big"))
+        with pytest.raises(AttachmentRefusedError) as info:
+            await _send_file(db, channel)
+        assert info.value.reason == "too_big"
+        assert [r["status"] for r in await _outbox(owner_conn)] == ["failed"]
+        assert await _send_file(db, channel) == "failed"
+        assert len(channel.attempts) == 1

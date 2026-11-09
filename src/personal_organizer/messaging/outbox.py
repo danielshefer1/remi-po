@@ -16,6 +16,7 @@ message content. Either way the row moves through::
 A retry that finds the row still ``sending`` knows the previous attempt died mid-send and
 cannot know whether the message arrived -- so it marks the row ``unknown`` and does *not*
 send again. Missing one acknowledgement is better than sending two. See docs/adr/0003.
+A file is never stored here: a retry rebuilds it.
 """
 
 from __future__ import annotations
@@ -32,12 +33,13 @@ from sqlalchemy.dialects.postgresql import insert
 
 from personal_organizer.core.errors import (
     AmbiguousDeliveryError,
+    AttachmentRefusedError,
     RejectedChannelError,
     TransientChannelError,
 )
 from personal_organizer.db.engine import Database
 from personal_organizer.db.models.channel import ChannelOutbox
-from personal_organizer.interfaces.channel import OutboundChannel, OutboundMessage
+from personal_organizer.interfaces.channel import Attachment, OutboundChannel, OutboundMessage
 
 log = structlog.get_logger(__name__)
 
@@ -148,9 +150,11 @@ async def send_once(
     text: str,
     idempotency_key: str | None = None,
     poll_options: tuple[str, ...] = (),
+    attachment: Attachment | None = None,
 ) -> str:
     """Send ``text`` to ``to`` at most once: as the ``kind`` reply to ``inbox_id``, or as the
-    send named by ``idempotency_key``. Exactly one of the two is given.
+    send named by ``idempotency_key``. Exactly one of the two is given. With an
+    ``attachment``, ``text`` is its caption.
 
     Returns the send's resulting status. Re-raises :class:`TransientChannelError` -- and only
     that -- after putting the row back to ``pending``, so the job's retry sends it again.
@@ -171,10 +175,16 @@ async def send_once(
 
     try:
         provider_message_id = await channel.send_text(
-            OutboundMessage(recipient=to, body=text, poll_options=poll_options)
+            OutboundMessage(
+                recipient=to, body=text, poll_options=poll_options, attachment=attachment
+            )
         )
     except TransientChannelError:
         await _set(db, outbox_id, status="pending")
+        raise
+    except AttachmentRefusedError as exc:
+        await _set(db, outbox_id, status="failed")
+        log.warning("outbox.attachment_refused", outbox_id=str(outbox_id), reason=exc.reason)
         raise
     except RejectedChannelError as exc:
         await _set(db, outbox_id, status="failed", error_code=exc.provider_code)

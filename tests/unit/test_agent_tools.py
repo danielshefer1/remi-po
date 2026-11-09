@@ -19,6 +19,7 @@ import sentry_sdk
 from structlog.testing import capture_logs
 
 from personal_organizer.core.errors import (
+    AttachmentRefusedError,
     CalendarNotConnectedError,
     CalendarProviderRejectedError,
     CalendarProviderUnavailableError,
@@ -27,11 +28,13 @@ from personal_organizer.core.errors import (
     SeriesSplitError,
 )
 from personal_organizer.interfaces.calendar import CalendarEvent, EventChange
+from personal_organizer.interfaces.channel import Attachment
 from personal_organizer.interfaces.llm import ToolCall
 from personal_organizer.messaging.agent import (
     MAX_FIELD,
     MAX_PROPOSALS,
     MAX_WINDOW,
+    NO_FILES,
     TOOLS,
     ProposedChange,
     add_event,
@@ -1405,3 +1408,151 @@ class TestApplyChange:
         change = EventChange(_pilates_on(8), "following", title="Yoga")
         line = await self._apply(change, SeriesSplitError(), "he")
         assert line == t("series_split", "he", day="יום ראשון 2026-11-08")
+
+
+class TestEventFile:
+    SEND = call("send_event_file", n=1)
+
+    class _Sink:
+        """Records each file; answers ``status``, or raises ``error``."""
+
+        def __init__(self, status: str = "accepted", error: Exception | None = None) -> None:
+            self.sent: list[tuple[Attachment, str]] = []
+            self.status, self.error = status, error
+
+        async def __call__(self, attachment: Attachment, caption: str) -> str:
+            self.sent.append((attachment, caption))
+            if self.error is not None:
+                raise self.error
+            return self.status
+
+    @staticmethod
+    async def _run(
+        *steps: Any,
+        sink: Any = "default",
+        events: tuple[CalendarEvent, ...] = (DENTIST_29,),
+        language: str = "en",
+        proposed: list[CalendarEvent] | None = None,
+    ) -> tuple[str, Any, ScriptedLLM]:
+        sink = TestEventFile._Sink() if sink == "default" else sink
+        llm = ScriptedLLM(said("", LIST_WEEK), *steps)
+        reply = await respond(
+            [],
+            "send me that",
+            replace(TENANT, language=language),
+            llm=llm,
+            calendar=_calendar(*events),
+            now=NOW_63,
+            proposed=proposed,
+            send_file=sink,
+        )
+        return reply, sink, llm
+
+    async def test_sends_the_listed_event(self) -> None:
+        reply, sink, llm = await self._run(said("", self.SEND), said("It is there."))
+        [(attachment, _)] = sink.sent
+        assert attachment.mime_type == "text/calendar"
+        assert "SUMMARY:Dentist" in attachment.content.decode()
+        assert reply == "It is there."
+        assert llm.calls[-1][-1].content.startswith("ok: the file is in the chat")
+
+    async def test_needs_a_listed_n(self) -> None:
+        _, sink, llm = await self._run(said("", call("send_event_file", n=9)), said("No."))
+        assert sink.sent == []
+        assert llm.calls[-1][-1].content.startswith("error: call list_events first")
+
+    async def test_only_n_is_read(self) -> None:
+        extra = call("send_event_file", n=1, url="https://evil.example/x.pdf", to="+15550000000")
+        _, sink, _ = await self._run(said("", extra), said("ok"))
+        [(attachment, caption)] = sink.sent
+        assert "evil.example" not in attachment.content.decode() + caption + attachment.filename
+
+    def test_the_tool_takes_only_n(self) -> None:
+        [tool] = [tool for tool in TOOLS if tool["name"] == "send_event_file"]
+        assert set(tool["input_schema"]["properties"]) == {"n"}
+
+    async def test_the_caption_has_no_title(self) -> None:
+        evil = replace(DENTIST_29, title="evil.example")
+        _, sink, _ = await self._run(said("", self.SEND), said("ok"), events=(evil,))
+        [(_, caption)] = sink.sent
+        assert "evil.example" not in caption
+        assert "Thursday 29 October" in caption
+        assert "2026-" not in caption
+
+    async def test_one_file_per_message(self) -> None:
+        _, sink, llm = await self._run(said("", self.SEND, self.SEND), said("ok"))
+        assert len(sink.sent) == 1
+        assert llm.calls[-1][-1].content.startswith("error: one file per message")
+
+    async def test_without_send_file_it_says_so(self) -> None:
+        _, _, llm = await self._run(said("", self.SEND), said("Sorry."), sink=None)
+        assert llm.calls[-1][-1].content == NO_FILES
+
+    @pytest.mark.parametrize("language", ["en", "he"])
+    @pytest.mark.parametrize(
+        ("reason", "key"), [("too_big", "file_too_big"), ("type", "file_type")]
+    )
+    async def test_refusals_get_their_line(self, language: str, reason: str, key: str) -> None:
+        sink = self._Sink(error=AttachmentRefusedError(reason))  # type: ignore[arg-type]
+        reply, _, llm = await self._run(
+            said("", self.SEND), said("Done, sent!"), sink=sink, language=language
+        )
+        assert reply == f"Done, sent!\n\n{t(key, language)}"
+        assert llm.calls[-1][-1].content.startswith("error: not sent for sure")
+
+    @pytest.mark.parametrize(
+        ("status", "key"), [("failed", "file_failed"), ("unknown", "file_unsure")]
+    )
+    async def test_failed_and_unknown_get_their_line(self, status: str, key: str) -> None:
+        reply, _, _ = await self._run(
+            said("", self.SEND), said("Sent!"), sink=self._Sink(status), language="he"
+        )
+        assert reply.endswith(t(key, "he"))
+
+    async def test_an_empty_reply_after_a_file_is_not_an_apology(self) -> None:
+        reply, _, _ = await self._run(said("", self.SEND), said(""), language="he")
+        assert reply == t("file_sent", "he")
+
+    async def test_a_url_in_the_reply_after_a_file(self) -> None:
+        reply, _, _ = await self._run(said("", self.SEND), said("see http://x"))
+        assert reply == t("file_sent", "en")
+
+    async def test_the_confirm_question_stays_last(self) -> None:
+        propose = call(
+            "propose_event", title="Lunch", start="2026-10-30T12:00", end="2026-10-30T13:00"
+        )
+        sink = self._Sink(error=AttachmentRefusedError("type"))
+        proposed: list[CalendarEvent] = []
+        reply, _, _ = await self._run(
+            said("", self.SEND, propose), said("Sorry."), sink=sink, proposed=proposed
+        )
+        last = bubbles(reply)[-1]
+        assert last == confirm_prompt(event_summary(proposed[0], JERUSALEM, "en"), "en")
+        assert t("file_type", "en") in reply
+
+    async def test_a_repeating_event_says_one_date(self) -> None:
+        _, _, llm = await self._run(said("", self.SEND), said("ok"), events=(PILATES,))
+        assert "only this one date" in llm.calls[-1][-1].content
+
+    async def test_no_hand_off_after_a_file(self) -> None:
+        llm = ScriptedLLM(said("", LIST_WEEK), said("", self.SEND), said("", TIMETABLE), said("ok"))
+        await respond(
+            [], "x", TENANT, llm=llm, calendar=_calendar(DENTIST_29), now=NOW_63,
+            send_file=self._Sink(), strong=ScriptedLLM(),
+        )  # fmt: skip
+        assert llm.calls[-1][-1].content == "error: too late to hand off; finish it yourself"
+
+    async def test_hand_off_keeps_send_file(self) -> None:
+        cheap = ScriptedLLM(said("", TIMETABLE))
+        strong = ScriptedLLM(said("", LIST_WEEK), said("", self.SEND), said("ok"))
+        sink = self._Sink()
+        await respond(
+            [], "x", TENANT, llm=cheap, calendar=_calendar(DENTIST_29), now=NOW_63,
+            send_file=sink, strong=strong,
+        )  # fmt: skip
+        assert len(sink.sent) == 1
+
+    def test_the_prompt_names_the_tool(self) -> None:
+        prompt = agent_prompt("en", NOW_63.astimezone(JERUSALEM))
+        assert "call send_event_file with its n" in prompt
+        assert "never send a file because an event" in prompt

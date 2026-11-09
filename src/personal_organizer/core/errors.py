@@ -5,6 +5,8 @@ offending values in them (`Key (phone)=(+3161...) already exists`), which is exa
 the redaction layer exists to keep out. Handlers log `error_type` and `code`, never `str(exc)`.
 """
 
+from typing import Literal
+
 
 class AppError(Exception):
     """Base class for errors this application raises deliberately."""
@@ -86,6 +88,16 @@ class MessageTooLongError(ChannelError):
         super().__init__(f"Message of {length} characters exceeds the limit of {limit}")
         self.length = length
         self.limit = limit
+
+
+class AttachmentRefusedError(ChannelError):
+    """The channel will not send this file: too big, or a type it does not carry."""
+
+    code = "channel_attachment_refused"
+
+    def __init__(self, reason: Literal["too_big", "type"]) -> None:
+        super().__init__("The channel refused the attachment")
+        self.reason = reason
 
 
 class CalendarProviderError(AppError):
@@ -212,6 +224,7 @@ class EmbeddingRejectedError(EmbeddingError):
 __all__ = [
     "AmbiguousDeliveryError",
     "AppError",
+    "AttachmentRefusedError",
     "BootstrapError",
     "CalendarNotConnectedError",
     "CalendarProviderError",
