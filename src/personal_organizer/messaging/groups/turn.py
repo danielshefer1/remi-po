@@ -1,10 +1,14 @@
 """The group turn (Iteration 07): Remi answering in a family group when addressed.
 
-**No event content in a group, by code.** ``who_is_free`` reads each sharing member's
-calendar in their own tenant session and keeps only start, end and all-day, merged into
-:func:`busy_blocks`; titles and locations are dropped before the model sees anything, so no
-prompt or reply can leak them. Members who haven't okayed this group are never read: only
-their names come back, in ``not_shared`` (asked to okay it) or ``stopped`` (said to stop).
+**Event content in a group, by code.** ``who_is_free`` reads each sharing member's calendar
+in their own tenant session. By default it keeps only start, end and all-day, merged into
+:func:`busy_blocks`; titles and locations are dropped before the model sees anything. A title
+and place reach the model through one branch only, :func:`person_entry` with ``details=True``,
+and only for a member who opened them for this group, is still in it (the gateway's roster
+says so; no roster, an unreadable one or an unmatched phone means busy-only), and for an event
+that isn't private and is left with a title once links are stripped. Members who haven't okayed
+this group are never read: only their names come back, in ``not_shared`` (asked to okay it)
+or ``stopped`` (said to stop).
 
 **Details, privately.** After a turn in which ``who_is_free`` ran, an asker who is a member
 gets the events of the people who granted them details, read then from ``detail_grantors``
@@ -33,6 +37,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from datetime import datetime
 from typing import Any, Final
 from uuid import UUID
@@ -53,16 +58,18 @@ from personal_organizer.db.repositories.groups import (
     ask,
     clear_ask,
     detail_grantors,
+    details_on,
     group_tenants,
     open_ask,
     recent_context,
+    set_details,
     set_display_name,
     set_sharing,
 )
 from personal_organizer.db.repositories.outings import open_polls
-from personal_organizer.db.repositories.tenants import get_tenant
+from personal_organizer.db.repositories.tenants import get_tenant, primary_phone
 from personal_organizer.interfaces.calendar import CalendarEvent, CalendarProvider
-from personal_organizer.interfaces.channel import OutboundChannel
+from personal_organizer.interfaces.channel import GroupReader, GroupRoster, OutboundChannel
 from personal_organizer.interfaces.llm import LLMProvider, Message
 from personal_organizer.messaging.agent import (
     day_label,
@@ -183,6 +190,40 @@ def busy_blocks(events: Sequence[CalendarEvent], zone: ZoneInfo) -> list[dict[st
     return blocks
 
 
+#: Longest title or place the model is shown.
+MAX_SHOWN: Final = 80
+_LINK: Final = re.compile(
+    r"https?://\S+|www\.\S+"
+    r"|(?<![\w.@-])(?:[\w-]+\.)+(?:com|net|org|io|co|il|ly|me|app|link|info|xyz|gg|to|us)\b(?:/\S*)?",
+    re.IGNORECASE,
+)
+
+
+def _clean(text: str) -> str:
+    """``text`` without links (a join link must not reach a group), on one line, capped."""
+    return " ".join(_LINK.sub(" ", text).split())[:MAX_SHOWN]
+
+
+def person_entry(
+    name: str, events: Sequence[CalendarEvent], zone: ZoneInfo, *, details: bool
+) -> dict[str, Any]:
+    """What the model reads of one member. With ``details``, their events that aren't private
+    and keep a title once cleaned are shown whole, the only place a title or place leaves this
+    module; every other event, and all of them without ``details``, is a busy block."""
+    if not details:
+        return {"name": name, "busy": busy_blocks(events, zone)}
+    shown: list[dict[str, object]] = []
+    hidden: list[CalendarEvent] = []
+    for event in sorted(events, key=lambda event: event.start):
+        title = _clean(event.title)
+        if event.private or not title:
+            hidden.append(event)
+        else:
+            clean = replace(event, title=title, location=_clean(event.location or "") or None)
+            shown.append(shown_event(clean, zone))
+    return {"name": name, "busy": busy_blocks(hidden, zone), "events": shown}
+
+
 def _name(tenant: Tenant | None) -> str:
     return (tenant.display_name if tenant else None) or SOMEONE
 
@@ -195,34 +236,53 @@ async def free_busy(
     *,
     calendar: CalendarProvider | None,
     now: datetime,
-) -> dict[str, object]:
+    channel: OutboundChannel | None = None,
+    jid: str = "",
+) -> dict[str, Any]:
     """Who is busy when in ``[start, end)``, among the group's members who okayed it; the
     others by name only: in ``not_shared``, and asked to okay it, or in ``stopped`` if they said
-    to stop. Times are in ``start``'s zone."""
+    to stop. Times are in ``start``'s zone. A member who opened their details gets them shown
+    only while the group's roster, asked of ``channel`` once, lists their phone; a member it
+    completely lacks is closed again, and any doubt leaves them busy-only."""
     zone = start.tzinfo
     assert isinstance(zone, ZoneInfo), "start carries its zone"
     async with db.system_session() as session:
         members = await group_tenants(session, group_id)
-    people: list[dict[str, object]] = []
+    people: list[dict[str, Any]] = []
     not_shared: list[str] = []
     stopped: list[str] = []
+    roster: GroupRoster | None = None
+    asked_roster = False
     for tenant_id, sharing in members:
         async with db.tenant_session(TenantId(tenant_id)) as session:
             tenant = await get_tenant(session, tenant_id)
             name = _name(tenant)
             account = await active_connection(session, tenant_id) if sharing else None
             asked = not sharing and await ask(session, tenant_id, group_id, now)
+            details = sharing and await details_on(session, tenant_id, group_id)
+            phone = await primary_phone(session, tenant_id) if details else None
         if not sharing:
             (not_shared if asked else stopped).append(name)
             continue
+        if details:
+            if not asked_roster:
+                asked_roster = True
+                reader: object = channel  # not every channel can list a group
+                if isinstance(reader, GroupReader):
+                    roster = await reader.group_roster(jid)
+            details = roster is not None and phone is not None and phone in roster.phones
+            if roster is not None and roster.complete and not details and phone is not None:
+                async with db.tenant_session(TenantId(tenant_id)) as session:
+                    await set_details(session, tenant_id, group_id, False)
+                log.info("group.details_closed", reason="left")
         theirs = TenantCalendar(
             db,
             tenant_id,
             provider=calendar,
             account=account,
-            live=tenant.live_calendar if tenant else False,
+            live=(tenant.live_calendar if tenant else False) or details,
         )
-        people.append({"name": name, "busy": busy_blocks(await theirs.events(start, end), zone)})
+        people.append(person_entry(name, await theirs.events(start, end), zone, details=details))
     return {"people": people, "not_shared": not_shared, "stopped": stopped}
 
 
@@ -265,7 +325,9 @@ async def _send_details(
         found: dict[tuple[str, datetime], CalendarEvent] = {}
         for start, end in windows:
             events = await theirs.events(start, end)
-            found.update(((event.external_id, event.start), event) for event in events)
+            found.update(
+                ((event.external_id, event.start), event) for event in events if not event.private
+            )
         ordered = sorted(found.values(), key=lambda event: event.start)
         lines += [_detail(name, event, zone, language) for event in ordered]
     if not lines:
@@ -429,7 +491,16 @@ async def _answer(
                 return window
             start, end, note = window
             windows.append((start, end))
-            result = await free_busy(db, turn.group_id, start, end, calendar=calendar, now=turn.now)
+            result = await free_busy(
+                db,
+                turn.group_id,
+                start,
+                end,
+                calendar=calendar,
+                now=turn.now,
+                channel=channel,
+                jid=turn.jid,
+            )
             if note:
                 result["note"] = note
             return json.dumps(result, ensure_ascii=False)
@@ -533,7 +604,9 @@ async def _answer(
 __all__ = [
     "DETAILS_KIND",
     "GROUP_TOOLS",
+    "MAX_SHOWN",
     "busy_blocks",
     "free_busy",
     "group_turn",
+    "person_entry",
 ]

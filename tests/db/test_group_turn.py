@@ -16,6 +16,7 @@ from uuid import UUID
 from zoneinfo import ZoneInfo
 
 import pytest
+from sqlalchemy import update
 
 from personal_organizer.core.errors import (
     CalendarProviderUnavailableError,
@@ -25,11 +26,17 @@ from personal_organizer.core.errors import (
 )
 from personal_organizer.core.types import TenantId
 from personal_organizer.db.engine import Database
+from personal_organizer.db.models.tenant import Event
 from personal_organizer.db.repositories import events as event_rows
 from personal_organizer.db.repositories import groups
-from personal_organizer.db.repositories.connections import bind_connection
+from personal_organizer.db.repositories.connections import (
+    active_connection,
+    bind_connection,
+    revoke_connection,
+)
 from personal_organizer.db.repositories.tenants import set_live_calendar, set_timezone
 from personal_organizer.interfaces.calendar import CalendarEvent
+from personal_organizer.interfaces.channel import GroupRoster
 from personal_organizer.messaging.groups import turn as turn_module
 from personal_organizer.messaging.groups.gate import GROUP_REPLY, REMI
 from personal_organizer.messaging.groups.turn import group_turn
@@ -38,6 +45,7 @@ from personal_organizer.messaging.onboarding_text import t
 from personal_organizer.providers.calendar.memory import InMemoryCalendar
 from personal_organizer.settings import Settings
 from tests.fixtures.channels import FakeOutbound, Spy, insert_inbox
+from tests.fixtures.connect import suspend
 from tests.fixtures.llm import NoLLM, ScriptedLLM, call, said
 from tests.fixtures.tenants import new_tenant
 
@@ -51,6 +59,7 @@ ZONE = ZoneInfo("Asia/Jerusalem")
 JID = "120363402106000001@g.us"
 DANA, NOA, EDEN = "+972501111111", "+972502222222", "+972503333333"
 STRANGER = "+972500000009"
+EVERYONE = GroupRoster("Family", frozenset({DANA, NOA, EDEN}), True)
 FRIDAY = call("who_is_free", start="2026-10-23T00:00", end="2026-10-24T00:00")
 
 
@@ -106,6 +115,7 @@ async def _member(
     *,
     sharing: bool,
     live: bool = True,
+    details: bool = False,
 ) -> UUID:
     """``live``: Remi reads their Google every time, which these tests' fake provider serves."""
     tenant_id = await new_tenant(db, phone=phone, status="active", step=None)
@@ -120,6 +130,8 @@ async def _member(
         await groups.touch_member(session, tenant_id, group_id, NOW)
         if sharing:  # a member starts out not sharing; set_sharing(False) is an explicit stop
             await groups.set_sharing(session, tenant_id, group_id, True)
+        if details:
+            await groups.set_details(session, tenant_id, group_id, True)
     return tenant_id
 
 
@@ -135,13 +147,14 @@ async def _say(
     channel: FakeOutbound | None = None,
     inbox_id: UUID | None = None,
     last_attempt: bool = False,
+    jid: str = JID,
 ) -> tuple[FakeOutbound, InMemoryCalendar]:
     """Run one message through the gate; pass ``channel`` and ``inbox_id`` to retry it."""
     calendar = calendar or Calendars(CALENDARS)
     channel = channel or FakeOutbound(name="gowa")
     if inbox_id is None:
         inbox_id = await insert_inbox(
-            conn, phone=phone, body=body, group_id=JID, sender_name="WhatsApp name", sent_at=NOW
+            conn, phone=phone, body=body, group_id=jid, sender_name="WhatsApp name", sent_at=NOW
         )
     await handle_inbound(
         inbox_id,
@@ -767,3 +780,229 @@ async def test_okay_needs_the_whole_name_asked(
     assert channel.sent == []
     assert (await _sharing(db, group))[dan] is False
     assert await _asked_now(db, group, dan)
+
+
+def _entry(llm: ScriptedLLM, name: str) -> dict[str, Any]:
+    entry: dict[str, Any] = next(p for p in _tool_result(llm)["people"] if p["name"] == name)
+    return entry
+
+
+async def _ask(
+    db: Database,
+    conn: Any,
+    settings: Settings,
+    *,
+    roster: GroupRoster | None = EVERYONE,
+    calendar: InMemoryCalendar | None = None,
+    jid: str = JID,
+) -> tuple[ScriptedLLM, FakeOutbound]:
+    llm = ScriptedLLM(said("", FRIDAY), said("Here is Friday."))
+    channel = FakeOutbound(name="gowa", roster=roster)
+    await _say(db, conn, settings, llm, channel=channel, calendar=calendar, jid=jid)
+    return llm, channel
+
+
+async def _opened_pair(db: Database, group: UUID) -> tuple[UUID, UUID]:
+    dana = await _member(db, group, DANA, "Dana", "ca_dana", sharing=True, details=True)
+    noa = await _member(db, group, NOA, "Noa", "ca_noa", sharing=True, details=True)
+    return dana, noa
+
+
+async def _is_on(db: Database, tenant_id: UUID, group: UUID) -> bool:
+    async with db.tenant_session(TenantId(tenant_id)) as session:
+        return await groups.details_on(session, tenant_id, group)
+
+
+async def test_member_who_didnt_opt_in_shows_no_title(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    await _member(db, group, DANA, "Dana", "ca_dana", sharing=True, details=True)
+    await _member(db, group, NOA, "Noa", "ca_noa", sharing=True)
+    llm, _ = await _ask(db, owner_conn, onboarding_settings)
+    assert "Board meeting" not in _seen(llm)
+    assert "Dentist" in _seen(llm)
+    assert "events" not in _entry(llm, "Noa")
+
+
+async def test_opened_events_read_under_their_owners_tenant(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    await _member(db, group, DANA, "Dana", None, sharing=True)
+    noa = await _member(db, group, NOA, "Noa", None, sharing=True, details=True)
+    async with db.tenant_session(TenantId(noa)) as session:
+        await event_rows.add_event(
+            session, noa, CalendarEvent("", "Noa's yoga", _at(14), _at(15)), source="remi"
+        )
+    llm, _ = await _ask(db, owner_conn, onboarding_settings)
+    assert _entry(llm, "Noa")["events"][0]["title"] == "Noa's yoga"
+
+
+async def test_opted_in_one_group_only(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    other = "120363402106000002@g.us"
+    async with db.system_session() as session:
+        b = await groups.ensure_group(session, channel="gowa", jid=other)
+        await groups.mark_served(session, b.id, NOW)
+    dana = await _member(db, group, DANA, "Dana", "ca_dana", sharing=True)
+    noa = await _member(db, group, NOA, "Noa", "ca_noa", sharing=True, details=True)
+    for member in (dana, noa):
+        async with db.tenant_session(TenantId(member)) as session:
+            await groups.touch_member(session, member, b.id, NOW)
+            await groups.set_sharing(session, member, b.id, True)
+    llm, _ = await _ask(db, owner_conn, onboarding_settings, jid=other)
+    assert "Board meeting" not in _seen(llm)
+
+
+async def test_private_event_stays_busy(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    await _member(db, group, DANA, "Dana", "ca_dana", sharing=True)
+    await _member(db, group, NOA, "Noa", "ca_noa", sharing=True, details=True)
+    secret = CalendarEvent("n1", "Board meeting", _at(14), _at(16), private=True)
+    llm, _ = await _ask(
+        db, owner_conn, onboarding_settings, calendar=Calendars({"ca_noa": [secret]})
+    )
+    assert "Board meeting" not in _seen(llm)
+    assert _entry(llm, "Noa")["busy"][0]["start"] == "2026-10-23T14:00"
+
+
+async def test_imported_before_the_change_stays_busy(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    await _member(db, group, DANA, "Dana", "ca_dana", sharing=True)
+    noa = await _member(db, group, NOA, "Noa", "ca_noa", sharing=True, details=True)
+    async with db.tenant_session(TenantId(noa)) as session:
+        await event_rows.upsert_google(
+            session, noa, CalendarEvent("n1", "Board meeting", _at(14), _at(16))
+        )
+        # As a row imported before #82 reads: Google's flag was never stored.
+        await session.execute(update(Event).values(private=None))
+    llm, _ = await _ask(db, owner_conn, onboarding_settings, calendar=NoaDown(CALENDARS))
+    assert "Board meeting" not in _seen(llm)
+
+
+async def test_opened_member_is_read_fresh(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    await _member(db, group, DANA, "Dana", "ca_dana", sharing=True)
+    await _member(db, group, NOA, "Noa", "ca_noa", sharing=True, details=True, live=False)
+    calendar = Calendars(CALENDARS)
+    await _ask(db, owner_conn, onboarding_settings, calendar=calendar)
+    assert "ca_noa" in [account for account, *_ in calendar.calls]
+
+
+async def test_a_link_in_a_title_never_reaches_the_model(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    await _member(db, group, DANA, "Dana", "ca_dana", sharing=True)
+    await _member(db, group, NOA, "Noa", "ca_noa", sharing=True, details=True)
+    linked = CalendarEvent(
+        "n1",
+        "Sync https://zoom.us/j/1 call",
+        _at(14),
+        _at(15),
+        location="https://zoom.us/j/1",
+        private=False,
+    )
+    llm, channel = await _ask(
+        db, owner_conn, onboarding_settings, calendar=Calendars({"ca_noa": [linked]})
+    )
+    assert "http" not in _seen(llm)
+    assert [m.body for m in channel.sent] == ["Here is Friday."]
+
+
+async def test_member_who_left_goes_back_to_busy(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    _, noa = await _opened_pair(db, group)
+    llm, _ = await _ask(
+        db, owner_conn, onboarding_settings, roster=GroupRoster("F", frozenset({DANA}), True)
+    )
+    assert "Board meeting" not in _seen(llm)
+    assert not await _is_on(db, noa, group)
+
+
+async def test_incomplete_roster_keeps_the_choice(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    _, noa = await _opened_pair(db, group)
+    llm, _ = await _ask(
+        db, owner_conn, onboarding_settings, roster=GroupRoster("F", frozenset({DANA}), False)
+    )
+    assert "Board meeting" not in _seen(llm)
+    assert await _is_on(db, noa, group)
+
+
+async def test_no_roster_means_busy_only(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    _, noa = await _opened_pair(db, group)
+    llm, channel = await _ask(db, owner_conn, onboarding_settings, roster=None)
+    assert "Board meeting" not in _seen(llm)
+    assert [m.body for m in channel.sent] == ["Here is Friday."]
+    assert await _is_on(db, noa, group)
+
+
+async def test_roster_asked_once_and_only_when_needed(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    await _opened_pair(db, group)
+    _, channel = await _ask(db, owner_conn, onboarding_settings)
+    assert len(channel.roster_calls) == 1
+
+
+async def test_roster_not_asked_when_nobody_opened(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    await _member(db, group, DANA, "Dana", "ca_dana", sharing=True)
+    _, channel = await _ask(db, owner_conn, onboarding_settings)
+    assert channel.roster_calls == []
+
+
+async def test_suspended_member_is_not_read(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    _, noa = await _opened_pair(db, group)
+    await suspend(db, noa)
+    llm, _ = await _ask(db, owner_conn, onboarding_settings)
+    assert [p["name"] for p in _tool_result(llm)["people"]] == ["Dana"]
+
+
+async def test_disconnected_member_keeps_only_native_titles(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    await _member(db, group, DANA, "Dana", "ca_dana", sharing=True)
+    noa = await _member(db, group, NOA, "Noa", "ca_noa", sharing=True, details=True)
+    async with db.tenant_session(TenantId(noa)) as session:
+        await event_rows.upsert_google(
+            session, noa, CalendarEvent("n1", "Google thing", _at(14), _at(15), private=False)
+        )
+        await event_rows.add_event(
+            session, noa, CalendarEvent("", "Remi thing", _at(16), _at(17)), source="remi"
+        )
+        connection = await active_connection(session, noa)
+        assert connection is not None
+        await revoke_connection(session, noa, connection.id)
+    llm, _ = await _ask(db, owner_conn, onboarding_settings)
+    assert [e["title"] for e in _entry(llm, "Noa")["events"]] == ["Remi thing"]
+    assert "Google thing" not in _seen(llm)
+
+
+async def test_private_event_is_not_in_granted_details(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    await _granted(db, group)
+    calendar = Calendars(
+        {
+            "ca_noa": [
+                CalendarEvent("n1", "Secret thing", _at(14), _at(15), private=True),
+                CalendarEvent("n2", "Lunch out", _at(12), _at(13), private=False),
+            ]
+        }
+    )
+    llm = ScriptedLLM(said("", FRIDAY), said("Noa is busy."))
+    channel, _ = await _say(db, owner_conn, onboarding_settings, llm, calendar=calendar)
+    private = channel.sent[0]
+    assert "Lunch out" in private.body
+    assert "Secret thing" not in private.body
