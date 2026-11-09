@@ -12,7 +12,7 @@ docs/plan-iteration-04.md). One retry layer keeps every attempt visible in
 slept. The price is ordering: a job waiting to retry keeps its lock, so the same sender's next
 message waits too, and the job holds the person's ``sender_lock`` while it retries. The backoff's
 waits add up to 126 s, and the seven attempts' own time comes on top: every agent turn offers typed
-tools, so with the model timing out each attempt takes 60 s (``AGENT__REQUEST_TIMEOUT_S``, no SDK
+tools, so with the model timing out each attempt takes 60 s (the web turn's fixed timeout, no SDK
 retries), 7 x 60 s plus 126 s, about nine minutes in all. On the last
 attempt an LLM or Composio that is still down is answered with the fixed texts instead, so the
 person never gets silence.
