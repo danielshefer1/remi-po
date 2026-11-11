@@ -897,8 +897,17 @@ async def test_gender_from_how_they_write_is_saved(
     assert gender(notes.notes) == expected, (notes.notes, reply)
 
 
-# "חולה" is written the same for a woman and a man.
-@pytest.mark.parametrize("text", ["מה יש לי מחר?", "אני חולה היום, מה יש לי?"])
+# Each is written the same for a woman and a man: "חולה", and past and future verbs (#96).
+@pytest.mark.parametrize(
+    "text",
+    [
+        "מה יש לי מחר?",
+        "אני חולה היום, מה יש לי?",
+        "הייתי חולה כל השבוע, מה יש לי מחר?",
+        "הלכתי לישון מאוחר, מה יש לי מחר בבוקר?",
+        "אני אגיע מאוחר היום, מה יש לי?",
+    ],
+)
 async def test_no_gender_cue_saves_nothing(text: str, llm: AnthropicLLM) -> None:
     reply, notes = await _remembered(text, "he", llm)
     assert not notes.notes, (notes.notes, reply)
