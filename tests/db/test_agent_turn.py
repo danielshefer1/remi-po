@@ -30,7 +30,11 @@ from personal_organizer.db.repositories import events as event_rows
 from personal_organizer.db.repositories.connections import bind_connection
 from personal_organizer.db.repositories.messages import record_inbound, record_outbound
 from personal_organizer.db.repositories.pending import current
-from personal_organizer.db.repositories.tenants import set_live_calendar, set_timezone
+from personal_organizer.db.repositories.tenants import (
+    set_google_sync,
+    set_live_calendar,
+    set_timezone,
+)
 from personal_organizer.interfaces.calendar import CalendarEvent
 from personal_organizer.interfaces.channel import OutboundMessage
 from personal_organizer.interfaces.llm import Message
@@ -81,9 +85,14 @@ async def db(onboarding_settings: Settings, owner_conn: Any) -> AsyncIterator[Da
 
 
 async def _active(
-    db: Database, *, connected: bool = True, live: bool = False, stored: bool = False
+    db: Database,
+    *,
+    connected: bool = True,
+    live: bool = False,
+    stored: bool = False,
+    sync: bool = True,
 ) -> TenantState:
-    """``stored`` keeps the dentist in Remi's calendar."""
+    """``stored`` keeps the dentist in Remi's calendar; ``sync`` applies only when connected."""
     tenant_id = await new_tenant(db, phone=IL_PHONE, language="he", status="active", step=None)
     async with db.tenant_session(TenantId(tenant_id)) as session:
         await set_timezone(session, tenant_id, "Asia/Jerusalem")
@@ -92,6 +101,8 @@ async def _active(
             await bind_connection(
                 session, tenant_id, connected_account_id="ca_bound", auth_config_id="ac_test"
             )
+            await set_google_sync(session, tenant_id, sync)
+            await set_live_calendar(session, tenant_id, live)  # sync off clears it
         if stored:
             await event_rows.add_event(session, tenant_id, DENTIST, source="remi")
     state = await load_state(db, tenant_id)
@@ -396,6 +407,17 @@ class TestLive:
         state = await load_state(db, tenant.id)
         assert state is not None
         assert state.live_calendar is on
+
+    @pytest.mark.parametrize("on", [True, False])
+    async def test_google_sync_on_and_off(self, db: Database, owner_conn: Any, on: bool) -> None:
+        tenant = await _active(db, sync=not on, live=not on)
+        llm = ScriptedLLM(said("", call("google_sync", on=on)), said("בסדר."))
+        await _turn(db, owner_conn, tenant, llm)
+        assert llm.calls[1][-1].content.startswith("ok: ")
+        state = await load_state(db, tenant.id)
+        assert state is not None
+        assert state.google_sync is on
+        assert state.live_calendar is False
 
     async def test_live_calendar_without_google_is_error(
         self, db: Database, owner_conn: Any

@@ -147,7 +147,9 @@ class TestActiveTenants:
         )
         memory = InMemoryTenantCalendar()
         # Anything but the in-memory calendar stands for a real one, which po-chat never writes.
-        calendar = memory if fake else cast(Any, SimpleNamespace(connected=True, live=False))
+        calendar = (
+            memory if fake else cast(Any, SimpleNamespace(connected=True, live=False, sync=False))
+        )
         dentist = call(
             "propose_event", title="Dentist", start="2026-10-13T09:00", end="2026-10-13T10:00"
         )
@@ -202,7 +204,7 @@ class TestActiveTenants:
         calendar = memory
         if not fake:
             # A real calendar is read like the fake one, but po-chat never writes to it.
-            calendar = cast(Any, SimpleNamespace(connected=False, live=False))
+            calendar = cast(Any, SimpleNamespace(connected=False, live=False, sync=False))
             calendar.events = memory.events
             calendar.series_rule = memory.series_rule
         llm = ScriptedLLM(

@@ -13,7 +13,8 @@ send an invite.
 
 **Calendar (#50).** Every member has a calendar, Remi's own, through a
 :class:`~personal_organizer.messaging.calendar.Calendar`; Google, when connected, is copied
-into it about every hour, or read live on every look once they ask for that (``live_calendar``).
+into it once, then synced both ways about every hour only once they ask (``google_sync``, #95),
+and read live on every look once they ask for that too (``live_calendar``).
 
 **Writes (D5).** ``propose_event`` writes nothing. :func:`respond` hands the checked
 event back in ``proposed`` and puts its summary and "Add this to your calendar?" under the
@@ -175,6 +176,7 @@ _SCHEDULE_TOOLS: Final = frozenset(
         "set_briefing",
         "set_timezone",
         "live_calendar",
+        "google_sync",
     }
 )
 NO_NOTES: Final = "error: notes are not available here"
@@ -208,6 +210,7 @@ _WRITE_TOOLS: Final = frozenset(
         "set_briefing",
         "set_timezone",
         "live_calendar",
+        "google_sync",
         "remember",
         "forget",
         "let_see_details",
@@ -371,10 +374,11 @@ TOOLS: Final[tuple[Mapping[str, Any], ...]] = (
                 "end": {"type": "string", "description": "Local end, e.g. 2026-10-13T19:00"},
                 "location": {"type": "string", "description": "Where, only if they said"},
                 "all_day": {"type": "boolean", "description": "True for an all-day event"},
-                "keep_out_of_google": {
+                "in_google": {
                     "type": "boolean",
                     "description": (
-                        "True only when they ask to keep it in your calendar and out of Google"
+                        "Only when they ask for this one: true to put it in Google too, false "
+                        "to keep it out of Google"
                     ),
                 },
                 "repeat": {
@@ -450,6 +454,20 @@ TOOLS: Final[tuple[Mapping[str, Any], ...]] = (
             "under your reply automatically."
         ),
         "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "google_sync",
+        "description": (
+            "Sync their calendar with Google both ways (on): Google's events copied in about "
+            "every hour, and what you add going into Google too. Off stops both, and reading live."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "on": {"type": "boolean", "description": "True to sync with Google, false to stop"},
+            },
+            "required": ["on"],
+        },
     },
     {
         "name": "live_calendar",
@@ -837,7 +855,7 @@ _HAND_OFF: Final = """
 steps), call hand_off first, before any other tool, with the reason closest to it."""
 
 
-def _calendar_line(*, connected: bool, live: bool) -> str:
+def _calendar_line(*, connected: bool, live: bool, sync: bool) -> str:
     if not connected:
         return (
             "You keep their calendar yourself: what they add is saved with you. They haven't "
@@ -845,12 +863,23 @@ def _calendar_line(*, connected: bool, live: bool) -> str:
             "works without it."
         )
     google = (
-        "You keep their calendar yourself, and they have connected their Google Calendar: what "
-        "you add is saved with you and also goes into Google, and Google's events are copied "
-        "into yours. Google is already connected, so never offer to connect it unless they ask "
-        "to reconnect. If they want an event kept out of Google, propose it with "
-        "keep_out_of_google: it stays only with you, and changing it never reaches Google. "
-        "Never say one stays out of Google unless you proposed it that way."
+        "You keep their calendar yourself, and they have connected their Google Calendar, so "
+        "never offer to connect it unless they ask to reconnect."
+    )
+    if not sync:
+        return (
+            f"{google} Its events were copied in once, when they connected. Since then nothing "
+            "goes between you and Google: what you add stays with you, and changes they make in "
+            "Google don't reach you. If they want to be in sync with Google, or a change they "
+            "made there seems missing, offer to sync, and call google_sync if they want it. To "
+            "put one event in Google too, propose it with in_google. Never say something went "
+            "into Google unless it was proposed that way."
+        )
+    google = (
+        f"{google} They asked to sync with Google: what you add is saved with you and also "
+        "goes into Google, and Google's events are copied in; google_sync with off stops it. To "
+        "keep one event out of Google, propose it with in_google false. Never say one stays out "
+        "of Google unless it was proposed that way."
     )
     if not live:
         return (
@@ -879,17 +908,18 @@ def agent_prompt(
     *,
     connected: bool = True,
     live: bool = False,
+    sync: bool = False,
     hand_off: bool = False,
 ) -> str:
     """The system prompt, for ``now`` already in the tenant's zone. ``outings`` are the
     one-line plans waiting for their answer, numbered from 1 in that order. ``connected`` is
-    whether Google is connected, ``live`` whether it is read live, ``hand_off`` whether the
-    model has that tool."""
+    whether Google is connected, ``live`` whether it is read live, ``sync`` whether they sync
+    with it (#95), ``hand_off`` whether the model has that tool."""
     waiting = "\n".join(f"{n}. {line}" for n, line in enumerate(outings, 1))
     week_start, week_end = week_of(now.date())
     return _PROMPT.format_map(
         {
-            "calendar": _calendar_line(connected=connected, live=live),
+            "calendar": _calendar_line(connected=connected, live=live, sync=sync),
             "weekday": WEEKDAYS[now.weekday()],
             "today": now.date().isoformat(),
             "clock": now.strftime("%H:%M"),
@@ -1004,15 +1034,15 @@ def check_event(arguments: Mapping[str, Any], zone: ZoneInfo) -> CalendarEvent |
     """
     title, location = arguments.get("title"), arguments.get("location")
     all_day = arguments.get("all_day", False)
-    remi_only = arguments.get("keep_out_of_google", False)
+    in_google = arguments.get("in_google")
     if not isinstance(title, str) or not title.strip() or len(title) > MAX_FIELD:
         return f"error: title is required, at most {MAX_FIELD} characters"
     if not isinstance(location, str | None) or len(location or "") > MAX_FIELD:
         return f"error: location is text, at most {MAX_FIELD} characters"
     if not isinstance(all_day, bool):
         return "error: all_day is true or false"
-    if not isinstance(remi_only, bool):
-        return "error: keep_out_of_google is true or false"
+    if not isinstance(in_google, bool | None):
+        return "error: in_google is true or false"
     start, end = _local(arguments.get("start"), zone), _local(arguments.get("end"), zone)
     if start is None or end is None:
         return f"error: {_TIME_FORMAT}"
@@ -1035,7 +1065,7 @@ def check_event(arguments: Mapping[str, Any], zone: ZoneInfo) -> CalendarEvent |
         start, end = first, end + (first - start)
     location = (location or "").strip() or None
     return CalendarEvent(
-        "", title.strip(), start, end, all_day, location, rule=rule, remi_only=remi_only
+        "", title.strip(), start, end, all_day, location, rule=rule, in_google=in_google
     )
 
 
@@ -1079,10 +1109,12 @@ def _repeat_line(rule: str, language: str) -> str:
 
 
 def event_summary(event: CalendarEvent, zone: ZoneInfo, language: str) -> str:
-    """The title, the local day and times, how it repeats, the location, and that it stays out
-    of Google when it does, one per line."""
+    """The title, the local day and times, how it repeats, the location, and where it goes when
+    that isn't their sync setting, one per line."""
     repeat = _repeat_line(event.rule, language) if event.rule else None
-    where = t("remi_only", language) if event.remi_only else None
+    where = None
+    if event.in_google is not None:
+        where = t("in_google" if event.in_google else "remi_only", language)
     lines = (event.title, _when(event, zone, language), repeat, event.location, where)
     return "\n".join(line for line in lines if line)
 
@@ -1288,7 +1320,7 @@ def _payload(events: Sequence[CalendarEvent], inbox_id: UUID) -> dict[str, Any]:
                 "all_day": event.all_day,
                 "location": event.location,
                 "rule": event.rule,
-                "remi_only": event.remi_only,
+                "in_google": event.in_google,
             }
             for event in events
         ],
@@ -1311,7 +1343,7 @@ def _stored(payload: Mapping[str, Any], zone: ZoneInfo) -> list[CalendarEvent]:
             item["all_day"],
             item["location"],
             rule=item.get("rule"),
-            remi_only=item.get("remi_only", False),
+            in_google=item.get("in_google"),
         )
         for item in payload.get("events", [payload])
     ]
@@ -1627,17 +1659,40 @@ async def forget_note(arguments: Mapping[str, Any], notes: Notes, listed: list[U
 
 
 async def switch_live(arguments: Mapping[str, Any], schedule: Schedule, calendar: Calendar) -> str:
-    """``live_calendar``: only with Google connected."""
+    """``live_calendar``: only with Google connected and synced."""
     if not calendar.connected:
         return NO_GOOGLE
     on = arguments.get("on")
     if not isinstance(on, bool):
         return "error: on is true or false"
+    if on and not calendar.sync:
+        return (
+            "error: not turned on: they don't sync with Google; offer to, and call google_sync "
+            "if they want it"
+        )
     await schedule.set_live_calendar(on)
     calendar.live = on  # this turn's later reads follow it
     if on:
         return "ok: from now on their Google Calendar is checked live every time"
     return "ok: back to copying their Google Calendar about every hour"
+
+
+async def switch_sync(arguments: Mapping[str, Any], schedule: Schedule, calendar: Calendar) -> str:
+    """``google_sync``: only with Google connected. Off stops reading it live too."""
+    if not calendar.connected:
+        return NO_GOOGLE
+    on = arguments.get("on")
+    if not isinstance(on, bool):
+        return "error: on is true or false"
+    await schedule.set_google_sync(on)
+    calendar.sync = on  # this turn's later adds follow it
+    calendar.live = calendar.live and on
+    if on:
+        return (
+            "ok: synced from now on: what you add goes into Google too, and Google's events "
+            "come in about every hour"
+        )
+    return "ok: no longer synced: what you add stays with you, and Google's changes don't come in"
 
 
 async def answer_outing(
@@ -1782,6 +1837,8 @@ async def respond(
                 return await move_zone(arguments, schedule, tenant.language)
             if name == "live_calendar":
                 return await switch_live(arguments, schedule, calendar)
+            if name == "google_sync":
+                return await switch_sync(arguments, schedule, calendar)
             return await move_briefing(arguments, schedule)
         if name == "connect_calendar":
             if connect_link is None:
@@ -1852,8 +1909,8 @@ async def respond(
             event = check_event(arguments, zone)
             if isinstance(event, str):
                 return event
-            if not calendar.connected:  # it stays with Remi anyway; the summary needn't say
-                event = replace(event, remi_only=False)
+            if not calendar.connected or event.in_google == calendar.sync:
+                event = replace(event, in_google=None)  # as their setting: the summary needn't say
             # The confirm must arrive as one whole text, or a "yes" would confirm what they
             # never saw: one that would outgrow it is refused, as past the cap.
             if len(_confirm_text([*found, event], zone, tenant.language)) > WHATSAPP_TEXT_LIMIT:
@@ -1886,6 +1943,7 @@ async def respond(
                 [outing_line(poll, zone, tenant.language) for poll in waiting],
                 connected=calendar.connected,
                 live=calendar.live,
+                sync=calendar.sync,
                 hand_off=strong is not None,
             ),
             tools=tools if strong is None else (*tools, HAND_OFF_TOOL),
@@ -2018,7 +2076,12 @@ async def agent_turn(
         action = await pending.current(session, tenant.id, now=now)
         claimed_here = await pending.claimed_by(session, tenant.id) == row.id
     theirs = TenantCalendar(
-        db, tenant.id, provider=calendar, account=account, live=tenant.live_calendar
+        db,
+        tenant.id,
+        provider=calendar,
+        account=account,
+        live=tenant.live_calendar,
+        sync=tenant.google_sync,
     )
     zone = ZoneInfo(tenant.timezone or "UTC")
     if claimed_here:
@@ -2217,6 +2280,7 @@ __all__ = [
     "respond",
     "shown_event",
     "switch_live",
+    "switch_sync",
     "web_tools",
     "week_of",
 ]

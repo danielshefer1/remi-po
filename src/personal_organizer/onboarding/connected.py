@@ -48,7 +48,8 @@ async def announce_connected(
     logged and finishes the job, because a retry would find the same thing. Re-raises
     ``TransientChannelError`` from :func:`send_once`, which the task's retry strategy retries.
     Their Google events are imported first, so "your events are in" is true; after a failed
-    import (logged, and retried by the hourly sync) it says they will be in within the hour.
+    import (logged) it says so: the hourly sync, which would retry it, runs only once they ask
+    to sync (#95).
     """
     try:
         imported = await sync_calendar(

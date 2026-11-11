@@ -1137,35 +1137,94 @@ async def test_no_google_add_then_list(
     assert "http" not in reply.lower(), reply
 
 
-KEEP_OUT = [
-    ("en", "add dentist tomorrow at 10, just in your calendar, not in Google", True),
-    ("he", "תוסיף רופא שיניים מחר ב-10, רק אצלך ביומן ולא בגוגל", True),
-    ("en", "add dentist tomorrow at 10", False),
-    ("he", "תוסיף רופא שיניים מחר ב-10", False),
+ONE_EVENT = [
+    (True, "en", "add dentist tomorrow at 10, just in your calendar, not in Google", False),
+    (True, "he", "תוסיף רופא שיניים מחר ב-10, רק אצלך ביומן ולא בגוגל", False),
+    (False, "en", "add dentist tomorrow at 10 and put it in my Google Calendar too", True),
+    (False, "he", "תוסיף רופא שיניים מחר ב-10, ותכניס את זה גם ליומן גוגל שלי", True),
+    (False, "en", "add dentist tomorrow at 10", None),
+    (True, "he", "תוסיף רופא שיניים מחר ב-10", None),
 ]
 
 
 @pytest.mark.parametrize(
-    ("language", "text", "remi_only"), KEEP_OUT, ids=[t for _, t, _ in KEEP_OUT]
+    ("sync", "language", "text", "in_google"), ONE_EVENT, ids=[t for _, _, t, _ in ONE_EVENT]
 )
-async def test_keep_out_of_google(
-    language: str, text: str, remi_only: bool, llm: AnthropicLLM
+async def test_where_one_event_goes(
+    sync: bool, language: str, text: str, in_google: bool | None, llm: AnthropicLLM
 ) -> None:
-    """#95: kept out of Google only when asked in their words; an ordinary add still goes there.
-    That a kept-out event is then changed without Google is code's, tested in tests/db."""
+    """#95: one event goes against their sync setting only when they ask for that one, and a
+    one-off never turns the setting itself on or off. That a kept-out event is then changed
+    without Google is code's, tested in tests/db."""
     proposed: list[CalendarEvent] = []
+    schedule = InMemorySchedule(NOW)
+    schedule.google_sync = sync
     reply = await respond(
         [],
         text,
         _member(language),
         llm=llm,
-        calendar=InMemoryTenantCalendar(_events(ZoneInfo(JERUSALEM)), connected=True),
+        calendar=InMemoryTenantCalendar(_events(ZoneInfo(JERUSALEM)), connected=True, sync=sync),
         now=NOW,
         proposed=proposed,
+        schedule=schedule,
     )
     assert len(proposed) == 1, reply
-    assert proposed[0].remi_only is remi_only, reply
+    assert proposed[0].in_google is in_google, reply
+    assert schedule.google_sync is sync, reply
     assert detect_language(reply) == language, reply
+
+
+SYNC_ASKS = [
+    ("en", "keep my calendar in sync with Google from now on", False, True),
+    ("he", "מעכשיו תסנכרן את היומן שלי עם גוגל", False, True),
+    ("en", "stop syncing with Google", True, False),
+    ("he", "תפסיק לסנכרן עם גוגל", True, False),
+]
+
+
+@pytest.mark.parametrize(
+    ("language", "text", "before", "after"), SYNC_ASKS, ids=[t for _, t, _, _ in SYNC_ASKS]
+)
+async def test_sync_only_when_asked(
+    language: str, text: str, before: bool, after: bool, llm: AnthropicLLM
+) -> None:
+    """#95: syncing with Google is a standing choice, made in their words."""
+    calendar = InMemoryTenantCalendar(_events(ZoneInfo(JERUSALEM)), connected=True, sync=before)
+    schedule = InMemorySchedule(NOW)
+    schedule.google_sync = before
+    reply = await respond(
+        [], text, _member(language), llm=llm, calendar=calendar, now=NOW, schedule=schedule
+    )
+    assert schedule.google_sync is after, reply
+    assert "_" not in reply, reply
+    assert detect_language(reply) == language, reply
+
+
+@pytest.mark.parametrize(
+    ("language", "text", "agree"),
+    [
+        ("en", "I just moved my team sync in Google, why don't you see it?", "yes please"),
+        ("he", "הרגע הזזתי את הפגישה עם הצוות ביומן של גוגל, למה אתה לא רואה את זה?", "כן, בבקשה"),
+    ],
+    ids=["en", "he"],
+)
+async def test_unsynced_google_offers_sync(
+    language: str, text: str, agree: str, llm: AnthropicLLM
+) -> None:
+    """#95: not synced, a Google change can't show; the offer is to sync, and only their yes
+    turns it on. Checked by what a plain yes leads to, as the live offer is."""
+    calendar = InMemoryTenantCalendar(_events(ZoneInfo(JERUSALEM)), connected=True)
+    schedule = InMemorySchedule(NOW)
+    tenant = _member(language)
+    first = await respond([], text, tenant, llm=llm, calendar=calendar, now=NOW, schedule=schedule)
+    assert first.strip(), "an empty reply falls back to the fixed text"
+    assert schedule.google_sync is False, first
+    history = (Message("user", text), Message("assistant", first))
+    reply = await respond(
+        history, agree, tenant, llm=llm, calendar=calendar, now=NOW, schedule=schedule
+    )
+    assert schedule.google_sync is True, (first, reply)
 
 
 #: Talk of connecting Google, in either language.
@@ -1261,8 +1320,9 @@ async def test_stale_google_offers_live(
 
     The offer is checked by what it leads to, not by its words: answered with a plain yes, it
     must turn live reading on."""
-    calendar = InMemoryTenantCalendar(_events(ZoneInfo(JERUSALEM)), connected=True)
+    calendar = InMemoryTenantCalendar(_events(ZoneInfo(JERUSALEM)), connected=True, sync=True)
     schedule = InMemorySchedule(NOW)
+    schedule.google_sync = True
     tenant = _member(language)
     first = await respond([], text, tenant, llm=llm, calendar=calendar, now=NOW, schedule=schedule)
     assert first.strip(), "an empty reply falls back to the fixed text"
@@ -1294,8 +1354,9 @@ SAYS_LIVE = re.compile(
     ids=["en", "he"],
 )
 async def test_asks_for_live_turns_it_on(language: str, text: str, llm: AnthropicLLM) -> None:
-    calendar = InMemoryTenantCalendar(_events(ZoneInfo(JERUSALEM)), connected=True)
+    calendar = InMemoryTenantCalendar(_events(ZoneInfo(JERUSALEM)), connected=True, sync=True)
     schedule = InMemorySchedule(NOW)
+    schedule.google_sync = True
     reply = await respond(
         [], text, _member(language), llm=llm, calendar=calendar, now=NOW, schedule=schedule
     )

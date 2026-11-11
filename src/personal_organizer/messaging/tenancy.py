@@ -74,6 +74,8 @@ class TenantState:
     briefing_at: time | None = None
     #: Google is read on every look, not only the hourly copy (#50).
     live_calendar: bool = False
+    #: Synced with Google both ways, which they asked for (#95).
+    google_sync: bool = False
 
 
 def network_for(channel: str) -> str:
@@ -186,6 +188,7 @@ async def load_state(db: Database, tenant_id: UUID) -> TenantState | None:
         timezone=tenant.timezone,
         briefing_at=tenant.briefing_at,
         live_calendar=tenant.live_calendar,
+        google_sync=tenant.google_sync,
         first_message=first,
     )
 

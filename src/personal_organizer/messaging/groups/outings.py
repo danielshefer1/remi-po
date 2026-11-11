@@ -186,7 +186,9 @@ async def handle_vote(
         zone = ZoneInfo(tenant.timezone or "UTC")
         text = await add_event(
             outing_event(poll, zone),
-            calendar=TenantCalendar(db, tenant_id, provider=calendar, account=account),
+            calendar=TenantCalendar(
+                db, tenant_id, provider=calendar, account=account, sync=tenant.google_sync
+            ),
             zone=zone,
             language=tenant.language,
         )

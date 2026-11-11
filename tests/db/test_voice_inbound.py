@@ -23,7 +23,7 @@ from personal_organizer.db.engine import Database
 from personal_organizer.db.repositories import pending
 from personal_organizer.db.repositories.connections import bind_connection
 from personal_organizer.db.repositories.messages import record_inbound
-from personal_organizer.db.repositories.tenants import set_timezone
+from personal_organizer.db.repositories.tenants import set_google_sync, set_timezone
 from personal_organizer.messaging import inbound
 from personal_organizer.messaging.agent import agent_turn
 from personal_organizer.messaging.inbound import handle_inbound
@@ -61,6 +61,7 @@ async def _active(db: Database, *, connected: bool = True) -> TenantState:
             await bind_connection(
                 session, tenant_id, connected_account_id="ca_bound", auth_config_id="ac_test"
             )
+            await set_google_sync(session, tenant_id, True)
     state = await load_state(db, tenant_id)
     assert state is not None
     return state

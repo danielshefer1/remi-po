@@ -80,6 +80,8 @@ class Tenant(Base, TenantRoot):
     display_name: Mapped[str | None] = mapped_column(Text)
     #: Read Google on every look instead of the hourly copy. Issue #50.
     live_calendar: Mapped[bool] = mapped_column(server_default=text("false"))
+    #: Copy Google in hourly and add to Google too; only once they ask. Issue #95.
+    google_sync: Mapped[bool] = mapped_column(server_default=text("false"))
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(server_default=func.now())
 

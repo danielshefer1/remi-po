@@ -34,7 +34,12 @@ from personal_organizer.db.repositories.connections import (
     bind_connection,
     revoke_connection,
 )
-from personal_organizer.db.repositories.tenants import get_tenant, set_live_calendar, set_timezone
+from personal_organizer.db.repositories.tenants import (
+    get_tenant,
+    set_google_sync,
+    set_live_calendar,
+    set_timezone,
+)
 from personal_organizer.interfaces.calendar import CalendarEvent
 from personal_organizer.interfaces.channel import GroupRoster
 from personal_organizer.interfaces.llm import ToolCall
@@ -118,8 +123,10 @@ async def _member(
     sharing: bool,
     live: bool = True,
     details: bool = False,
+    sync: bool = True,
 ) -> UUID:
-    """``live``: Remi reads their Google every time, which these tests' fake provider serves."""
+    """``live``: Remi reads their Google every time, which these tests' fake provider serves;
+    ``sync``: they sync with Google (#95)."""
     tenant_id = await new_tenant(db, phone=phone, status="active", step=None)
     async with db.tenant_session(TenantId(tenant_id)) as session:
         await set_timezone(session, tenant_id, "Asia/Jerusalem")
@@ -127,6 +134,7 @@ async def _member(
             await bind_connection(
                 session, tenant_id, connected_account_id=account, auth_config_id="ac_test"
             )
+        await set_google_sync(session, tenant_id, sync)
         await set_live_calendar(session, tenant_id, live)
         await groups.set_display_name(session, tenant_id, name)
         await groups.touch_member(session, tenant_id, group_id, NOW)
@@ -892,6 +900,18 @@ async def test_opened_member_is_read_fresh(
     calendar = Calendars(CALENDARS)
     await _ask(db, owner_conn, onboarding_settings, calendar=calendar)
     assert "ca_noa" in [account for account, *_ in calendar.calls]
+
+
+async def test_opened_member_not_synced_is_not_read_from_google(
+    db: Database, owner_conn: Any, onboarding_settings: Settings, group: UUID
+) -> None:
+    await _member(db, group, DANA, "Dana", "ca_dana", sharing=True)
+    await _member(
+        db, group, NOA, "Noa", "ca_noa", sharing=True, details=True, live=False, sync=False
+    )
+    calendar = Calendars(CALENDARS)
+    await _ask(db, owner_conn, onboarding_settings, calendar=calendar)
+    assert "ca_noa" not in [account for account, *_ in calendar.calls]
 
 
 async def test_a_link_in_a_title_never_reaches_the_model(

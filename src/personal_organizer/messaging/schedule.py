@@ -27,6 +27,7 @@ class Schedule(Protocol):
     async def set_briefing(self, at: time | None) -> None: ...
     async def set_timezone(self, zone: str) -> None: ...
     async def set_live_calendar(self, on: bool) -> None: ...
+    async def set_google_sync(self, on: bool) -> None: ...
 
 
 class TenantSchedule:
@@ -78,10 +79,14 @@ class TenantSchedule:
         async with self._db.tenant_session(TenantId(self._tenant_id)) as session:
             await tenants.set_live_calendar(session, self._tenant_id, on)
 
+    async def set_google_sync(self, on: bool) -> None:
+        async with self._db.tenant_session(TenantId(self._tenant_id)) as session:
+            await tenants.set_google_sync(session, self._tenant_id, on)
+
 
 class InMemorySchedule:
     """The same behaviour in a list. ``reminders``, ``briefing_at``, ``timezone`` and
-    ``live_calendar`` are there to assert on."""
+    ``live_calendar`` and ``google_sync`` are there to assert on."""
 
     def __init__(self, now: datetime) -> None:
         self.now = now
@@ -89,6 +94,7 @@ class InMemorySchedule:
         self.briefing_at: time | None = time(7, 30)
         self.timezone: str | None = None
         self.live_calendar = False
+        self.google_sync = False
 
     async def add(self, text: str, due_at: datetime, rule: str | None = None) -> None:
         same = ("pending", text, due_at, rule)
@@ -141,6 +147,10 @@ class InMemorySchedule:
 
     async def set_live_calendar(self, on: bool) -> None:
         self.live_calendar = on
+
+    async def set_google_sync(self, on: bool) -> None:
+        self.google_sync = on
+        self.live_calendar = self.live_calendar and on
 
 
 __all__ = ["InMemorySchedule", "Schedule", "TenantSchedule"]
