@@ -330,6 +330,9 @@ class TestRespond:
         live = agent_prompt("he", now, live=True)
         assert "They haven't connected Google" in alone
         assert "about every hour" in hourly
+        assert "also goes into Google" in hourly
+        assert "optional" in alone
+        assert "optional" not in hourly
         assert "call live_calendar if they want it" in hourly
         assert "check their Google Calendar live every time" in live
         assert "live_calendar with off" in live
