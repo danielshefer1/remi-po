@@ -70,6 +70,12 @@ async def set_live_calendar(session: AsyncSession, tenant_id: UUID, on: bool) ->
     await _update(session, tenant_id, live_calendar=on)
 
 
+async def set_google_sync(session: AsyncSession, tenant_id: UUID, on: bool) -> None:
+    """Sync with Google both ways (``True``); off also stops reading it live."""
+    values = {"google_sync": on} if on else {"google_sync": False, "live_calendar": False}
+    await _update(session, tenant_id, **values)
+
+
 async def set_language(session: AsyncSession, tenant_id: UUID, language: str) -> None:
     """The person asked for the other language (D10). ``enrol``'s detection is the default."""
     await _update(session, tenant_id, language=language)
@@ -127,6 +133,7 @@ __all__ = [
     "get_tenant",
     "primary_phone",
     "resolve_tenant",
+    "set_google_sync",
     "set_language",
     "set_live_calendar",
     "set_onboarding_step",

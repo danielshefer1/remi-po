@@ -23,7 +23,7 @@ from personal_organizer.db.models.tenant import GroupMember, PollAnswer
 from personal_organizer.db.repositories import events as event_rows
 from personal_organizer.db.repositories import groups
 from personal_organizer.db.repositories.connections import bind_connection
-from personal_organizer.db.repositories.tenants import set_timezone
+from personal_organizer.db.repositories.tenants import set_google_sync, set_timezone
 from personal_organizer.interfaces.calendar import CalendarEvent
 from personal_organizer.messaging.groups.turn import group_turn
 from personal_organizer.messaging.inbound import handle_inbound
@@ -88,6 +88,7 @@ async def _member(db: Database, group_id: UUID, phone: str, name: str, account: 
             await bind_connection(
                 session, tenant_id, connected_account_id=account, auth_config_id="ac_test"
             )
+            await set_google_sync(session, tenant_id, True)
         await groups.set_display_name(session, tenant_id, name)
         await groups.touch_member(session, tenant_id, group_id, NOW)
         await groups.set_sharing(session, tenant_id, group_id, True)

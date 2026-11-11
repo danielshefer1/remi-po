@@ -317,7 +317,8 @@ async def free_busy(
             tenant_id,
             provider=calendar,
             account=account,
-            live=(tenant.live_calendar if tenant else False) or details,
+            # Fresh for a group that sees details, but never read from a Google they don't sync.
+            live=bool(tenant and (tenant.live_calendar or (details and tenant.google_sync))),
         )
         people.append(person_entry(name, await theirs.events(start, end), zone, details=details))
     return {"people": people, "not_shared": not_shared, "stopped": stopped}

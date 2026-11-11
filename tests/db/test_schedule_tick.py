@@ -22,6 +22,7 @@ from personal_organizer.db.engine import Database
 from personal_organizer.db.repositories import groups, reminders
 from personal_organizer.db.repositories.connections import bind_connection
 from personal_organizer.db.repositories.outings import create_poll
+from personal_organizer.db.repositories.tenants import set_google_sync
 from personal_organizer.interfaces.calendar import CalendarEvent
 from personal_organizer.messaging.briefing import briefing_key
 from personal_organizer.messaging.reminders import reminder_key
@@ -266,6 +267,7 @@ async def _connected(db: Database, phone: str) -> UUID:
         await bind_connection(
             session, tenant_id, connected_account_id=f"ca_{phone}", auth_config_id="ac"
         )
+        await set_google_sync(session, tenant_id, True)
     return tenant_id
 
 

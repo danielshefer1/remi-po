@@ -1,4 +1,5 @@
-"""Copy a member's Google events into their calendar (issue #50): on connect, then hourly."""
+"""Copy a member's Google events into their calendar (issue #50): on connect, then hourly once
+they sync with Google (#95; ``due_syncs`` picks only those)."""
 
 from __future__ import annotations
 

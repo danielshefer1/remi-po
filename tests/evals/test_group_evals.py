@@ -768,6 +768,7 @@ async def test_tell_the_family_group(text: str, language: str, llm: AnthropicLLM
 @_both("stop telling the family group what I've got on", "תפסיק לספר לקבוצה של המשפחה מה יש לי")
 async def test_stop_telling_the_group(text: str, language: str, llm: AnthropicLLM) -> None:
     grants, _, reply = await _private_turn(text, language, llm)
+    assert len(grants.shown) == 1, (vars(grants), reply)
     [(_, on)] = grants.shown
     assert on is False
     _checked(reply, language)

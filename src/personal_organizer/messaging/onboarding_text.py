@@ -54,13 +54,13 @@ _EN: Final = {
         "soon, but I can always send you a new one:\n{url}"
     ),
     "all_set": (
-        "Your Google Calendar is connected, and your events are in! I'll keep them in sync "
-        "about every hour. If you'd rather I check Google live every time, just say so."
+        "Your Google Calendar is connected, and your events are in! From here, what you add stays "
+        "with me and I leave Google alone. If you'd like me to keep the two in sync, just say so."
     ),
     "all_set_pending": (
-        "Your Google Calendar is connected! Your events should be in within the hour, and after "
-        "that I'll keep them in sync about every hour. If you'd rather I check Google live every "
-        "time, just say so."
+        "Your Google Calendar is connected, but I couldn't bring your events in just yet. If "
+        "you'd like me to keep it in sync with Google, just say so and they'll be in within the "
+        "hour."
     ),
     "agent_unavailable": "Sorry, I couldn't answer just now. Try me again in a minute.",
     "calendar_not_connected": (
@@ -72,6 +72,8 @@ _EN: Final = {
         "and I'll send you a link to reconnect it."
     ),
     "event_added": "Done, it's in your calendar:\n{summary}",
+    "remi_only": "Only in my calendar, not in Google",
+    "in_google": "In Google too",
     "event_cancelled": "No problem, I didn't add it.",
     "proposal_closed": (
         "That suggestion is no longer open, so I didn't add anything. Tell me again what to add."
@@ -165,12 +167,12 @@ _HE: Final = {
         "כאן מתי שנוח. הקישור עובד פעם אחת ותוקפו קצר, אבל תמיד אפשר לבקש ממני חדש:\n{url}"
     ),
     "all_set": (
-        "יומן Google שלך מחובר, והאירועים שלך כבר אצלי! אני מעדכן אותם מ-Google בערך פעם "
-        "בשעה. אם עדיף שאבדוק ישר ב-Google בכל פעם, מספיק לבקש."
+        "יומן Google שלך מחובר, והאירועים שלך כבר אצלי! מעכשיו מה שמוסיפים נשאר אצלי, ואני "
+        "לא נוגע ב-Google. אם בא לך שאסנכרן בין השניים, מספיק לבקש."
     ),
     "all_set_pending": (
-        "יומן Google שלך מחובר! האירועים שלך אמורים להגיע אליי תוך שעה, ומשם אעדכן אותם "
-        "מ-Google פעם בשעה בערך. אם עדיף שאבדוק ישר ב-Google בכל פעם, מספיק לבקש."
+        "יומן Google שלך מחובר, אבל עוד לא הצלחתי להביא את האירועים שלך. אם בא לך שאסנכרן "
+        "אותו עם Google, מספיק לבקש, והם יגיעו תוך שעה."
     ),
     "agent_unavailable": "סליחה, לא הצלחתי לענות כרגע. אפשר לנסות שוב בעוד דקה.",
     "calendar_not_connected": (
@@ -182,6 +184,8 @@ _HE: Final = {
         "ואשלח קישור לחבר אותו מחדש."
     ),
     "event_added": "בוצע, זה ביומן:\n{summary}",
+    "remi_only": "רק ביומן שלי, לא בגוגל",
+    "in_google": "גם ב-Google",
     "event_cancelled": "אין בעיה, לא הוספתי.",
     "proposal_closed": "ההצעה הזו כבר לא בתוקף, אז לא הוספתי כלום. אפשר לבקש שוב מה להוסיף.",
     "event_not_added": (

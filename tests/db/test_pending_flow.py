@@ -29,7 +29,7 @@ from personal_organizer.db.engine import Database
 from personal_organizer.db.repositories import events as event_rows
 from personal_organizer.db.repositories import pending
 from personal_organizer.db.repositories.connections import bind_connection
-from personal_organizer.db.repositories.tenants import set_timezone
+from personal_organizer.db.repositories.tenants import set_google_sync, set_timezone
 from personal_organizer.interfaces.calendar import CalendarEvent
 from personal_organizer.interfaces.channel import OutboundMessage
 from personal_organizer.messaging.agent import (
@@ -109,7 +109,7 @@ async def db(onboarding_settings: Settings, owner_conn: Any) -> AsyncIterator[Da
         await database.dispose()
 
 
-async def _active(db: Database, *, connected: bool = True) -> TenantState:
+async def _active(db: Database, *, connected: bool = True, sync: bool = True) -> TenantState:
     tenant_id = await new_tenant(db, phone=IL_PHONE, language="he", status="active", step=None)
     async with db.tenant_session(TenantId(tenant_id)) as session:
         await set_timezone(session, tenant_id, "Asia/Jerusalem")
@@ -117,6 +117,7 @@ async def _active(db: Database, *, connected: bool = True) -> TenantState:
             await bind_connection(
                 session, tenant_id, connected_account_id="ca_bound", auth_config_id="ac_test"
             )
+            await set_google_sync(session, tenant_id, sync)
     state = await load_state(db, tenant_id)
     assert state is not None
     return state
@@ -200,6 +201,7 @@ class TestPropose:
                     "all_day": False,
                     "location": None,
                     "rule": None,
+                    "in_google": None,
                 }
             ],
             "proposed_by": str(inbox_id),
@@ -344,6 +346,78 @@ class TestConfirm:
             )
         assert event.title == "רופא שיניים"
         assert event.start.isoformat() == "2026-10-13T06:00:00+00:00"
+
+    async def test_kept_out_of_google_is_said_and_stored_as_remis(
+        self, db: Database, owner_conn: Any
+    ) -> None:
+        """#95: synced, but asked to keep it out of Google: the confirm says so, and the yes
+        stores it as Remi's own without a call to Google."""
+        tenant = await _active(db)
+        calendar = InMemoryCalendar()
+        only_here = call(
+            "propose_event",
+            title="רופא שיניים",
+            start="2026-10-13T09:00",
+            end="2026-10-13T10:00",
+            in_google=False,
+        )
+        llm = ScriptedLLM(said("", only_here), said("להוסיף?"))
+        _, channel, _ = await _turn(db, owner_conn, tenant, llm, calendar, "רק אצלך, לא בגוגל")
+        summary = f"{SUMMARY}\n{t('remi_only', 'he')}"
+        assert [m.body for m in channel.sent] == ["להוסיף?", confirm_prompt(summary, "he")]
+        _, channel, _ = await _turn(db, owner_conn, tenant, _yes(), calendar)
+        assert [m.body for m in channel.sent] == [t("event_added", "he", summary=summary)]
+        assert calendar.events == []  # nothing went to Google
+        async with db.tenant_session(TenantId(tenant.id)) as session:
+            [event] = await event_rows.events_between(
+                session, tenant.id, NOW, NOW + timedelta(days=2)
+            )
+            row = await event_rows.find_row(session, tenant.id, event.external_id)
+        assert row is not None
+        assert row.source == "remi"
+
+    @pytest.mark.parametrize(
+        ("connected", "sync", "in_google"),
+        [(False, False, True), (True, True, True), (True, False, False)],
+        ids=["no-google", "synced-anyway", "unsynced-anyway"],
+    )
+    async def test_a_choice_that_changes_nothing_says_nothing(
+        self, db: Database, owner_conn: Any, connected: bool, sync: bool, in_google: bool
+    ) -> None:
+        tenant = await _active(db, connected=connected, sync=sync)
+        asked = call(
+            "propose_event",
+            title="רופא שיניים",
+            start="2026-10-13T09:00",
+            end="2026-10-13T10:00",
+            in_google=in_google,
+        )
+        llm = ScriptedLLM(said("", asked), said("להוסיף?"))
+        _, channel, _ = await _turn(db, owner_conn, tenant, llm, InMemoryCalendar(), "תוסיף")
+        assert [m.body for m in channel.sent] == ["להוסיף?", CHOICE]
+
+    async def test_not_synced_stays_out_of_google_unless_asked(
+        self, db: Database, owner_conn: Any
+    ) -> None:
+        """#95: connected, sync off (the default): an ordinary add stays with Remi; one asked
+        for in Google goes there, and its confirm says so."""
+        tenant = await _active(db, sync=False)
+        calendar = InMemoryCalendar()
+        await _propose(db, owner_conn, tenant, calendar)
+        await _turn(db, owner_conn, tenant, _yes(), calendar)
+        assert calendar.events == []
+        to_google = call(
+            "propose_event",
+            title="פגישה",
+            start="2026-10-13T12:00",
+            end="2026-10-13T13:00",
+            in_google=True,
+        )
+        llm = ScriptedLLM(said("", to_google), said("להוסיף?"))
+        _, channel, _ = await _turn(db, owner_conn, tenant, llm, calendar, "גם לגוגל")
+        assert t("in_google", "he") in channel.sent[-1].body
+        await _turn(db, owner_conn, tenant, _yes(), calendar)
+        assert [e.title for e in calendar.events] == ["פגישה"]
 
     async def test_a_confirmed_google_event_is_stored_once(
         self, db: Database, owner_conn: Any

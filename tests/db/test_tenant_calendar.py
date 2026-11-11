@@ -62,10 +62,15 @@ async def _tenant(db: Database, *, connected: bool) -> tuple[UUID, Any]:
 
 
 async def _calendar(
-    db: Database, google: InMemoryCalendar, *, connected: bool = True, live: bool = False
+    db: Database,
+    google: InMemoryCalendar,
+    *,
+    connected: bool = True,
+    live: bool = False,
+    sync: bool = True,
 ) -> TenantCalendar:
     tenant_id, account = await _tenant(db, connected=connected)
-    return TenantCalendar(db, tenant_id, provider=google, account=account, live=live)
+    return TenantCalendar(db, tenant_id, provider=google, account=account, live=live, sync=sync)
 
 
 async def test_native_only_when_not_connected(db: Database) -> None:
@@ -125,6 +130,38 @@ async def test_add_while_connected_is_not_duplicated_by_refresh(db: Database) ->
     assert [e.title for e in await cal.events(*WIDE)] == ["Lunch"]
     await cal.refresh(*WIDE)
     assert [e.title for e in await cal.events(*WIDE)] == ["Lunch"]
+
+
+@pytest.mark.parametrize(
+    ("sync", "in_google"), [(False, None), (True, False)], ids=["not-synced", "kept-out"]
+)
+async def test_remi_only_never_reaches_google(
+    db: Database, sync: bool, in_google: bool | None
+) -> None:
+    """#95: connected but not synced, or kept out while synced: stored as Remi's own, left
+    alone by refreshes and live reads, and changed and removed without a call to Google."""
+    google = InMemoryCalendar([_event("In Google", 4, "g1")])
+    cal = await _calendar(db, google, live=True, sync=sync)
+    added = await cal.add(replace(_event("Mine"), in_google=in_google))
+    assert [e.external_id for e in google.events] == ["g1"]
+    assert await cal.refresh(*WIDE) is True
+    assert [e.title for e in await cal.events(*WIDE)] == ["Mine", "In Google"]
+    [mine, _] = await cal.events(*WIDE)
+    assert mine.external_id == added.external_id
+    await cal.change(EventChange(mine, title="Still mine"))
+    [mine, _] = await cal.events(*WIDE)
+    assert mine.title == "Still mine"
+    await cal.change(EventChange(mine, delete=True))
+    assert [e.title for e in await cal.events(*WIDE)] == ["In Google"]
+    assert google.writes == []
+    assert [e.title for e in google.events] == ["In Google"]
+
+
+async def test_one_put_in_google_while_not_synced(db: Database) -> None:
+    google = InMemoryCalendar()
+    cal = await _calendar(db, google, sync=False)
+    added = await cal.add(replace(_event("Lunch"), in_google=True))
+    assert [e.external_id for e in google.events] == [added.external_id]
 
 
 async def test_add_failure_reraises_and_stores_nothing(db: Database) -> None:

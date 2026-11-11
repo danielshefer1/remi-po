@@ -2,8 +2,10 @@
 
 ``TenantCalendar`` is the worker's, over Postgres. ``InMemoryTenantCalendar`` is ``po-chat``'s
 and the tests' (no database). With Google connected, ``add`` writes to Google first and keeps
-the copy it returns; ``events`` reads the stored copy, refreshing it from Google first only
-when ``live``. ``change`` edits or deletes Remi's own rows in place, and Google's events in
+the copy it returns, but only while ``sync`` is on (#95: they asked to sync with Google) or the
+event says ``in_google``; otherwise it is stored as Remi's own. ``events`` reads the stored
+copy, refreshing it from Google first only when ``live``. ``change``
+edits or deletes Remi's own rows in place, and Google's events in
 Google (never only the copy), then refreshes the copy.
 """
 
@@ -48,6 +50,7 @@ log = structlog.get_logger(__name__)
 class Calendar(Protocol):
     connected: bool
     live: bool
+    sync: bool
 
     async def events(self, start: datetime, end: datetime) -> Sequence[CalendarEvent]: ...
     async def add(self, event: CalendarEvent) -> CalendarEvent: ...
@@ -77,6 +80,7 @@ class TenantCalendar:
         provider: CalendarProvider | None,
         account: CalendarConnection | None,
         live: bool = False,
+        sync: bool = False,
     ) -> None:
         self._db = db
         self._tenant_id = tenant_id
@@ -84,6 +88,7 @@ class TenantCalendar:
         self._account = account
         self.connected = provider is not None and account is not None
         self.live = live
+        self.sync = sync
 
     async def refresh(
         self, start: datetime, end: datetime, *, raise_not_connected: bool = False
@@ -128,10 +133,13 @@ class TenantCalendar:
             return await event_rows.events_between(session, self._tenant_id, start, end, zone=zone)
 
     async def add(self, event: CalendarEvent) -> CalendarEvent:
-        """Add ``event``. Provider errors (not added to Google) are re-raised."""
-        if self._provider is None or self._account is None:
+        """Add ``event``, to Google too when connected and syncing, or the event says so.
+        Provider errors (not added to Google) are re-raised."""
+        google = self.sync if event.in_google is None else event.in_google
+        if self._provider is None or self._account is None or not google:
             async with self._db.tenant_session(TenantId(self._tenant_id)) as session:
-                return await event_rows.add_event(session, self._tenant_id, event, source="remi")
+                stored = await event_rows.add_event(session, self._tenant_id, event, source="remi")
+            return replace(stored, in_google=event.in_google)  # so the "added" line says so
         # CalendarProviderUnavailableError / RejectedError propagate: nothing was added.
         stored = await self._provider.create_event(
             self._account.connected_account_id, self._account.composio_user_id, event
@@ -300,10 +308,12 @@ class InMemoryTenantCalendar:
         *,
         connected: bool = False,
         live: bool = False,
+        sync: bool = False,
     ) -> None:
         self._events = list(events)
         self.connected = connected
         self.live = live
+        self.sync = sync
         self.added: list[CalendarEvent] = []
         self.changed: list[EventChange] = []
         self.calls: list[tuple[datetime, datetime]] = []

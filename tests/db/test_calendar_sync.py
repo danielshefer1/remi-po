@@ -22,7 +22,7 @@ from personal_organizer.db.repositories.connections import (
     bind_connection,
     revoke_connection,
 )
-from personal_organizer.db.repositories.tenants import set_timezone
+from personal_organizer.db.repositories.tenants import set_google_sync, set_timezone
 from personal_organizer.interfaces.calendar import ACCOUNT_ACTIVE, CalendarEvent, ConnectedAccount
 from personal_organizer.messaging.calendar_sync import sync_calendar
 from personal_organizer.providers.calendar.memory import InMemoryCalendar
@@ -57,6 +57,7 @@ async def _tenant(db: Database, zone: str = "UTC") -> UUID:
     async with db.tenant_session(TenantId(tenant_id)) as session:
         await set_timezone(session, tenant_id, zone)
         await bind_connection(session, tenant_id, connected_account_id="ca_1", auth_config_id="ac")
+        await set_google_sync(session, tenant_id, True)
     return tenant_id
 
 
@@ -100,6 +101,17 @@ async def test_sync_failure_keeps_rows(db: Database) -> None:
     # synced_at means "last tried": not retried every minute, but again in an hour.
     assert await _due(db, later + timedelta(minutes=1)) == []
     assert await _due(db, later + timedelta(hours=1, minutes=1)) == [tenant_id]
+
+
+async def test_not_synced_imports_on_connect_only(db: Database) -> None:
+    """#95: the connect import runs regardless; the hourly one only once they sync."""
+    tenant_id = await _tenant(db)
+    async with db.tenant_session(TenantId(tenant_id)) as session:
+        await set_google_sync(session, tenant_id, False)
+    google = InMemoryCalendar([_event("Imported", 3, "g1")])
+    assert await sync_calendar(tenant_id, db=db, provider=google, now=NOW)
+    assert [e.title for e in await _stored(db, tenant_id)] == ["Imported"]
+    assert await _due(db, NOW + timedelta(hours=2)) == []
 
 
 async def test_sync_unexpected_error_still_stamps(db: Database) -> None:

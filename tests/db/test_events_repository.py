@@ -19,7 +19,11 @@ from personal_organizer.db.engine import Database
 from personal_organizer.db.models.tenant import Event
 from personal_organizer.db.repositories import events
 from personal_organizer.db.repositories.connections import bind_connection
-from personal_organizer.db.repositories.tenants import get_tenant, set_live_calendar
+from personal_organizer.db.repositories.tenants import (
+    get_tenant,
+    set_google_sync,
+    set_live_calendar,
+)
 from personal_organizer.interfaces.calendar import CalendarEvent, EventChange
 from personal_organizer.settings import Settings
 from personal_organizer.worker.tasks.channel import INBOUND_RETRY
@@ -122,6 +126,9 @@ async def test_due_syncs_returns_ids_only(db: Database) -> None:
         async with db.system_session() as session:
             return await events.due_syncs(session, NOW)
 
+    assert await due() == []  # connected, but not synced (#95)
+    async with db.tenant_session(TenantId(tenant_id)) as session:
+        await set_google_sync(session, tenant_id, True)
     assert await due() == [tenant_id]  # never synced
     assert no_connection not in await due()
     async with db.tenant_session(TenantId(tenant_id)) as session:

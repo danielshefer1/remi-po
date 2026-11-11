@@ -37,6 +37,7 @@ from personal_organizer.messaging.agent import (
     MAX_PROPOSALS,
     MAX_WINDOW,
     NO_FILES,
+    NO_GOOGLE,
     REFUSED_AFTER_WEB,
     TOOLS,
     ProposedChange,
@@ -326,13 +327,17 @@ class TestRespond:
     def test_the_prompt_says_what_google_does(self) -> None:
         now = datetime(2026, 10, 12, 12, 0, tzinfo=JERUSALEM)
         alone = agent_prompt("he", now, connected=False)
-        hourly = agent_prompt("he", now)
-        live = agent_prompt("he", now, live=True)
+        unsynced = agent_prompt("he", now)
+        hourly = agent_prompt("he", now, sync=True)
+        live = agent_prompt("he", now, live=True, sync=True)
         assert "They haven't connected Google" in alone
-        assert "about every hour" in hourly
-        assert "also goes into Google" in hourly
         assert "optional" in alone
         assert "optional" not in hourly
+        # #95: connected, syncing only once they ask.
+        assert "copied in once" in unsynced
+        assert "call google_sync if they want it" in unsynced
+        assert "about every hour" in hourly
+        assert "also goes into Google" in hourly
         assert "call live_calendar if they want it" in hourly
         assert "check their Google Calendar live every time" in live
         assert "live_calendar with off" in live
@@ -366,8 +371,39 @@ class TestLive:
             schedule=schedule,
         )
 
+    async def test_live_needs_sync(self) -> None:
+        calendar, schedule = _calendar(), InMemorySchedule(NOW)
+        llm = ScriptedLLM(said("", call("live_calendar", on=True)), said("ok"))
+        await self._respond(llm, calendar, schedule)
+        assert "call google_sync" in llm.calls[1][-1].content
+        assert (schedule.live_calendar, calendar.live) == (False, False)
+
+    async def test_sync_on_then_off_stops_live(self) -> None:
+        calendar, schedule = _calendar(), InMemorySchedule(NOW)
+        on = ScriptedLLM(
+            said("", call("google_sync", on=True)),
+            said("", call("live_calendar", on=True)),
+            said("ok"),
+        )
+        await self._respond(on, calendar, schedule)
+        assert (schedule.google_sync, calendar.sync) == (True, True)
+        assert (schedule.live_calendar, calendar.live) == (True, True)
+        off = ScriptedLLM(said("", call("google_sync", on=False)), said("ok"))
+        await self._respond(off, calendar, schedule)
+        assert off.calls[1][-1].content.startswith("ok: ")
+        assert (schedule.google_sync, calendar.sync) == (False, False)
+        assert (schedule.live_calendar, calendar.live) == (False, False)
+
+    async def test_sync_without_google_is_error(self) -> None:
+        calendar, schedule = _calendar(connected=False), InMemorySchedule(NOW)
+        llm = ScriptedLLM(said("", call("google_sync", on=True)), said("ok"))
+        await self._respond(llm, calendar, schedule)
+        assert llm.calls[1][-1].content == NO_GOOGLE
+        assert schedule.google_sync is False
+
     async def test_live_calendar_on_and_off(self) -> None:
         calendar, schedule = _calendar(), InMemorySchedule(NOW)
+        calendar.sync = schedule.google_sync = True
         on = ScriptedLLM(said("", call("live_calendar", on=True)), said("ok"))
         await self._respond(on, calendar, schedule)
         assert on.calls[1][-1].content.startswith("ok: ")

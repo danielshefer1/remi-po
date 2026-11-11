@@ -239,6 +239,7 @@ async def _agent(
             sample_events(datetime.now(UTC), zone),
             connected=account is not None,
             live=tenant.live_calendar,
+            sync=tenant.google_sync,
         )
         _out("(fake calendar: a few made-up events from today on)")
     else:
@@ -249,7 +250,12 @@ async def _agent(
             else None
         )
         calendar = TenantCalendar(
-            db, tenant.id, provider=provider, account=account, live=tenant.live_calendar
+            db,
+            tenant.id,
+            provider=provider,
+            account=account,
+            live=tenant.live_calendar,
+            sync=tenant.google_sync,
         )
 
     async def connect_link() -> str:
