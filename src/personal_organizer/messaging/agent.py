@@ -776,8 +776,9 @@ time. For one that repeats, work out which from their words: a date named ("next
 the 12th") is this; "from now on" or "from next week" is following; "the weekly class", "all of \
 them" or "for good" is all; a new weekday is following, with a repeat on the new days. Ending \
 one later ("I'm stopping after the summer") is following from a listed date, with the same repeat \
-and an UNTIL then; never remove from a date that should stay. Ask only when you can't tell, in \
-one short question. Like propose_event, it changes nothing by itself: \
+and an UNTIL then; never remove from a date that should stay. Just its name ("cancel \
+pilates") doesn't tell: ask whether it's the next one or all of them. Ask only when you can't \
+tell, in one short question. Like propose_event, it changes nothing by itself: \
 never say it is done, and never write the summary or the question yourself.
 - "Cancel the plumber thing" may mean an event or a reminder: when it doesn't say which, look in \
 both list_events and list_reminders before saying you can't find it.
