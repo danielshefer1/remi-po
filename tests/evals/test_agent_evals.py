@@ -1169,6 +1169,52 @@ async def test_no_google_no_nagging(language: str, text: str, llm: AnthropicLLM)
     assert detect_language(reply) == language, reply
 
 
+#: Remi saying it keeps the calendar itself, in either language.
+REMI_KEEPS = re.compile(
+    r"\bwith me\b|\bI (keep|save|store|hold)\b|\bmy (own )?calendar\b|\bmine\b|"
+    r"\bmy own\b|אצלי|אני (שומר|שומרת|מחזיק)|יומן (משלי|שלי)|ביומן שלי|משלי",
+    re.I,
+)
+#: Offering to connect Google ("connected" itself is fine), in either language.
+OFFERS_CONNECT = re.compile(r"\bconnect(ing)?\b(?!ed)|\blink\b|לחבר|תחבר|קישור", re.I)
+WHERE_SAVED = [
+    ("en", "Where do my events get saved?"),
+    ("he", "איפה האירועים שלי נשמרים?"),
+    ("en", "Do you have your own calendar, or only Google?"),
+    ("he", "יש לך יומן משלך, או רק גוגל?"),
+]
+
+
+@pytest.mark.parametrize("connected", [False, True], ids=["alone", "google"])
+@pytest.mark.parametrize(("language", "text"), WHERE_SAVED, ids=[t for _, t in WHERE_SAVED])
+async def test_where_events_are_saved(
+    language: str, text: str, connected: bool, llm: AnthropicLLM
+) -> None:
+    """#94: Remi keeps a calendar of its own; with Google connected, what it adds goes there
+    too, and a connected person is never offered connecting as if they hadn't."""
+    links: list[str] = []
+
+    async def connect_link() -> str:
+        links.append("sent")
+        return "https://po.example/connect/TOKEN"
+
+    reply = await respond(
+        [],
+        text,
+        _member(language),
+        llm=llm,
+        calendar=InMemoryTenantCalendar(_events(ZoneInfo(JERUSALEM)), connected=connected),
+        now=NOW,
+        connect_link=connect_link,
+    )
+    assert REMI_KEEPS.search(reply), reply
+    assert detect_language(reply) == language, reply
+    if connected:
+        assert re.search(r"google|גוגל", reply, re.I), reply
+        assert links == [], reply
+        assert not OFFERS_CONNECT.search(reply), reply
+
+
 @pytest.mark.parametrize(
     ("language", "text", "agree"),
     [
