@@ -2,8 +2,9 @@
 
 ``TenantCalendar`` is the worker's, over Postgres. ``InMemoryTenantCalendar`` is ``po-chat``'s
 and the tests' (no database). With Google connected, ``add`` writes to Google first and keeps
-the copy it returns; ``events`` reads the stored copy, refreshing it from Google first only
-when ``live``. ``change`` edits or deletes Remi's own rows in place, and Google's events in
+the copy it returns, unless the event is ``remi_only`` (#95), which is stored as Remi's own;
+``events`` reads the stored copy, refreshing it from Google first only when ``live``. ``change``
+edits or deletes Remi's own rows in place, and Google's events in
 Google (never only the copy), then refreshes the copy.
 """
 
@@ -128,10 +129,12 @@ class TenantCalendar:
             return await event_rows.events_between(session, self._tenant_id, start, end, zone=zone)
 
     async def add(self, event: CalendarEvent) -> CalendarEvent:
-        """Add ``event``. Provider errors (not added to Google) are re-raised."""
-        if self._provider is None or self._account is None:
+        """Add ``event``, to Google too when connected and it isn't ``remi_only``. Provider
+        errors (not added to Google) are re-raised."""
+        if self._provider is None or self._account is None or event.remi_only:
             async with self._db.tenant_session(TenantId(self._tenant_id)) as session:
-                return await event_rows.add_event(session, self._tenant_id, event, source="remi")
+                stored = await event_rows.add_event(session, self._tenant_id, event, source="remi")
+            return replace(stored, remi_only=event.remi_only)  # so the "added" line says so
         # CalendarProviderUnavailableError / RejectedError propagate: nothing was added.
         stored = await self._provider.create_event(
             self._account.connected_account_id, self._account.composio_user_id, event

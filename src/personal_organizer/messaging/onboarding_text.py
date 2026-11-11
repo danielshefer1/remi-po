@@ -72,6 +72,7 @@ _EN: Final = {
         "and I'll send you a link to reconnect it."
     ),
     "event_added": "Done, it's in your calendar:\n{summary}",
+    "remi_only": "Only in my calendar, not in Google",
     "event_cancelled": "No problem, I didn't add it.",
     "proposal_closed": (
         "That suggestion is no longer open, so I didn't add anything. Tell me again what to add."
@@ -182,6 +183,7 @@ _HE: Final = {
         "ואשלח קישור לחבר אותו מחדש."
     ),
     "event_added": "בוצע, זה ביומן:\n{summary}",
+    "remi_only": "רק ביומן שלי, לא בגוגל",
     "event_cancelled": "אין בעיה, לא הוספתי.",
     "proposal_closed": "ההצעה הזו כבר לא בתוקף, אז לא הוספתי כלום. אפשר לבקש שוב מה להוסיף.",
     "event_not_added": (

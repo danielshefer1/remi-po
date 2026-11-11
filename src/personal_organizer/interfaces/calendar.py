@@ -11,6 +11,8 @@ callers.
 (anything but ``default``/``public``), and nothing else. Anyone can
 send an invite into your calendar, so its description and attendees never reach a prompt.
 ``link`` is the provider's page for the event, for the confirmation of one just created.
+``remi_only`` asks for a new event to be kept in Remi's calendar even with Google connected
+(#95); it matters only to ``add``.
 """
 
 from __future__ import annotations
@@ -41,6 +43,7 @@ class CalendarEvent:
     series_id: str | None = None
     private: bool = False
     invited: bool = False
+    remi_only: bool = False
 
 
 Which = Literal["this", "following", "all"]

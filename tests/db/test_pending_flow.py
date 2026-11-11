@@ -200,6 +200,7 @@ class TestPropose:
                     "all_day": False,
                     "location": None,
                     "rule": None,
+                    "remi_only": False,
                 }
             ],
             "proposed_by": str(inbox_id),
@@ -344,6 +345,50 @@ class TestConfirm:
             )
         assert event.title == "רופא שיניים"
         assert event.start.isoformat() == "2026-10-13T06:00:00+00:00"
+
+    async def test_kept_out_of_google_is_said_and_stored_as_remis(
+        self, db: Database, owner_conn: Any
+    ) -> None:
+        """#95: connected, but asked to keep it out of Google: the confirm says so, and the
+        yes stores it as Remi's own without a call to Google."""
+        tenant = await _active(db)
+        calendar = InMemoryCalendar()
+        only_here = call(
+            "propose_event",
+            title="רופא שיניים",
+            start="2026-10-13T09:00",
+            end="2026-10-13T10:00",
+            keep_out_of_google=True,
+        )
+        llm = ScriptedLLM(said("", only_here), said("להוסיף?"))
+        _, channel, _ = await _turn(db, owner_conn, tenant, llm, calendar, "רק אצלך, לא בגוגל")
+        summary = f"{SUMMARY}\n{t('remi_only', 'he')}"
+        assert [m.body for m in channel.sent] == ["להוסיף?", confirm_prompt(summary, "he")]
+        _, channel, _ = await _turn(db, owner_conn, tenant, _yes(), calendar)
+        assert [m.body for m in channel.sent] == [t("event_added", "he", summary=summary)]
+        assert calendar.events == []  # nothing went to Google
+        async with db.tenant_session(TenantId(tenant.id)) as session:
+            [event] = await event_rows.events_between(
+                session, tenant.id, NOW, NOW + timedelta(days=2)
+            )
+            row = await event_rows.find_row(session, tenant.id, event.external_id)
+        assert row is not None
+        assert row.source == "remi"
+
+    async def test_kept_out_of_google_says_nothing_without_google(
+        self, db: Database, owner_conn: Any
+    ) -> None:
+        tenant = await _active(db, connected=False)
+        only_here = call(
+            "propose_event",
+            title="רופא שיניים",
+            start="2026-10-13T09:00",
+            end="2026-10-13T10:00",
+            keep_out_of_google=True,
+        )
+        llm = ScriptedLLM(said("", only_here), said("להוסיף?"))
+        _, channel, _ = await _turn(db, owner_conn, tenant, llm, InMemoryCalendar(), "תוסיף")
+        assert [m.body for m in channel.sent] == ["להוסיף?", CHOICE]
 
     async def test_a_confirmed_google_event_is_stored_once(
         self, db: Database, owner_conn: Any

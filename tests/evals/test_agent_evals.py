@@ -1137,6 +1137,37 @@ async def test_no_google_add_then_list(
     assert "http" not in reply.lower(), reply
 
 
+KEEP_OUT = [
+    ("en", "add dentist tomorrow at 10, just in your calendar, not in Google", True),
+    ("he", "תוסיף רופא שיניים מחר ב-10, רק אצלך ביומן ולא בגוגל", True),
+    ("en", "add dentist tomorrow at 10", False),
+    ("he", "תוסיף רופא שיניים מחר ב-10", False),
+]
+
+
+@pytest.mark.parametrize(
+    ("language", "text", "remi_only"), KEEP_OUT, ids=[t for _, t, _ in KEEP_OUT]
+)
+async def test_keep_out_of_google(
+    language: str, text: str, remi_only: bool, llm: AnthropicLLM
+) -> None:
+    """#95: kept out of Google only when asked in their words; an ordinary add still goes there.
+    That a kept-out event is then changed without Google is code's, tested in tests/db."""
+    proposed: list[CalendarEvent] = []
+    reply = await respond(
+        [],
+        text,
+        _member(language),
+        llm=llm,
+        calendar=InMemoryTenantCalendar(_events(ZoneInfo(JERUSALEM)), connected=True),
+        now=NOW,
+        proposed=proposed,
+    )
+    assert len(proposed) == 1, reply
+    assert proposed[0].remi_only is remi_only, reply
+    assert detect_language(reply) == language, reply
+
+
 #: Talk of connecting Google, in either language.
 CONNECT_TALK = re.compile(r"google|גוגל|connect|לחבר|חיבור|מחובר", re.I)
 

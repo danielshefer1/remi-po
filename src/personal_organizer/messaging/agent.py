@@ -371,6 +371,12 @@ TOOLS: Final[tuple[Mapping[str, Any], ...]] = (
                 "end": {"type": "string", "description": "Local end, e.g. 2026-10-13T19:00"},
                 "location": {"type": "string", "description": "Where, only if they said"},
                 "all_day": {"type": "boolean", "description": "True for an all-day event"},
+                "keep_out_of_google": {
+                    "type": "boolean",
+                    "description": (
+                        "True only when they ask to keep it in your calendar and out of Google"
+                    ),
+                },
                 "repeat": {
                     "type": "string",
                     "description": (
@@ -842,7 +848,9 @@ def _calendar_line(*, connected: bool, live: bool) -> str:
         "You keep their calendar yourself, and they have connected their Google Calendar: what "
         "you add is saved with you and also goes into Google, and Google's events are copied "
         "into yours. Google is already connected, so never offer to connect it unless they ask "
-        "to reconnect."
+        "to reconnect. If they want an event kept out of Google, propose it with "
+        "keep_out_of_google: it stays only with you, and changing it never reaches Google. "
+        "Never say one stays out of Google unless you proposed it that way."
     )
     if not live:
         return (
@@ -996,12 +1004,15 @@ def check_event(arguments: Mapping[str, Any], zone: ZoneInfo) -> CalendarEvent |
     """
     title, location = arguments.get("title"), arguments.get("location")
     all_day = arguments.get("all_day", False)
+    remi_only = arguments.get("keep_out_of_google", False)
     if not isinstance(title, str) or not title.strip() or len(title) > MAX_FIELD:
         return f"error: title is required, at most {MAX_FIELD} characters"
     if not isinstance(location, str | None) or len(location or "") > MAX_FIELD:
         return f"error: location is text, at most {MAX_FIELD} characters"
     if not isinstance(all_day, bool):
         return "error: all_day is true or false"
+    if not isinstance(remi_only, bool):
+        return "error: keep_out_of_google is true or false"
     start, end = _local(arguments.get("start"), zone), _local(arguments.get("end"), zone)
     if start is None or end is None:
         return f"error: {_TIME_FORMAT}"
@@ -1023,7 +1034,9 @@ def check_event(arguments: Mapping[str, Any], zone: ZoneInfo) -> CalendarEvent |
         # add a Tuesday; it becomes the Wednesday, wall times kept.
         start, end = first, end + (first - start)
     location = (location or "").strip() or None
-    return CalendarEvent("", title.strip(), start, end, all_day, location, rule=rule)
+    return CalendarEvent(
+        "", title.strip(), start, end, all_day, location, rule=rule, remi_only=remi_only
+    )
 
 
 def day_label(when: date, language: str) -> str:
@@ -1066,9 +1079,11 @@ def _repeat_line(rule: str, language: str) -> str:
 
 
 def event_summary(event: CalendarEvent, zone: ZoneInfo, language: str) -> str:
-    """The title, the local day and times, how it repeats, and the location, one per line."""
+    """The title, the local day and times, how it repeats, the location, and that it stays out
+    of Google when it does, one per line."""
     repeat = _repeat_line(event.rule, language) if event.rule else None
-    lines = (event.title, _when(event, zone, language), repeat, event.location)
+    where = t("remi_only", language) if event.remi_only else None
+    lines = (event.title, _when(event, zone, language), repeat, event.location, where)
     return "\n".join(line for line in lines if line)
 
 
@@ -1273,6 +1288,7 @@ def _payload(events: Sequence[CalendarEvent], inbox_id: UUID) -> dict[str, Any]:
                 "all_day": event.all_day,
                 "location": event.location,
                 "rule": event.rule,
+                "remi_only": event.remi_only,
             }
             for event in events
         ],
@@ -1295,6 +1311,7 @@ def _stored(payload: Mapping[str, Any], zone: ZoneInfo) -> list[CalendarEvent]:
             item["all_day"],
             item["location"],
             rule=item.get("rule"),
+            remi_only=item.get("remi_only", False),
         )
         for item in payload.get("events", [payload])
     ]
@@ -1835,6 +1852,8 @@ async def respond(
             event = check_event(arguments, zone)
             if isinstance(event, str):
                 return event
+            if not calendar.connected:  # it stays with Remi anyway; the summary needn't say
+                event = replace(event, remi_only=False)
             # The confirm must arrive as one whole text, or a "yes" would confirm what they
             # never saw: one that would outgrow it is refused, as past the cap.
             if len(_confirm_text([*found, event], zone, tenant.language)) > WHATSAPP_TEXT_LIMIT:
