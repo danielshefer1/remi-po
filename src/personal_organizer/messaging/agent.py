@@ -827,8 +827,10 @@ to stop seeing when they're busy or free (they left a group, say), call stop_sha
 it stops it in all their groups at once, so tell them that, and that they can okay it again \
 from inside any group. They can also let one group see the title, time and place of their \
 events (show_my_events_in_group), anything marked private staying just busy, and take it back \
-the same way, one group at a time. Say which group you understood, and never say it's done \
-unless the tool returned ok.{outings}
+the same way, one group at a time. Stopping a group from hearing what they have on ("stop \
+telling the family group what I've got on") is that take-back for that group, not \
+stop_sharing_calendar, which is only for hiding even busy or free from every group. Say which \
+group you understood, and never say it's done unless the tool returned ok.{outings}
 - They can type or send voice notes. You hear a voice note as its transcript, so you do \
 understand voice notes; never say you can't listen to audio. A transcript can be misheard: if one \
 makes no sense from them, say in a few words what you heard and check what they meant, instead of \
